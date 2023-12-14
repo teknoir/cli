@@ -1,0 +1,54 @@
+# https://probot.github.io/apps/settings/
+# GitHub Repository Settings Example for Teknoir Teams
+repository:
+  name: cli # Replace with the actual repository name
+  description: This repo contain a collection of CLI tools for Teknoir. # Brief description of the repository
+  homepage: https://teknoir.cloud # Replace with the relevant URL
+  topics: edge, app, cli # Relevant topics/tags for the repository
+  private: true # Private or public repository
+  has_issues: true # Enable or disable issue tracking
+  has_projects: true # Enable or disable GitHub projects
+  has_wiki: true # Enable or disable the wiki
+  has_downloads: true # Enable or disable downloads
+  default_branch: main # Default branch of the repository
+  allow_squash_merge: true # Enable or disable squash merging
+  allow_merge_commit: true # Enable or disable merge commits
+  allow_rebase_merge: true # Enable or disable rebase merging
+  delete_branch_on_merge: false # Auto-delete branch after merging
+  enable_automated_security_fixes: true # Enable automated security fixes
+  enable_vulnerability_alerts: true # Enable vulnerability alerts
+
+# The permissions:
+# * `pull` - can pull, but not push to or administer this repository.
+# * `push` - can pull and push, but not administer this repository.
+# * `admin` - can pull, push and administer this repository.
+# * `maintain` - Recommended for project managers who need to manage the repository without access to sensitive or destructive actions.
+# * `triage` - Recommended for contributors who need to proactively manage issues and pull requests without write access.
+# Teams at Teknoir:
+#   ai-development, dashboards, design, edge, mlops, platform
+teams:
+  - name: platform # Replace with the relevant team name
+    permission: maintain # Set appropriate permission level
+  - name: ai-development # Replace with the relevant team name
+    permission: push # Set appropriate permission level
+  - name: design # Replace with the relevant team name
+    permission: push # Set appropriate permission level
+  - name: edge # Replace with the relevant team name
+    permission: push # Set appropriate permission level
+  - name: mlops # Replace with the relevant team name
+    permission: push # Set appropriate permission level
+
+branches:
+  - name: main
+    protection:
+      required_pull_request_reviews:
+        required_approving_review_count: 1
+        dismiss_stale_reviews: true
+        require_code_owner_reviews: false
+        dismissal_restrictions:
+          users: []
+          teams: []
+      required_status_checks: null
+      enforce_admins: false
+      required_linear_history: false
+      restrictions: null
