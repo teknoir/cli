@@ -15,7 +15,7 @@ tunnel_device.sh -c gke_teknoir_us-central1-c_teknoir-cluster --namespace teknoi
 ```
 *Connect to the Device´s MQTT Broker on localhost:31883*
 
-#### Port-Forward to Devstudio on a Device:
+### Port-Forward to Devstudio on a Device:
 ```bash
 tunnel_device.sh -c gke_teknoir_us-central1-c_teknoir-cluster --namespace teknoir-ai --device orin-agx-64gb-se --port 8080 --to 127.0.0.1:31880
 ```
