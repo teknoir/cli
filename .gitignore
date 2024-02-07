@@ -13,3 +13,7 @@
 # Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
 .glide/
 .idea
+
+# Secret or sensitive files
+*-credentials.json.zip
+*-credentials.json
