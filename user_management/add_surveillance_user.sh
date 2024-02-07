@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 
+# If using Windows WSL use /bin/bash instead of sh
+
 POSITIONAL=()
 while [[ $# -gt 0 ]]
 do
@@ -23,16 +25,15 @@ case $key in
     shift # past value
     ;;
     -h|--help|*)
-    echo "$0 -p(--projectid) <teknoir | teknoir-poc> -u(--user) <user email> -v(--viewer) <viewer> -e(--editor) <editor> -a(--admin) <admin> -s(--superadmin) <true|false>"
-    echo "\t environment defaults to teknoir-poc"
-    echo "\t viewer, editor, admin are strings of json arrays i,e, '[\"teknoir-retail\", \"teknoir-ai\", \"teknoir-dashboards\", \"prime-communications\", \"boxer-property\"]'"
+    echo "$0 -c(--context) <teknoir | teknoir-poc> -e(--email) <email> -n(--namespace) <namespace>"
+    echo "\t GCP project defaults to teknoir"
     exit 0
     ;;
 esac
 done
 
 export ZONE=us-central1-c
-export GCP_PROJECT=$(if [ "$CONTEXT" == "gke_teknoir-poc_us-central1-c_teknoir-dev-cluster" ]; then echo "teknoir-poc"; else echo "teknoir"; fi)
+export GCP_PROJECT=$(if [ "$CONTEXT" == "gke_teknoir-poc_us-central1-c_teknoir-dev-cluster" ] || [ "$CONTEXT" == "teknoir-poc" ]; then echo "teknoir-poc"; else echo "teknoir"; fi)
 export DOMAIN=$([ "$GCP_PROJECT" == 'teknoir' ] && echo "teknoir.cloud" || echo "teknoir.info")
 
 gcloud config set project ${GCP_PROJECT}
@@ -40,10 +41,10 @@ gcloud config set compute/zone ${ZONE}
 
 if [[ "${GCP_PROJECT}" == "teknoir" ]]; then
   export GOOGLE_CLOUD_PROJECT=teknoir
-  export GOOGLE_APPLICATION_CREDENTIALS=/Volumes/GIT/ai/teknoir_scripts/teknoir-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/teknoir/teknoir-admin-credentials.json
 else
   export GOOGLE_CLOUD_PROJECT=teknoir-poc
-  export GOOGLE_APPLICATION_CREDENTIALS=/Volumes/GIT/ai/teknoir_scripts/teknoir-poc-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/teknoir/teknoir-poc-admin-credentials.json
 fi
 
 NAME=$(echo "${EMAIL}" | cut -d '@' -f 1)

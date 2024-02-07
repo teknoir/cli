@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 
+# If using Windows WSL use /bin/bash instead of sh
+
 function update_user {
   node update_user.js $1 $2 $3 $4 $5
 }
@@ -12,10 +14,10 @@ fi
 
 if [[ "${PROJECTID}" == "teknoir" ]]; then
   export GOOGLE_CLOUD_PROJECT=teknoir
-  export GOOGLE_APPLICATION_CREDENTIALS=/Volumes/GIT/ai/teknoir_scripts/teknoir-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/work/teknoir/teknoir-poc-admin-credentials.json
 else
   export GOOGLE_CLOUD_PROJECT=teknoir-poc
-  export GOOGLE_APPLICATION_CREDENTIALS=/Volumes/GIT/ai/teknoir_scripts/teknoir-poc-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/work/teknoir/teknoir-poc-admin-credentials.json
 fi
 
 if [[ -z "${VIEWER}" ]]; then

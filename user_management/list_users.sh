@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 
+# If using Windows WSL use /bin/bash instead of sh
+
 function list_users {
   node list_users.js
 }
@@ -12,10 +14,10 @@ fi
 
 if [[ "${ENVIRONMENT}" == "teknoir" ]]; then
   export GOOGLE_CLOUD_PROJECT=teknoir
-  export GOOGLE_APPLICATION_CREDENTIALS=/Volumes/GIT/ai/teknoir_scripts/teknoir-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/teknoir/teknoir-admin-credentials.json
 else
   export GOOGLE_CLOUD_PROJECT=teknoir-poc
-  export GOOGLE_APPLICATION_CREDENTIALS=/Volumes/GIT/ai/teknoir_scripts/teknoir-poc-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/teknoir/teknoir-poc-admin-credentials.json
 fi
 }
 
