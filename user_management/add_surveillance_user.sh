@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
 # If using Windows WSL use /bin/bash instead of sh
@@ -41,10 +41,10 @@ gcloud config set compute/zone ${ZONE}
 
 if [[ "${GCP_PROJECT}" == "teknoir" ]]; then
   export GOOGLE_CLOUD_PROJECT=teknoir
-  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/teknoir/teknoir-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/work/teknoir/teknoir-admin-credentials.json
 else
   export GOOGLE_CLOUD_PROJECT=teknoir-poc
-  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/teknoir/teknoir-poc-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/work/teknoir/teknoir-poc-admin-credentials.json
 fi
 
 NAME=$(echo "${EMAIL}" | cut -d '@' -f 1)
@@ -68,25 +68,32 @@ kind: AuthorizationPolicy
 metadata:
   annotations:
     role: surveillance-viewer
-    user: ${EMAIL}
-  name: user-${FIRST_NAME}-${LAST_NAME}-${NAMESPACE}-clusterrole-surveillance-viewer
+    user: $(echo ${EMAIL} | tr '[:upper:]' '[:lower:]')
+  name: user-$(echo ${FIRST_NAME} | tr '[:upper:]' '[:lower:]')-$(echo ${LAST_NAME} | tr '[:upper:]' '[:lower:]')-$(echo ${NAMESPACE} | tr '[:upper:]' '[:lower:]')-clusterrole-surveillance-viewer
   namespace: ${NAMESPACE}
 spec:
   action: ALLOW
-  selector:
-    matchLabels:
-      app.kubernetes.io/part-of: sdmc
   rules:
   - to:
     - operation:
         methods: ["GET", "PUT", "POST"]
-        paths: ["/${NAMESPACE}/sdmc*"]
+        paths: [
+          "/${NAMESPACE}/sdmc*", 
+          "/${NAMESPACE}/ws*",
+          "/${NAMESPACE}/media-service*",
+          "/retrieve_events*",
+          "/events*",
+          "/feedbacks*",
+          "/notifications*"
+          ]
     when:
     - key: request.headers[X-Goog-Authenticated-User-Email]
       values:
-      - securetoken.google.com/${GCP_PROJECT}:${EMAIL}
+      - securetoken.google.com/${GCP_PROJECT}:$(echo ${EMAIL} | tr '[:upper:]' '[:lower:]')
 EOF
 )
+
 echo "${AUTHORIZATION_POLICY}" | kubectl --context ${CONTEXT} apply -f -
+
 
 node create_surveillance_user.js "${EMAIL}" "${FULL_NAME}" "${PASSWORD}" "${NAMESPACE}"
