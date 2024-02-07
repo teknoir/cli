@@ -77,7 +77,15 @@ spec:
   - to:
     - operation:
         methods: ["GET", "PUT", "POST"]
-        paths: ["/${NAMESPACE}/sdmc*", "/${NAMESPACE}/ws*", "/${NAMESPACE}/historian-middleend/*", "/${NAMESPACE}/historian-middleend/retrieve_events*", "/${NAMESPACE}/historian-middleend/retrieve_events?*" , "/${NAMESPACE}/*"]
+        paths: [
+          "/${NAMESPACE}/sdmc*", 
+          "/${NAMESPACE}/ws*",
+          "/${NAMESPACE}/media-service*",
+          "/retrieve_events*",
+          "/events*",
+          "/feedbacks*",
+          "/notifications*"
+          ]
     when:
     - key: request.headers[X-Goog-Authenticated-User-Email]
       values:
