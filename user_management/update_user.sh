@@ -14,10 +14,10 @@ fi
 
 if [[ "${PROJECTID}" == "teknoir" ]]; then
   export GOOGLE_CLOUD_PROJECT=teknoir
-  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/work/teknoir/teknoir-poc-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/../teknoir-admin-credentials.json
 else
   export GOOGLE_CLOUD_PROJECT=teknoir-poc
-  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/work/teknoir/teknoir-poc-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/../teknoir-poc-admin-credentials.json
 fi
 
 if [[ -z "${VIEWER}" ]]; then

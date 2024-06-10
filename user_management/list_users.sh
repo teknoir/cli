@@ -8,16 +8,16 @@ function list_users {
 }
 
 function set_environment {
-if [[ -z "${ENVIRONMENT}" ]]; then
-  export ENVIRONMENT="teknoir-poc"
+if [[ -z "${PROJECTID}" ]]; then
+  export PROJECTID="teknoir-poc"
 fi
 
-if [[ "${ENVIRONMENT}" == "teknoir" ]]; then
+if [[ "${PROJECTID}" == "teknoir" ]]; then
   export GOOGLE_CLOUD_PROJECT=teknoir
-  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/teknoir/teknoir-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/../teknoir-admin-credentials.json
 else
   export GOOGLE_CLOUD_PROJECT=teknoir-poc
-  export GOOGLE_APPLICATION_CREDENTIALS=/home/cris/teknoir/teknoir-poc-admin-credentials.json
+  export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/../teknoir-poc-admin-credentials.json
 fi
 }
 
@@ -27,13 +27,13 @@ do
 key="$1"
 
 case $key in
-    -e|--environment)
-    ENVIRONMENT="$2"
+    -p|--projectid)
+    PROJECTID="$2"
     shift # past argument
     shift # past value
     ;;
     -h|--help|*)
-    echo "$0 -e(--environment) <teknoir | teknoir-poc>"
+    echo "$0 -p(--projectid) <teknoir | teknoir-poc>"
     echo "\t environment defaults to teknoir-poc"
     exit 0
     ;;
