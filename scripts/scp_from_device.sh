@@ -32,6 +32,11 @@ case $key in
     shift # past argument
     shift # past value
     ;;
+    -k|--kubeflow)
+    KUBEFLOW="true"
+    shift # past argument
+    # shift # past value
+    ;;
     -h|--help|*)
     echo "$0 -c(--context) <context> -n(--namespace) <namespace> -d(--device) <device-name>"
     exit 0
@@ -39,10 +44,16 @@ case $key in
 esac
 done
 
-if [[ -z "${CONTEXT}" ]]; then
-  export DEVICE_MANIFEST="$(kubectl -n $NAMESPACE get device $DEVICE -o yaml)"
+if [[ -z "${KUBEFLOW}" ]]; then
+  DEVICE_RESOURCE="device.teknoir.org"
 else
-  export DEVICE_MANIFEST="$(kubectl --context ${CONTEXT} -n $NAMESPACE get device $DEVICE -o yaml)"
+  DEVICE_RESOURCE="device"
+fi
+
+if [[ -z "${CONTEXT}" ]]; then
+  export DEVICE_MANIFEST="$(kubectl -n $NAMESPACE get $DEVICE_RESOURCE $DEVICE -o yaml)"
+else
+  export DEVICE_MANIFEST="$(kubectl --context ${CONTEXT} -n $NAMESPACE get $DEVICE_RESOURCE $DEVICE -o yaml)"
 fi
 
 USERNAME="$(echo "$DEVICE_MANIFEST" | yq e .spec.keys.data.username - | base64 --decode -i -)"
