@@ -22,31 +22,14 @@ case $key in
     shift # past argument
     shift # past value
     ;;
-    -p|--port)
-    PORT="$2"
-    shift # past argument
-    shift # past value
-    ;;
-    -t|--to)
-    TO="$2"
-    shift # past argument
-    shift # past value
-    ;;
     -h|--help|*)
-    echo "$0 -c(--context) <context> -n(--namespace) <namespace> -d(--device) <device-name> -t<--to> <ip:port>"
-    echo "\nTunnel to device mqtt example:"
-    echo "$0 --context teknoir-prod --namespace teknoir-ai --device orin-agx-64gb-se --port 31883 --to 127.0.0.1:31883"
-    echo "\nTunnel via device to camera example:"
-    echo "$0 --context teknoir-prod --namespace teknoir-ai --device orin-agx-64gb-se --port 8080 --to 192.168.2.137:80"
-    echo ""
-    echo ""
+    echo "$0 -c(--context) <context> -n(--namespace) <namespace> -d(--device) <device-name> -s(--source) <source-path> -t(--target) <target-path>"
     exit 0
     ;;
 esac
 done
 
 DEVICE_RESOURCE="device"
-
 
 if [[ -z "${CONTEXT}" ]]; then
   export DEVICE_MANIFEST="$(kubectl -n $NAMESPACE get $DEVICE_RESOURCE $DEVICE -o yaml)"
@@ -67,13 +50,11 @@ fi
 
 RSA_KEY_FILE=$(mktemp -t "$(basename $0)")
 printf "%s\n" "${DEVICE_MANIFEST}" | yq e .spec.keys.data.rsa_private - | base64 --decode -i - | tee ${RSA_KEY_FILE} >/dev/null
+cat ${RSA_KEY_FILE}
+#RSA_KEY_FILE="/Volumes/GIT/ai/cli/rtx2000-ada-64gb-se_rsa_private.pem"
 
 trap "exit" INT TERM ERR
 trap "kill 0" EXIT
-
-if [[ -z "${PORT}" ]]; then
-  PORT=$(jot -r 1  8000 65000)
-fi
 
 case "${CONTEXT}" in
   *teknoir-dev*|*teknoir-poc*)
@@ -86,14 +67,11 @@ case "${CONTEXT}" in
     DOMAIN="teknoir.cloud"
     ;;
 esac
-
-
-echo "Browse to http://localhost:${PORT} or connect your service to 127.0.0.1:${PORT}"
-echo "ctrl+C to quit"
-
 DEADENDUSER='teknoir'
-DEADENDHOST="deadend-${NAMESPACE}.${DOMAIN}"
-DEADENDPORT='2222'
+DEADENDHOST="${DEADENDHOST:-deadend-${NAMESPACE}.${DOMAIN}}"
+DEADENDHTTPSPORT="${DEADENDHTTPSPORT:-2222}"
+REVERSETUNNEL="${REMOTE_ACCESS_PORT}:localhost:22"
+
 
 echo "NAMESPACE             = ${NAMESPACE}"
 echo "DEVICE                = ${DEVICE}"
@@ -103,12 +81,18 @@ echo "REMOTE_ACCESS_ACTIVE  = ${REMOTE_ACCESS_ACTIVE}"
 echo "REMOTE_ACCESS_PORT    = ${REMOTE_ACCESS_PORT}"
 echo "DEADENDHOST           = ${DEADENDHOST}"
 
-#PROXY_CMD="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i ${RSA_KEY_FILE} -N -W %h:%p ${DEADENDUSER}@${DEADENDHOST} -p ${DEADENDPORT}"
-#ssh -o "ProxyCommand ${PROXY_CMD}" -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} ${USERNAME}@127.0.0.1 -p ${REMOTE_ACCESS_PORT} -L ${PORT}:${TO} -N
+#if ! command -v ncat >/dev/null 2>&1; then
+#  echo "error: ncat is required for HTTPS proxy tunneling (missing ncat)" >&2
+#  exit 1
+#fi
 
-PROXY_PROXY_CMD="openssl s_client -quiet -connect ${DEADENDHOST}:${DEADENDPORT} -servername ${DEADENDHOST}"
-PROXY_CMD="ssh -o ProxyCommand='${PROXY_PROXY_CMD}' -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i ${RSA_KEY_FILE} -N -W %h:%p ${DEADENDUSER}@${DEADENDHOST} -p ${DEADENDPORT}"
-ssh -o "ProxyCommand=${PROXY_CMD}" -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} ${USERNAME}@127.0.0.1 -p ${REMOTE_ACCESS_PORT} -L ${PORT}:${TO} -N
-
+#PROXY_CMD="ncat --ssl --ssl-servername ${DEADENDHOST} %h %p"
+PROXY_CMD="openssl s_client -quiet -connect %h:%p -servername ${DEADENDHOST}"
+ssh -v -o "ProxyCommand ${PROXY_CMD}" -o 'PubkeyAcceptedAlgorithms=+ssh-rsa' -o IdentitiesOnly=yes -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ExitOnForwardFailure=yes' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} -N -R ${REVERSETUNNEL} ${DEADENDUSER}@${DEADENDHOST} -p ${DEADENDHTTPSPORT}
 
 rm ${RSA_KEY_FILE}
+
+# printf '' | nc deadend-test-organisation.teknoir.online 2222
+# If you see SSH-2.0-OpenSSH_..., then TLS termination is not happening on 2222 (it’s raw SSH). If it hangs or you only see TLS handshake bytes (gibberish), it’s likely TLS‑terminated.
+
+# openssl s_client -connect deadend-test-organisation.teknoir.online:2222 -servername deadend-test-organisation.teknoir.online -showcerts < /dev/null
