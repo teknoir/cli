@@ -79,13 +79,6 @@ PASSWORD="$(printf "%s\n" "${DEVICE_MANIFEST}" | yq e .spec.keys.data.userpasswo
 REMOTE_ACCESS_ACTIVE="$(printf "%s\n" "${DEVICE_MANIFEST}" | yq e .subresources.status.remote_access.active -)"
 REMOTE_ACCESS_PORT="$(printf "%s\n" "${DEVICE_MANIFEST}" | yq e .subresources.status.remote_access.port -)"
 
-echo "NAMESPACE             = ${NAMESPACE}"
-echo "DEVICE                = ${DEVICE}"
-echo "USERNAME              = ${USERNAME}"
-echo "PASSWORD              = ${PASSWORD}"
-echo "REMOTE_ACCESS_ACTIVE  = ${REMOTE_ACCESS_ACTIVE}"
-echo "REMOTE_ACCESS_PORT    = ${REMOTE_ACCESS_PORT}"
-
 if ! [[ ${REMOTE_ACCESS_ACTIVE} == true ]] ; then
    echo "error: The device ${DEVICE}, has not enabled remote access, please go to the GUI and enable remote access for the device!" >&2
    exit 1
@@ -94,11 +87,31 @@ fi
 RSA_KEY_FILE=$(mktemp -t "$(basename $0)")
 printf "%s\n" "${DEVICE_MANIFEST}" | yq e .spec.keys.data.rsa_private - | base64 --decode -i - | tee ${RSA_KEY_FILE} >/dev/null
 
-DOMAIN=$(if [[ ${CONTEXT} =~ ^.*teknoir-dev.*$ || ${CONTEXT} =~ ^.*teknoir-poc.*$ ]]; then echo "teknoir.dev"; else echo "teknoir.cloud"; fi)
+case "${CONTEXT}" in
+  *teknoir-dev*)
+    DOMAIN="teknoir.dev"
+    ;;
+  *teknoir-poc-eks*)
+    DOMAIN="teknoir.online"
+    ;;
+  *r415*)
+    DOMAIN="teknoir.cloud"
+    ;;
+esac
 DEADENDUSER='teknoir'
-DEADENDHOST="deadend.${DOMAIN}"
+DEADENDHOST="deadend-${NAMESPACE}.${DOMAIN}"
 DEADENDPORT='2222'
-PROXY_CMD="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i ${RSA_KEY_FILE} -N -W %h:%p ${DEADENDUSER}@${DEADENDHOST} -p ${DEADENDPORT}"
+#PROXY_CMD="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i ${RSA_KEY_FILE} -N -W %h:%p ${DEADENDUSER}@${DEADENDHOST} -p ${DEADENDPORT}"
+PROXY_PROXY_CMD="ncat --ssl ${DEADENDHOST} ${DEADENDPORT}"
+PROXY_CMD="ssh -o ProxyCommand='${PROXY_PROXY_CMD}' -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i ${RSA_KEY_FILE} -N -W %h:%p ${DEADENDUSER}@${DEADENDHOST} -p ${DEADENDPORT}"
+
+echo "NAMESPACE             = ${NAMESPACE}"
+echo "DEVICE                = ${DEVICE}"
+echo "USERNAME              = ${USERNAME}"
+echo "PASSWORD              = ${PASSWORD}"
+echo "REMOTE_ACCESS_ACTIVE  = ${REMOTE_ACCESS_ACTIVE}"
+echo "REMOTE_ACCESS_PORT    = ${REMOTE_ACCESS_PORT}"
+echo "DEADENDHOST           = ${DEADENDHOST}"
 
 # Determine sync direction based on PULL flag
 if [[ -z "${PULL}" ]]; then

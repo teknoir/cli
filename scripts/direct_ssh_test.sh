@@ -22,20 +22,6 @@ case $key in
     shift # past argument
     shift # past value
     ;;
-    -s|--source)
-    SOURCE=$2
-    shift # past argument
-    shift # past value
-    ;;
-    -t|--target)
-    TARGET=$2
-    shift # past argument
-    shift # past value
-    ;;
-    -k|--kubeflow)
-    KUBEFLOW="true"
-    shift # past argument
-    ;;
     -h|--help|*)
     echo "$0 -c(--context) <context> -n(--namespace) <namespace> -d(--device) <device-name> -s(--source) <source-path> -t(--target) <target-path>"
     exit 0
@@ -43,11 +29,7 @@ case $key in
 esac
 done
 
-if [[ -z "${KUBEFLOW}" ]]; then
-  DEVICE_RESOURCE="device.teknoir.org"
-else
-  DEVICE_RESOURCE="device"
-fi
+DEVICE_RESOURCE="device"
 
 if [[ -z "${CONTEXT}" ]]; then
   export DEVICE_MANIFEST="$(kubectl -n $NAMESPACE get $DEVICE_RESOURCE $DEVICE -o yaml)"
@@ -61,13 +43,6 @@ PASSWORD="$(printf "%s\n" "${DEVICE_MANIFEST}" | yq e .spec.keys.data.userpasswo
 REMOTE_ACCESS_ACTIVE="$(printf "%s\n" "${DEVICE_MANIFEST}" | yq e .subresources.status.remote_access.active -)"
 REMOTE_ACCESS_PORT="$(printf "%s\n" "${DEVICE_MANIFEST}" | yq e .subresources.status.remote_access.port -)"
 
-echo "NAMESPACE             = ${NAMESPACE}"
-echo "DEVICE                = ${DEVICE}"
-echo "USERNAME              = ${USERNAME}"
-echo "PASSWORD              = ${PASSWORD}"
-echo "REMOTE_ACCESS_ACTIVE  = ${REMOTE_ACCESS_ACTIVE}"
-echo "REMOTE_ACCESS_PORT    = ${REMOTE_ACCESS_PORT}"
-
 if ! [[ ${REMOTE_ACCESS_ACTIVE} == true ]] ; then
    echo "error: The device ${DEVICE}, has not enabled remote access, please go to the GUI and enable remote access for the device!" >&2
    exit 1
@@ -75,15 +50,34 @@ fi
 
 RSA_KEY_FILE=$(mktemp -t "$(basename $0)")
 printf "%s\n" "${DEVICE_MANIFEST}" | yq e .spec.keys.data.rsa_private - | base64 --decode -i - | tee ${RSA_KEY_FILE} >/dev/null
+cat ${RSA_KEY_FILE}
+#RSA_KEY_FILE="/Volumes/GIT/ai/cli/rtx2000-ada-64gb-se_rsa_private.pem"
 
 trap "exit" INT TERM ERR
 trap "kill 0" EXIT
 
-DOMAIN=$(if [[ ${CONTEXT} =~ ^.*teknoir-dev.*$ || ${CONTEXT} =~ ^.*teknoir-poc.*$ ]]; then echo "teknoir.dev"; else echo "teknoir.cloud"; fi)
-DEADENDUSER='teknoir'
-DEADENDHOST="${DEADENDHOST:-deadend-${NAMESPACE}.${DOMAIN}}"
-DEADENDPORT='2222'
-PROXY_CMD="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i ${RSA_KEY_FILE} -N -W %h:%p ${DEADENDUSER}@${DEADENDHOST} -p ${DEADENDPORT}"
-scp -r -o "ProxyCommand ${PROXY_CMD}" -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} -P ${REMOTE_ACCESS_PORT} ${SOURCE} ${USERNAME}@127.0.0.1:${TARGET}
+case "${CONTEXT}" in
+  *teknoir-dev*|*teknoir-poc*)
+    DOMAIN="teknoir.dev"
+    ;;
+  *rtx2000-pro-bw-se.teknoir*)
+    DOMAIN="teknoir.online"
+    ;;
+  *r415*)
+    DOMAIN="teknoir.cloud"
+    ;;
+esac
+
+echo "DEVICE                = ${DEVICE}"
+echo "USERNAME              = ${USERNAME}"
+echo "PASSWORD              = ${PASSWORD}"
+
+
+ssh -v -o IdentitiesOnly=yes -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ExitOnForwardFailure=yes' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} ${USERNAME}@${DEVICE}.local
 
 rm ${RSA_KEY_FILE}
+
+# printf '' | nc deadend-test-organisation.teknoir.online 2222
+# If you see SSH-2.0-OpenSSH_..., then TLS termination is not happening on 2222 (it’s raw SSH). If it hangs or you only see TLS handshake bytes (gibberish), it’s likely TLS‑terminated.
+
+# openssl s_client -connect deadend-test-organisation.teknoir.online:2222 -servername deadend-test-organisation.teknoir.online -showcerts < /dev/null
