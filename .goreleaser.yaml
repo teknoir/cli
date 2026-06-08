@@ -7,7 +7,8 @@ before:
     - go mod tidy
 
 builds:
-  - binary: tnctl
+  - id: tnctl
+    binary: tnctl
     main: .
     env:
       - CGO_ENABLED=0
@@ -24,7 +25,8 @@ builds:
       - 7
 
 archives:
-  - format: tar.gz
+  - id: tnctl
+    format: tar.gz
     # this name template makes the OS and Arch compatible with the results of `uname`.
     name_template: >-
       {{ .ProjectName }}_
@@ -39,7 +41,10 @@ archives:
         format: zip
 
 nfpms:
-  - maintainer: Teknoir <info@teknoir.ai>
+  - id: tnctl
+    builds:
+      - tnctl
+    maintainer: Teknoir <info@teknoir.ai>
     description: Teknoir Control CLI
     homepage: https://teknoir.ai
     license: Apache 2.0
@@ -50,9 +55,9 @@ nfpms:
     contents:
       - src: ./scripts/install.sh
         dst: /usr/share/tnctl/install.sh
-        packager_config:
-          file_info:
-            mode: 0755
+        type: file
+        file_info:
+          mode: 0755
 
 checksum:
   name_template: 'checksums.txt'
@@ -66,3 +71,11 @@ changelog:
     exclude:
       - '^docs:'
       - '^test:'
+
+release:
+  github:
+    owner: teknoir
+    name: cli
+  draft: false
+  prerelease: false
+  mode: replace # replace existing release if it exists for the same tag

@@ -5,7 +5,7 @@ repository:
   description: This repo contain a collection of CLI tools for Teknoir. # Brief description of the repository
   homepage: https://teknoir.cloud # Replace with the relevant URL
   topics: edge, app, cli # Relevant topics/tags for the repository
-  private: true # Private or public repository
+  private: false # Private or public repository
   has_issues: true # Enable or disable issue tracking
   has_projects: true # Enable or disable GitHub projects
   has_wiki: true # Enable or disable the wiki
