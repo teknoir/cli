@@ -17,5 +17,12 @@
 # Secret or sensitive files
 *-credentials.json.zip
 *-credentials.json
+*.pem
+*.key
+auth_keys_test
+
+# Binaries
+tnctl
+tncli
 
 backup

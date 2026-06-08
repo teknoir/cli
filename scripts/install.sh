@@ -59,11 +59,16 @@ fi
 
 echo "Installing to $INSTALL_DIR/$BINARY_NAME..."
 if [ ! -d "$INSTALL_DIR" ]; then
-    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR" || sudo mkdir -p "$INSTALL_DIR"
 fi
 
-mv "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-chmod +x "$INSTALL_DIR/$BINARY_NAME"
+if [ -w "$INSTALL_DIR" ]; then
+    mv "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
+    chmod +x "$INSTALL_DIR/$BINARY_NAME"
+else
+    sudo mv "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
+    sudo chmod +x "$INSTALL_DIR/$BINARY_NAME"
+fi
 
 echo "$BINARY_NAME $VERSION installed successfully!"
 rm -rf "$TMP_DIR"

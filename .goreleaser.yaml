@@ -18,6 +18,10 @@ builds:
     goarch:
       - amd64
       - arm64
+      - arm
+    goarm:
+      - 6
+      - 7
 
 archives:
   - format: tar.gz
@@ -33,6 +37,22 @@ archives:
     format_overrides:
       - goos: windows
         format: zip
+
+nfpms:
+  - maintainer: Teknoir <info@teknoir.ai>
+    description: Teknoir Control CLI
+    homepage: https://teknoir.ai
+    license: Apache 2.0
+    formats:
+      - deb
+      - rpm
+      - apk
+    contents:
+      - src: ./scripts/install.sh
+        dst: /usr/share/tnctl/install.sh
+        packager_config:
+          file_info:
+            mode: 0755
 
 checksum:
   name_template: 'checksums.txt'
