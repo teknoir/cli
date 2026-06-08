@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
@@ -15,19 +14,16 @@ import (
 )
 
 var (
-	localPort  int
-	targetAddr string
+	socksPort int
 )
 
-var portForwardCmd = &cobra.Command{
-	Use:   "port-forward [device] [local-port]:[target-host]:[target-port]",
-	Short: "Forward a local port to a device or a service reachable from the device",
-	Long: `Forward a local port to a device. 
+var socksProxyCmd = &cobra.Command{
+	Use:   "socks-proxy [device] [port]",
+	Short: "Establish a SOCKS5 proxy via a device",
+	Long: `Establish a SOCKS5 proxy via a device to access the device's network.
 Example:
-  tnctl port-forward my-device 8080:localhost:80
-  tnctl port-forward my-device 8080:192.168.1.10:80
-  tnctl port-forward my-device 31883:31883 (defaults to localhost:31883)
-  tnctl port-forward --port 8080 --to localhost:80`,
+  tnctl socks-proxy my-device 1080
+  tnctl socks-proxy --port 1080`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		domain := viper.GetString("domain")
 		namespace := viper.GetString("namespace")
@@ -38,10 +34,16 @@ Example:
 
 		var deviceName string
 		argIdx := 0
-		if len(args) > argIdx && !strings.Contains(args[argIdx], ":") {
-			deviceName = args[argIdx]
-			argIdx++
-		} else if cmd.Flags().Changed("device") {
+		if len(args) > argIdx {
+			// Check if it's a port number
+			if _, err := strconv.Atoi(args[argIdx]); err != nil {
+				// Not a port, assume it's a device name
+				deviceName = args[argIdx]
+				argIdx++
+			}
+		}
+
+		if deviceName == "" && cmd.Flags().Changed("device") {
 			deviceName = viper.GetString("device")
 		}
 
@@ -65,40 +67,19 @@ Example:
 			deviceName = devices[idx]
 		}
 
-		// Handle port mapping from arguments if provided
+		// Handle port from arguments if provided
 		if len(args) > argIdx {
-			mapping := args[argIdx]
-			parts := strings.Split(mapping, ":")
-			switch len(parts) {
-			case 2:
-				// local:targetPort
-				p, err := strconv.Atoi(parts[0])
-				if err != nil {
-					return fmt.Errorf("invalid local port: %s", parts[0])
-				}
-				localPort = p
-				targetAddr = "127.0.0.1:" + parts[1]
-			case 3:
-				// local:targetHost:targetPort
-				p, err := strconv.Atoi(parts[0])
-				if err != nil {
-					return fmt.Errorf("invalid local port: %s", parts[0])
-				}
-				localPort = p
-				targetAddr = parts[1] + ":" + parts[2]
-			default:
-				return fmt.Errorf("invalid port mapping format: %s. Expected [local-port]:[target-port] or [local-port]:[target-host]:[target-port]", mapping)
+			p, err := strconv.Atoi(args[argIdx])
+			if err != nil {
+				return fmt.Errorf("invalid port: %s", args[argIdx])
 			}
+			socksPort = p
 		}
 
 		// Use defaults if not set by flags or args
-		if localPort == 0 {
+		if socksPort == 0 {
 			// Random port between 8000 and 65000
-			localPort = rand.IntN(65000-8000) + 8000
-		}
-
-		if targetAddr == "" {
-			return fmt.Errorf("target address is required. Use --to <host>:<port> or provide a mapping argument")
+			socksPort = rand.IntN(65000-8000) + 8000
 		}
 
 		// Fetch device details from Backstage API
@@ -124,7 +105,7 @@ Example:
 		}
 
 		// Create secure temp file for private key
-		tmpFile, err := os.CreateTemp("", "tnctl-portforward-*")
+		tmpFile, err := os.CreateTemp("", "tnctl-socks-*")
 		if err != nil {
 			return fmt.Errorf("failed to create temporary file: %w", err)
 		}
@@ -137,34 +118,20 @@ Example:
 		deadendHost := fmt.Sprintf("deadend-%s.%s", namespace, domain)
 		remoteAccessPort := device.Spec.Subresources.Status.RemoteAccess.Port
 
-		// Determine if it's a web service
-		targetPort := 0
-		if lastColon := strings.LastIndex(targetAddr, ":"); lastColon != -1 {
-			targetPort, _ = strconv.Atoi(targetAddr[lastColon+1:])
-		}
+		fmt.Printf("\033[1;32m\n>>> SOCKS5 proxy active: 127.0.0.1:%d\033[0m\n", socksPort)
+		fmt.Printf("\033[1;36m>>> Configure your browser or application to use SOCKS5 proxy at 127.0.0.1:%d\033[0m\n", socksPort)
 
-		isWeb := false
-		protocol := "http"
-		switch targetPort {
-		case 80, 8080, 3000, 5000, 9000, 9090:
-			isWeb = true
-		case 443, 8443:
-			isWeb = true
-			protocol = "https"
-		}
+		fmt.Println("\n\033[1mExample Chrome usage:\033[0m")
+		fmt.Printf("  macOS: /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --proxy-server=\"socks5://127.0.0.1:%d\" --user-data-dir=$(mktemp -d)\n", socksPort)
+		fmt.Printf("  Linux: google-chrome --proxy-server=\"socks5://127.0.0.1:%d\" --user-data-dir=$(mktemp -d)\n", socksPort)
 
-		fmt.Printf("\033[1;32m\n>>> Port forwarding active: 127.0.0.1:%d -> %s\033[0m\n", localPort, targetAddr)
-		if isWeb {
-			fmt.Printf("\033[1;36m>>> Web Service URL: %s://localhost:%d\033[0m\n", protocol, localPort)
-		}
-		fmt.Println("\033[1;33m>>> Press Ctrl+C to stop forwarding\033[0m\n")
+		fmt.Println("\n\033[1;33m>>> Press Ctrl+C to stop the proxy\033[0m\n")
 
-		// Construct ProxyCommand as specified in the requirements
+		// Construct ProxyCommand
 		proxyCommand := fmt.Sprintf("ssh -o ProxyCommand='ncat --ssl %s 2222' -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i %s -N -W %%h:%%p teknoir@%s -p 2222",
 			deadendHost, tmpFile.Name(), deadendHost)
 
 		// Final SSH execution command using os/exec
-		// ssh -o "ProxyCommand=${PROXY_CMD}" -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} ${USERNAME}@127.0.0.1 -p ${REMOTE_ACCESS_PORT} -L ${PORT}:${TO} -N
 		sshExec := exec.Command("ssh",
 			"-o", "ProxyCommand="+proxyCommand,
 			"-o", "UserKnownHostsFile=/dev/null",
@@ -172,7 +139,7 @@ Example:
 			"-o", "ServerAliveInterval=60",
 			"-i", tmpFile.Name(),
 			"-p", remoteAccessPort,
-			"-L", fmt.Sprintf("%d:%s", localPort, targetAddr),
+			"-D", strconv.Itoa(socksPort),
 			"-N",
 			fmt.Sprintf("%s@127.0.0.1", username),
 		)
@@ -191,7 +158,6 @@ Example:
 }
 
 func init() {
-	rootCmd.AddCommand(portForwardCmd)
-	portForwardCmd.Flags().IntVarP(&localPort, "port", "p", 0, "Local port to listen on")
-	portForwardCmd.Flags().StringVarP(&targetAddr, "to", "t", "", "Target address on the device network (e.g. 127.0.0.1:80)")
+	rootCmd.AddCommand(socksProxyCmd)
+	socksProxyCmd.Flags().IntVarP(&socksPort, "port", "p", 0, "Local port for SOCKS5 proxy")
 }

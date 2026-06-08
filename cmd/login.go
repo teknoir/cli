@@ -41,6 +41,11 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	// Teknoir's Keycloak instance is hosted on the /auth subpath
 	issuerURL := fmt.Sprintf("https://%s/auth/realms/%s", authDomain, realm)
 
+	if viper.GetBool("debug") {
+		fmt.Printf("DEBUG: Issuer URL: %s\n", issuerURL)
+		fmt.Printf("DEBUG: Client ID: %s\n", clientID)
+	}
+
 	conf := &oauth2.Config{
 		ClientID: clientID,
 		Scopes: []string{

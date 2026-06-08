@@ -65,12 +65,21 @@ var sshCmd = &cobra.Command{
 			return fmt.Errorf("remote access is not enabled for device %s. Please enable it in the Teknoir Console", deviceName)
 		}
 
-		// Decode base64 username and private key
+		// Decode base64 username, password and private key
 		usernameBytes, err := base64.StdEncoding.DecodeString(device.Spec.Settings.Username)
 		if err != nil {
 			return fmt.Errorf("failed to decode username: %w", err)
 		}
 		username := string(usernameBytes)
+
+		var password string
+		if device.Spec.Settings.Password != "" {
+			passwordBytes, err := base64.StdEncoding.DecodeString(device.Spec.Settings.Password)
+			if err != nil {
+				return fmt.Errorf("failed to decode password: %w", err)
+			}
+			password = string(passwordBytes)
+		}
 
 		privateKey, err := base64.StdEncoding.DecodeString(device.Spec.Settings.RSAPrivate)
 		if err != nil {
@@ -109,6 +118,18 @@ var sshCmd = &cobra.Command{
 		sshExec.Stdout = os.Stdout
 		sshExec.Stderr = os.Stderr
 
+		if viper.GetBool("debug") {
+			fmt.Printf("DEBUG: Executing command: %s %v\n", sshExec.Path, sshExec.Args)
+		}
+
+		// Print colorful message and password
+		fmt.Printf("\033[1;32m\n>>> You are now using a remote shell on device: %s\033[0m\n", deviceName)
+		if password != "" {
+			fmt.Printf("\033[1;36m>>> SSH Password: %s\033[0m\n\n", password)
+		} else {
+			fmt.Println()
+		}
+
 		return sshExec.Run()
 	},
 }
@@ -120,6 +141,7 @@ type backstageDevice struct {
 	Spec struct {
 		Settings struct {
 			Username   string `json:"username"`
+			Password   string `json:"userpassword"`
 			RSAPrivate string `json:"rsa_private"`
 		} `json:"settings"`
 		Subresources struct {
