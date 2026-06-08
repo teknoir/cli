@@ -32,14 +32,20 @@ case $key in
     shift # past argument
     shift # past value
     ;;
+    --udp-target)
+    UDP_TARGET="$2"
+    shift # past argument
+    shift # past value
+    ;;
+    --udp-local-port)
+    UDP_LOCAL_PORT="$2"
+    shift # past argument
+    shift # past value
+    ;;
     -h|--help|*)
-    echo "$0 -c(--context) <context> -n(--namespace) <namespace> -d(--device) <device-name> -t<--to> <ip:port>"
-    echo "\nTunnel to device mqtt example:"
-    echo "$0 --context teknoir-prod --namespace teknoir-ai --device orin-agx-64gb-se --port 31883 --to 127.0.0.1:31883"
-    echo "\nTunnel via device to camera example:"
-    echo "$0 --context teknoir-prod --namespace teknoir-ai --device orin-agx-64gb-se --port 8080 --to 192.168.2.137:80"
-    echo ""
-    echo ""
+    echo "$0 -c(--context) <context> -n(--namespace) <namespace> -d(--device) <device-name> -p(--port) <local-port> -t(--to) <ip:port>"
+    echo "UDP Tunneling example:"
+    echo "$0 --context teknoir-prod --device my-device --port 5000 --udp-local-port 4201 --udp-target 10.202.1.4:4201"
     exit 0
     ;;
 esac
@@ -91,6 +97,8 @@ esac
 echo "Browse to http://localhost:${PORT} or connect your service to 127.0.0.1:${PORT}"
 echo "ctrl+C to quit"
 
+#UDP Tunneling
+
 DEADENDUSER='teknoir'
 DEADENDHOST="deadend-${NAMESPACE}.${DOMAIN}"
 DEADENDPORT='2222'
@@ -108,7 +116,23 @@ echo "DEADENDHOST           = ${DEADENDHOST}"
 
 PROXY_PROXY_CMD="ncat --ssl ${DEADENDHOST} ${DEADENDPORT}"
 PROXY_CMD="ssh -o ProxyCommand='${PROXY_PROXY_CMD}' -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i ${RSA_KEY_FILE} -N -W %h:%p ${DEADENDUSER}@${DEADENDHOST} -p ${DEADENDPORT}"
-ssh -o "ProxyCommand=${PROXY_CMD}" -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} ${USERNAME}@127.0.0.1 -p ${REMOTE_ACCESS_PORT} -L ${PORT}:${TO} -N
 
+# If UDP tunneling is requested, handle local/remote socat setups
+if [[ -n "${UDP_TARGET}" ]]; then
+    if [[ -z "${UDP_LOCAL_PORT}" ]]; then
+        UDP_LOCAL_PORT="${PORT}"
+    fi
+    
+    echo "Starting UDP tunnel: Local UDP port ${UDP_LOCAL_PORT} -> TCP port ${PORT} -> Remote UDP ${UDP_TARGET}"
+    
+    # Start local socat in the background
+    socat "UDP4-LISTEN:${UDP_LOCAL_PORT},fork,reuseaddr" "TCP4:127.0.0.1:${PORT}" &
+    
+    # Execute remote socat command via SSH
+    ssh -o "ProxyCommand=${PROXY_CMD}" -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} ${USERNAME}@127.0.0.1 -p ${REMOTE_ACCESS_PORT} -L "${PORT}:127.0.0.1:${PORT}" "socat TCP4-LISTEN:${PORT},fork UDP4:${UDP_TARGET}"
+else
+    # Standard TCP tunnel
+    ssh -o "ProxyCommand=${PROXY_CMD}" -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} ${USERNAME}@127.0.0.1 -p ${REMOTE_ACCESS_PORT} -L "${PORT}:${TO}" -N
+fi
 
 rm ${RSA_KEY_FILE}

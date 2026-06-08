@@ -1,115 +1,53 @@
-# Teknoir CLI
-This repo contain a collection of CLI tools for Teknoir.
-Right now it is just a collection of bash scripts to manage different things in the platform.
+# tnctl (Teknoir Control)
 
-## TLDR
+`tnctl` is the official command-line interface for managing Teknoir cloud resources and edge devices.
 
-### SSH to a Device:
+## Installation
+
+### One-liner (macOS & Linux)
 ```bash
-ssh_device.sh -c gke_teknoir_us-central1-c_teknoir-cluster -n teknoir-retail -d orin-demo-se
+curl -sSL https://raw.githubusercontent.com/teknoir/cli/main/scripts/install.sh | sh
 ```
 
-### Port-Forward to MQTT Broker on a Device:
+### From source
+Requires Go 1.23+
 ```bash
-tunnel_device.sh -c gke_teknoir_us-central1-c_teknoir-cluster --namespace teknoir-ai --device orin-agx-64gb-se --port 31883 --to 127.0.0.1:31883
+go install .
 ```
-*Connect to the Device´s MQTT Broker on localhost:31883*
 
-### Port-Forward to Devstudio on a Device:
+## Quick Start
+
+On first run, `tnctl` will create a default configuration file at `~/.tnctl.yaml`.
+
+### Authentication
+Log in to the Teknoir platform:
 ```bash
-tunnel_device.sh -c gke_teknoir_us-central1-c_teknoir-cluster --namespace teknoir-ai --device orin-agx-64gb-se --port 8080 --to 127.0.0.1:31880
+tnctl login
 ```
-*Browse to http://localhost:8080*
+This will open your default browser to complete the login sequence.
 
-### Port-Forward to an IP-Camera´s Web interface on the same network as the Device:
+### View Help
 ```bash
-tunnel_device.sh -c gke_teknoir_us-central1-c_teknoir-cluster --namespace teknoir-ai --device orin-agx-64gb-se --port 8080 --to 192.168.2.137:80
-```
-*Browse to http://localhost:8080*
-
-# Notes
-Allows your Firebase users to authenticate in a CLI app.
-
-## Demo
-
-Install the demo:
-```shell
-$ go install github.com/nouney/firelogin/demo
+tnctl --help
 ```
 
-Run it:
-```shell
-$ $GOPATH/bin/demo
-Your browser has been opened to visit: http://localhost:8080
+### Global Flags
+These flags are available to all subcommands:
+- `-d, --domain`: The Teknoir domain (defaults to `teknoir.cloud`).
+- `-n, --namespace`: Target namespace (defaults to `default`).
+- `--device`: Target device ID.
+- `--config`: Path to a specific config file.
 
-Authentication successfull. Welcome, <your full name>.
-```
+## Configuration
+The CLI uses `viper` for configuration management. It looks for a file named `.tnctl.yaml` in your home directory.
+This file stores your preferences and authentication tokens (`access_token`, `refresh_token`).
+You can also set environment variables with the `TNCTL_` prefix (e.g., `TNCTL_DOMAIN=example.cloud`).
 
-## Getting started
+Precedence:
+1. Flags
+2. Environment Variables
+3. Config File
+4. Defaults
 
-Install `firelogin`:
-```shell
-$ go get github.com/nouney/firelogin
-```
-
-Copy/paste the code below then run it:
-
-```golang
-package main
-
-import (
-	"fmt"
-	"log"
-
-	"github.com/nouney/firelogin"
-)
-
-func main() {
-	flogin := firelogin.New(&firelogin.Config{
-		APIKey:      "AIzaSyDzQAtfcdt8KIJJTaB1J6QOfLiqTR-W7wM",
-		AuthDomain:  "auth.teknoir.dev",
-	})
-	// This will block until the user sign in
-	user, err := flogin.Login()
-	if err != nil {
-		log.Panic(err)
-	}
-	fmt.Println("Authentication successfull! Welcome,", user.DisplayName)
-}
-```
-
-It will open a [FirebaseUI](https://github.com/firebase/firebaseui-web) webpage allowing you to authenticate.
-
-### Customization
-
-#### FirebaseUI
-
-```golang
-package main
-
-import (
-	"fmt"
-	"log"
-
-	"github.com/nouney/firelogin"
-)
-
-func main() {
-    // no providers = all
-	ui := firelogin.NewFirebaseUI(
-		"AppName", 
-		firelogin.GITHUB_AUTH_PROVIDER_ID, 
-		firelogin.GOOGLE_AUTH_PROVIDER_ID
-	)
-	flogin := firelogin.New(&firelogin.Config{
-		APIKey:      "<YOUR FIREBASE API KEY>",
-		AuthDomain:  "<YOUR FIREBASE AUTH DOMAIN>",
-		URL: "https://your-domain.com/yourpage",
-	})
-	user, err := flogin.Login()
-	if err != nil {
-		log.Panic(err)
-	}
-	fmt.Println("Authentication successfull! Welcome,", user.DisplayName)
-}
-```
+## Distribution
+`tnctl` is automatically built for multiple architectures (Linux, Darwin, Windows) using GoReleaser. Releases can be found on the [GitHub Releases](https://github.com/teknoir/cli/releases) page.
