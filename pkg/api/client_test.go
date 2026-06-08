@@ -1,11 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 func TestRequest_HTMLDetection(t *testing.T) {
@@ -25,5 +30,66 @@ func TestRequest_HTMLDetection(t *testing.T) {
 	expected := "received HTML instead of JSON"
 	if !strings.Contains(err.Error(), expected) {
 		t.Errorf("expected error message to contain %q, got %q", expected, err.Error())
+	}
+}
+
+func TestRequest_DebugLogging(t *testing.T) {
+	// Set debug to true in viper
+	viper.Set("debug", true)
+	defer viper.Set("debug", false)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"foo":"bar"}`))
+	}))
+	defer ts.Close()
+
+	// Capture stdout
+	old := os.Stdout
+	read, write, _ := os.Pipe()
+	os.Stdout = write
+
+	var result map[string]any
+	_ = Request(context.Background(), "GET", ts.URL, "token", &result)
+
+	write.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, read)
+	output := buf.String()
+
+	if !strings.Contains(output, "DEBUG: Request:") {
+		t.Error("expected debug output, but didn't find 'DEBUG: Request:'")
+	}
+}
+
+func TestRequest_NoDebugLogging(t *testing.T) {
+	// Set debug to false in viper
+	viper.Set("debug", false)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"foo":"bar"}`))
+	}))
+	defer ts.Close()
+
+	// Capture stdout
+	old := os.Stdout
+	read, write, _ := os.Pipe()
+	os.Stdout = write
+
+	var result map[string]any
+	_ = Request(context.Background(), "GET", ts.URL, "token", &result)
+
+	write.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, read)
+	output := buf.String()
+
+	if strings.Contains(output, "DEBUG:") {
+		t.Errorf("expected no debug output, but found: %q", output)
 	}
 }
