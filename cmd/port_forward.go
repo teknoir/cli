@@ -157,7 +157,7 @@ Example:
 		if isWeb {
 			fmt.Printf("\033[1;36m>>> Web Service URL: %s://localhost:%d\033[0m\n", protocol, localPort)
 		}
-		fmt.Println("\033[1;33m>>> Press Ctrl+C to stop forwarding\033[0m\n")
+		fmt.Println("\033[1;33m>>> Press Ctrl+C to stop forwarding\033[0m")
 
 		// Construct ProxyCommand as specified in the requirements
 		proxyCommand := fmt.Sprintf("ssh -o ProxyCommand='ncat --ssl %s 2222' -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i %s -N -W %%h:%%p teknoir@%s -p 2222",

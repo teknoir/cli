@@ -35,7 +35,11 @@ func init() {
 
 func runLogin(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	domain := viper.GetString("domain")
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	domain := cfg.Domain
 	authDomain := "auth." + domain
 
 	// Teknoir's Keycloak instance is hosted on the /auth subpath
@@ -99,14 +103,6 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	}
 
 	// Save tokens
-	var cfg config.Config
-	if err := viper.Unmarshal(&cfg); err != nil {
-		return err
-	}
-	if cfg.Auths == nil {
-		cfg.Auths = make(map[string]config.AuthConfig)
-	}
-
 	auth := cfg.Auths[config.SanitizeDomain(domain)]
 	auth.AccessToken = token.AccessToken
 	if token.RefreshToken != "" {
@@ -117,9 +113,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	auth.ClientID = clientID
 	cfg.Auths[config.SanitizeDomain(domain)] = auth
 
-	viper.Set("auths", cfg.Auths)
-
-	if err := viper.WriteConfig(); err != nil {
+	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("failed to save tokens to config: %w", err)
 	}
 

@@ -11,22 +11,24 @@ import (
 
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var nsCmd = &cobra.Command{
 	Use:   "ns [namespace]",
 	Short: "Select active namespace",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		domain := viper.GetString("domain")
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
 
 		if len(args) > 0 {
-			viper.Set("namespace", args[0])
-			return viper.WriteConfig()
+			cfg.SetNamespace(args[0])
+			return cfg.Save()
 		}
 
 		// Fetch real namespaces
-		namespaces, err := fetchNamespaces(cmd.Context(), domain)
+		namespaces, err := fetchNamespaces(cmd.Context(), cfg)
 		if err != nil {
 			return err
 		}
@@ -43,8 +45,8 @@ var nsCmd = &cobra.Command{
 		}
 
 		selected := namespaces[idx]
-		viper.Set("namespace", selected)
-		if err := viper.WriteConfig(); err != nil {
+		cfg.SetNamespace(selected)
+		if err := cfg.Save(); err != nil {
 			return err
 		}
 		fmt.Printf("Switched to namespace: %s\n", selected)
@@ -60,13 +62,8 @@ type APIResponse struct {
 	} `json:"items"`
 }
 
-func fetchNamespaces(ctx context.Context, domain string) ([]string, error) {
-	// Load config to get access token
-	var cfg config.Config
-	if err := viper.Unmarshal(&cfg); err != nil {
-		return nil, err
-	}
-
+func fetchNamespaces(ctx context.Context, cfg *config.Config) ([]string, error) {
+	domain := cfg.Domain
 	auth, exists := cfg.Auths[config.SanitizeDomain(domain)]
 	if !exists || auth.AccessToken == "" {
 		return nil, fmt.Errorf("no credentials found for domain %s. Please log in first", domain)
@@ -83,8 +80,7 @@ func fetchNamespaces(ctx context.Context, domain string) ([]string, error) {
 		auth.RefreshToken = token.RefreshToken
 		auth.Expiry = token.Expiry.Format(time.RFC3339)
 		cfg.Auths[config.SanitizeDomain(domain)] = auth
-		viper.Set("auths", cfg.Auths)
-		if err := viper.WriteConfig(); err != nil {
+		if err := cfg.Save(); err != nil {
 			return nil, fmt.Errorf("failed to save refreshed token: %w", err)
 		}
 	}

@@ -160,9 +160,8 @@ type backstageResponse struct {
 }
 
 func fetchDeviceDetails(ctx context.Context, domain, namespace, deviceName string) (*backstageDevice, error) {
-	// Load config to get access token
-	var cfg config.Config
-	if err := viper.Unmarshal(&cfg); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
 		return nil, err
 	}
 
@@ -182,8 +181,7 @@ func fetchDeviceDetails(ctx context.Context, domain, namespace, deviceName strin
 		auth.RefreshToken = token.RefreshToken
 		auth.Expiry = token.Expiry.Format(time.RFC3339)
 		cfg.Auths[config.SanitizeDomain(domain)] = auth
-		viper.Set("auths", cfg.Auths)
-		if err := viper.WriteConfig(); err != nil {
+		if err := cfg.Save(); err != nil {
 			return nil, fmt.Errorf("failed to save refreshed token: %w", err)
 		}
 	}
@@ -206,9 +204,8 @@ func fetchDeviceDetails(ctx context.Context, domain, namespace, deviceName strin
 }
 
 func fetchDevices(ctx context.Context, domain, namespace string) ([]string, error) {
-	// Load config to get access token
-	var cfg config.Config
-	if err := viper.Unmarshal(&cfg); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
 		return nil, err
 	}
 
@@ -228,8 +225,7 @@ func fetchDevices(ctx context.Context, domain, namespace string) ([]string, erro
 		auth.RefreshToken = token.RefreshToken
 		auth.Expiry = token.Expiry.Format(time.RFC3339)
 		cfg.Auths[config.SanitizeDomain(domain)] = auth
-		viper.Set("auths", cfg.Auths)
-		if err := viper.WriteConfig(); err != nil {
+		if err := cfg.Save(); err != nil {
 			return nil, fmt.Errorf("failed to save refreshed token: %w", err)
 		}
 	}

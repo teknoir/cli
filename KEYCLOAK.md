@@ -6,10 +6,9 @@ To enable authentication for the `tnctl` CLI, you must configure a client in you
 
 1. **Client ID**: `teknoir-cli`
 2. **Client Authentication**: `Off` (for public clients)
-3. **Standard Flow Enabled**: `ON` (Required for the authorization code flow)
-
-Add the following to **Valid Redirect URIs**:
-- `http://127.0.0.1:*`
+3. **Standard Flow**: `Off`
+4. **Direct Access Grants**: `On`
+5. **OAuth 2.0 Device Authorization Grant**: `On`
 
 ## Advanced Settings
 
@@ -31,3 +30,4 @@ Add Client Scope to the client:
 * Client: teknoir-cli
 * Client Scopes -> Add client scope
   * teknoir-cli
+  * Default

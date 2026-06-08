@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"slices"
 	"teknoir/cli/pkg/config"
 )
@@ -13,8 +12,8 @@ var domainCmd = &cobra.Command{
 	Use:   "domain",
 	Short: "Select active domain",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var cfg config.Config
-		if err := viper.Unmarshal(&cfg); err != nil {
+		cfg, err := config.Load()
+		if err != nil {
 			return err
 		}
 
@@ -38,11 +37,17 @@ var domainCmd = &cobra.Command{
 		}
 
 		selected := keys[idx]
-		viper.Set("domain", selected)
-		if err := viper.WriteConfig(); err != nil {
+		cfg.UpdateDomain(selected)
+		if err := cfg.Save(); err != nil {
 			return err
 		}
 		fmt.Printf("Switched to domain: %s\n", selected)
+		if ns := cfg.GetNamespace(); ns != "" {
+			fmt.Printf("Active namespace: %s\n", ns)
+		}
+		if dev := cfg.GetDevice(); dev != "" {
+			fmt.Printf("Active device: %s\n", dev)
+		}
 		return nil
 	},
 }

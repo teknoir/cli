@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+	"teknoir/cli/pkg/config"
 )
 
 var deviceCmd = &cobra.Command{
@@ -12,16 +12,21 @@ var deviceCmd = &cobra.Command{
 	Aliases: []string{"dev"},
 	Short:   "Select active device",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		domain := viper.GetString("domain")
-		namespace := viper.GetString("namespace")
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+
+		domain := cfg.Domain
+		namespace := cfg.GetNamespace()
 
 		if domain == "" || namespace == "" {
 			return fmt.Errorf("domain and namespace are required. Please set them via flags or config")
 		}
 
 		if len(args) > 0 {
-			viper.Set("device", args[0])
-			return viper.WriteConfig()
+			cfg.SetDevice(args[0])
+			return cfg.Save()
 		}
 
 		// Fetch devices from Backstage
@@ -42,8 +47,8 @@ var deviceCmd = &cobra.Command{
 		}
 
 		selected := devices[idx]
-		viper.Set("device", selected)
-		if err := viper.WriteConfig(); err != nil {
+		cfg.SetDevice(selected)
+		if err := cfg.Save(); err != nil {
 			return err
 		}
 		fmt.Printf("Switched to device: %s\n", selected)

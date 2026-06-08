@@ -75,13 +75,13 @@ func RequestWithBody(ctx context.Context, method, url, token string, body any, r
 		if isDebug {
 			fmt.Printf("DEBUG: Response Content-Type: %s\n", contentType)
 		}
-		return fmt.Errorf("received HTML instead of JSON. This usually means you are being redirected to a login page. Please refer to CLI_AUTH.md for infrastructure configuration")
+		return fmt.Errorf("received HTML instead of JSON. This usually means you are being redirected to a login page. Please refer to KEYCLOAK.md for infrastructure configuration")
 	}
 
 	// Double check for HTML if Content-Type was missing or misleading
 	trimmedBody := strings.TrimSpace(string(respBody))
 	if strings.HasPrefix(trimmedBody, "<") {
-		return fmt.Errorf("received HTML instead of JSON. This usually means you are being redirected to a login page. Please refer to CLI_AUTH.md for infrastructure configuration")
+		return fmt.Errorf("received HTML instead of JSON. This usually means you are being redirected to a login page. Please refer to KEYCLOAK.md for infrastructure configuration")
 	}
 
 	if err := json.Unmarshal(respBody, result); err != nil {

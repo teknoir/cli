@@ -45,8 +45,6 @@ func init() {
 	// Set defaults
 	defaultCfg := config.DefaultConfig()
 	viper.SetDefault("domain", defaultCfg.Domain)
-	viper.SetDefault("namespace", defaultCfg.Namespace)
-	viper.SetDefault("device", defaultCfg.Device)
 
 	// Persistent flags that are available to every subcommand
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.tnctl.yaml)")

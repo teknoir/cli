@@ -125,7 +125,7 @@ Example:
 		fmt.Printf("  macOS: /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --proxy-server=\"socks5://127.0.0.1:%d\" --user-data-dir=$(mktemp -d)\n", socksPort)
 		fmt.Printf("  Linux: google-chrome --proxy-server=\"socks5://127.0.0.1:%d\" --user-data-dir=$(mktemp -d)\n", socksPort)
 
-		fmt.Println("\n\033[1;33m>>> Press Ctrl+C to stop the proxy\033[0m\n")
+		fmt.Println("\n\033[1;33m>>> Press Ctrl+C to stop the proxy\033[0m")
 
 		// Construct ProxyCommand
 		proxyCommand := fmt.Sprintf("ssh -o ProxyCommand='ncat --ssl %s 2222' -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -i %s -N -W %%h:%%p teknoir@%s -p 2222",
