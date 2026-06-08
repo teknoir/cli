@@ -17,3 +17,5 @@
 # Secret or sensitive files
 *-credentials.json.zip
 *-credentials.json
+
+backup
