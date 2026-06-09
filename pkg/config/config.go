@@ -36,9 +36,9 @@ func DefaultConfig() *Config {
 }
 
 // GetNamespace returns the active namespace.
-// Precedence: Flags/Env > Domain-specific Config > Default ("default").
+// Precedence: Flags/Env > Domain-specific Config > Top-level Config > Default ("default").
 func (c *Config) GetNamespace() string {
-	if ns := viper.GetString("namespace"); ns != "" {
+	if ns := viper.GetString("flag_namespace"); ns != "" {
 		return ns
 	}
 	if c.Domain != "" {
@@ -46,19 +46,25 @@ func (c *Config) GetNamespace() string {
 			return auth.Namespace
 		}
 	}
+	if ns := viper.GetString("namespace"); ns != "" {
+		return ns
+	}
 	return "default"
 }
 
 // GetDevice returns the active device.
-// Precedence: Flags/Env > Domain-specific Config > Empty.
+// Precedence: Flags/Env > Domain-specific Config > Top-level Config > Empty.
 func (c *Config) GetDevice() string {
-	if dev := viper.GetString("device"); dev != "" {
+	if dev := viper.GetString("flag_device"); dev != "" {
 		return dev
 	}
 	if c.Domain != "" {
 		if auth, ok := c.Auths[SanitizeDomain(c.Domain)]; ok && auth.Device != "" {
 			return auth.Device
 		}
+	}
+	if dev := viper.GetString("device"); dev != "" {
+		return dev
 	}
 	return ""
 }

@@ -55,9 +55,13 @@ func init() {
 
 	// Bind flags to viper
 	viper.BindPFlag("domain", rootCmd.PersistentFlags().Lookup("domain"))
-	viper.BindPFlag("namespace", rootCmd.PersistentFlags().Lookup("namespace"))
-	viper.BindPFlag("device", rootCmd.PersistentFlags().Lookup("device"))
+	viper.BindPFlag("flag_namespace", rootCmd.PersistentFlags().Lookup("namespace"))
+	viper.BindPFlag("flag_device", rootCmd.PersistentFlags().Lookup("device"))
 	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
+
+	// Bind environment variables
+	viper.BindEnv("flag_namespace", "TNCTL_NAMESPACE")
+	viper.BindEnv("flag_device", "TNCTL_DEVICE")
 }
 
 // initConfig reads in config file and ENV variables if set.

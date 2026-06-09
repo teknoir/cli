@@ -21,8 +21,13 @@ var sshCmd = &cobra.Command{
 	Use:   "ssh [device-name]",
 	Short: "SSH into a device",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		domain := viper.GetString("domain")
-		namespace := viper.GetString("namespace")
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+
+		domain := cfg.Domain
+		namespace := cfg.GetNamespace()
 
 		if domain == "" || namespace == "" {
 			return fmt.Errorf("domain and namespace are required. Please set them via flags or config")
@@ -32,7 +37,7 @@ var sshCmd = &cobra.Command{
 		if len(args) > 0 {
 			deviceName = args[0]
 		} else if cmd.Flags().Changed("device") {
-			deviceName = viper.GetString("device")
+			deviceName = cfg.GetDevice()
 		}
 
 		if deviceName == "" {

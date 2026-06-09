@@ -12,6 +12,7 @@ import (
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"teknoir/cli/pkg/config"
 )
 
 var (
@@ -29,8 +30,13 @@ Example:
   tnctl port-forward my-device 31883:31883 (defaults to localhost:31883)
   tnctl port-forward --port 8080 --to localhost:80`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		domain := viper.GetString("domain")
-		namespace := viper.GetString("namespace")
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+
+		domain := cfg.Domain
+		namespace := cfg.GetNamespace()
 
 		if domain == "" || namespace == "" {
 			return fmt.Errorf("domain and namespace are required. Please set them via flags or config")
@@ -42,7 +48,7 @@ Example:
 			deviceName = args[argIdx]
 			argIdx++
 		} else if cmd.Flags().Changed("device") {
-			deviceName = viper.GetString("device")
+			deviceName = cfg.GetDevice()
 		}
 
 		if deviceName == "" {

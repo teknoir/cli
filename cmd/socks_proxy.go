@@ -11,6 +11,7 @@ import (
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"teknoir/cli/pkg/config"
 )
 
 var (
@@ -25,8 +26,13 @@ Example:
   tnctl socks-proxy my-device 1080
   tnctl socks-proxy --port 1080`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		domain := viper.GetString("domain")
-		namespace := viper.GetString("namespace")
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+
+		domain := cfg.Domain
+		namespace := cfg.GetNamespace()
 
 		if domain == "" || namespace == "" {
 			return fmt.Errorf("domain and namespace are required. Please set them via flags or config")
@@ -44,7 +50,7 @@ Example:
 		}
 
 		if deviceName == "" && cmd.Flags().Changed("device") {
-			deviceName = viper.GetString("device")
+			deviceName = cfg.GetDevice()
 		}
 
 		if deviceName == "" {
