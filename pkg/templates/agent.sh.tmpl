@@ -1,8 +1,4 @@
-#!/bin/sh
-set -e
-set -o noglob
-#set -x
-umask 027
+{{template "header.sh.tmpl" .}}
 
 # This is the drop in device k3s agent(worker) bootstrap script for the Teknoir platform.
 # It should work for most arm32/arm64/amd64 devices running Debian or Ubuntu.
@@ -12,80 +8,9 @@ umask 027
 #   K3S_TOKEN="32 char string" (default: generated at master node creation time)
 #   CREATE_USER=false (default: ask, create a user for the device without asking)
 
-# --- helper functions ---
-info() { echo '[INFO] ' "$@"; }
-warn() { echo '[WARN] ' "$@" >&2; }
-fatal() { echo '[ERROR] ' "$@" >&2; exit 1; }
+{{template "variables.sh.tmpl" .}}
 
-# Exit if not running as root
-[ $(id -u) -eq 0 ] || fatal 'You must run this script as root'
-
-DOWNLOADER=
-# --- download ---
-download() {
-    [ $# -eq 2 ] || fatal 'download needs exactly 2 arguments'
-
-    case $DOWNLOADER in
-        curl)
-            if [ ${OS_BUILD} ] || [ ${INSECURE} ]; then
-                info "Running installation without verifying ssl certs on URLs"
-                $SUDO curl --insecure -o $1 -sSfL $2
-            else
-                $SUDO curl -o $1 -sSfL $2
-            fi
-            ;;
-        wget)
-            $SUDO wget -qO $1 $2
-            ;;
-        *)
-            fatal "Incorrect executable '$DOWNLOADER'"
-            ;;
-    esac
-
-    # Abort if download command failed
-    [ $? -eq 0 ] || fatal 'Download failed'
-}
-
-# --- verify existence of network downloader executable ---
-verify_downloader() {
-    # Return failure if it doesn't exist or is no executable
-    [ -x "$(command -v $1)" ] || return 1
-
-    # Set verified executable as our downloader program and return success
-    DOWNLOADER=$1
-    return 0
-}
-
-verify_downloader curl || verify_downloader wget || fatal 'Can not find curl or wget for downloading files'
-
-_DOMAIN="{{.Domain}}"
-_DEVICE_ID="{{.DeviceID}}"
-_NAMESPACE="{{.Namespace}}"
-_FIRST_USER_NAME="{{.Username}}"
-_FIRST_USER_PASS="{{.Password}}"
-_FIRST_USER_KEY="{{.PublicSSHKey}}"
-_RSA_PUBLIC="{{.RSAPublic}}"
-_RSA_PRIVATE="{{.RSAPrivate}}"
-_K3S_TOKEN="{{.K3SToken}}"
-
-info "Install agent specific keys"
-export CONFIG_PATH=/etc/teknoir
-$SUDO mkdir -p ${CONFIG_PATH}
-$SUDO mkdir -p /toe_conf && $SUDO rm -rf /toe_conf && $SUDO ln -s ${CONFIG_PATH}/ /toe_conf # For backward compatibility
-download ${CONFIG_PATH}/roots.pem https://pki.goog/roots.pem
-$SUDO chmod 440 ${CONFIG_PATH}/roots.pem
-$SUDO chown 65532:root ${CONFIG_PATH}/roots.pem
-$SUDO tee ${CONFIG_PATH}/rsa_private.pem > /dev/null << EOL
-${_RSA_PRIVATE}
-EOL
-$SUDO chmod 440 ${CONFIG_PATH}/rsa_private.pem
-$SUDO chown 65532:root ${CONFIG_PATH}/rsa_private.pem
-$SUDO tee ${CONFIG_PATH}/rsa_public.pem > /dev/null << EOL
-${_RSA_PUBLIC}
-EOL
-$SUDO chmod 444 ${CONFIG_PATH}/rsa_public.pem
-$SUDO chown 65532:root ${CONFIG_PATH}/rsa_public.pem
-
+{{template "keys.sh.tmpl" .}}
 
 $SUDO cp ${CONFIG_PATH}/rsa_public.pem /usr/local/share/ca-certificates/${_DEVICE_ID}-${_DOMAIN}.crt
 $SUDO update-ca-certificates
@@ -94,13 +19,13 @@ info "Install Rancher K3s Agent"
 download k3s_installer.sh https://get.k3s.io
 $SUDO chmod +x k3s_installer.sh
 
-if [ ${OS_BUILD} ] || [ ${INSECURE} ]; then
+if [ "${OS_BUILD}" ] || [ "${INSECURE}" ]; then
     info "Running installation without verifying ssl certs on URLs"
     $SUDO sed -i "s#curl -w#curl --insecure -w#g" k3s_installer.sh
     $SUDO sed -i "s#curl -o#curl --insecure -o#g" k3s_installer.sh
 fi
 
-if [ ${OS_BUILD} ]; then
+if [ "${OS_BUILD}" ]; then
     info "OS Build specifics"
     export INSTALL_K3S_SKIP_START=true
     $SUDO sed -i "s#-d /run/systemd#true#g" k3s_installer.sh
@@ -133,70 +58,9 @@ info "K3s agent node joined successfully!"
 
 warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
 
-on_sudo() {
-  $SUDO sh -- "$@"
-}
+{{template "user_setup.sh.tmpl" .}}
 
-setup_user() {
-  $SUDO mkdir -p /home/${_FIRST_USER_NAME}
-  if ! id -u ${_FIRST_USER_NAME} >/dev/null 2>&1; then
-    $SUDO adduser --disabled-password --gecos "" ${_FIRST_USER_NAME}
-  fi
+{{template "user_invocation.sh.tmpl" .}}
 
-  if command -v chpasswd &> /dev/null; then
-    echo "${_FIRST_USER_NAME}:${_FIRST_USER_PASS}" | $SUDO chpasswd
-  elif command -v passwd &> /dev/null; then
-    echo -e "${_FIRST_USER_PASS}\n${_FIRST_USER_PASS}" | passwd ${_FIRST_USER_NAME}
-  elif command -v usermod &> /dev/null && command -v openssl &> /dev/null; then
-    usermod --password $(openssl passwd -1 ${_FIRST_USER_PASS}) ${_FIRST_USER_NAME}
-  else
-      warn "Could not set password for user ${_FIRST_USER_NAME}"
-      info "Skipping tunneling setup"
-      exit
-  fi
-
-  on_sudo << EOF
-mkdir -p /home/${_FIRST_USER_NAME}/.ssh
-cp ${CONFIG_PATH}/rsa_private.pem /home/${_FIRST_USER_NAME}/.ssh/id_rsa
-ssh-keygen -y -f ${CONFIG_PATH}/rsa_private.pem > /home/${_FIRST_USER_NAME}/.ssh/id_rsa.pub
-cat /home/${_FIRST_USER_NAME}/.ssh/id_rsa.pub > /home/${_FIRST_USER_NAME}/.ssh/authorized_keys
-if [ -z ${_FIRST_USER_KEY+x} ] || [ "${_FIRST_USER_KEY}" = "" ]; then
-  echo "[INFO] _FIRST_USER_KEY is not set, will continue with only password auth";
-else
-  echo "${_FIRST_USER_KEY}" >> /home/${_FIRST_USER_NAME}/.ssh/authorized_keys
-fi
-chmod 600 /home/${_FIRST_USER_NAME}/.ssh/*
-chmod 744 /home/${_FIRST_USER_NAME}/.ssh
-chown -R ${_FIRST_USER_NAME}:${_FIRST_USER_NAME} /home/${_FIRST_USER_NAME}
-
-# Add root user to users and sudo groups
-if [ -e /etc/group ]; then
-    sed -i "/^users:/s/\(.*\)/\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
-    sed -i "/^sudo:/s/\(.*\)/\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
-fi
-EOF
-}
-
-CREATE_USER=${CREATE_USER:-ask}
-if [ ${OS_BUILD} ] || [ "${CREATE_USER}" = true ]; then
-  setup_user
-else
-  if id -u ${_FIRST_USER_NAME} >/dev/null 2>&1; then
-    warn "The user ${_FIRST_USER_NAME} already exist! This operation will change the password and OVERWRITE ssh keys for this users."
-  fi
-  warn "Do you want to add \"${_FIRST_USER_NAME}\" as a user and enable tunneling? [yY]"
-  read REPLY
-
-  case ${REPLY} in
-    [Yy]* )
-      setup_user
-      ;;
-    * )
-      info "Skipping tunneling setup"
-      ;;
-  esac
-fi
-
-cd ..
-info "Device bootstrapped successfully!"
+{{template "footer.sh.tmpl" .}}
 

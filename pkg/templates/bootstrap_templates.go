@@ -1,7 +1,7 @@
 package templates
 
 import (
-	_ "embed"
+	"embed"
 	"text/template"
 )
 
@@ -27,6 +27,9 @@ var ServerTemplateStr string
 //go:embed docker_server.sh.tmpl
 var DockerServerTemplateStr string
 
+//go:embed partials/*.tmpl
+var partialsFS embed.FS
+
 var (
 	AgentTemplate        *template.Template
 	ServerTemplate       *template.Template
@@ -35,6 +38,11 @@ var (
 
 func init() {
 	AgentTemplate = template.Must(template.New("agent").Parse(AgentTemplateStr))
+	template.Must(AgentTemplate.ParseFS(partialsFS, "partials/*.tmpl"))
+
 	ServerTemplate = template.Must(template.New("server").Parse(ServerTemplateStr))
+	template.Must(ServerTemplate.ParseFS(partialsFS, "partials/*.tmpl"))
+
 	DockerServerTemplate = template.Must(template.New("docker_server").Parse(DockerServerTemplateStr))
+	template.Must(DockerServerTemplate.ParseFS(partialsFS, "partials/*.tmpl"))
 }

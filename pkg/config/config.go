@@ -21,6 +21,8 @@ type AuthConfig struct {
 
 const ClientID = "teknoir-cli"
 
+var Debug bool
+
 // Config defines the structure for tnctl configuration.
 type Config struct {
 	Domain string                `mapstructure:"domain" yaml:"domain"`
@@ -85,9 +87,10 @@ func Load() (*Config, error) {
 func (c *Config) Save() error {
 	viper.Set("domain", c.Domain)
 	viper.Set("auths", c.Auths)
-	// Clear top-level namespace/device to ensure they are only in Auths
+	// Clear top-level namespace/device/debug to ensure they are only in Auths (or not at all for debug)
 	viper.Set("namespace", nil)
 	viper.Set("device", nil)
+	viper.Set("debug", nil)
 	return viper.WriteConfig()
 }
 

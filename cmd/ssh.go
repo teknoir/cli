@@ -11,7 +11,6 @@ import (
 
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var sshCmd = &cobra.Command{
@@ -120,7 +119,7 @@ var sshCmd = &cobra.Command{
 		sshExec.Stdout = os.Stdout
 		sshExec.Stderr = os.Stderr
 
-		if viper.GetBool("debug") {
+		if config.Debug {
 			fmt.Printf("DEBUG: Executing command: %s %v\n", sshExec.Path, sshExec.Args)
 		}
 

@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/spf13/viper"
+	"teknoir/cli/pkg/config"
 )
 
 // Request performs an authenticated API request and handles non-JSON responses gracefully.
@@ -19,7 +19,7 @@ func Request(ctx context.Context, method, url, token string, result any) error {
 
 // RequestWithBody performs an authenticated API request with an optional JSON body.
 func RequestWithBody(ctx context.Context, method, url, token string, body any, result any) error {
-	isDebug := viper.GetBool("debug")
+	isDebug := config.Debug
 	if isDebug {
 		fmt.Printf("DEBUG: Request: %s %s\n", method, url)
 	}

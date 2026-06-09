@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/viper"
+	"teknoir/cli/pkg/config"
 )
 
 func TestRequest_HTMLDetection(t *testing.T) {
@@ -34,9 +34,9 @@ func TestRequest_HTMLDetection(t *testing.T) {
 }
 
 func TestRequest_DebugLogging(t *testing.T) {
-	// Set debug to true in viper
-	viper.Set("debug", true)
-	defer viper.Set("debug", false)
+	// Set debug to true
+	config.Debug = true
+	defer func() { config.Debug = false }()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -65,8 +65,8 @@ func TestRequest_DebugLogging(t *testing.T) {
 }
 
 func TestRequest_NoDebugLogging(t *testing.T) {
-	// Set debug to false in viper
-	viper.Set("debug", false)
+	// Set debug to false
+	config.Debug = false
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

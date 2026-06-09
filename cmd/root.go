@@ -15,7 +15,6 @@ var (
 	domain    string
 	namespace string
 	device    string
-	debug     bool
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -51,13 +50,12 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&domain, "domain", "d", "", "Teknoir domain (e.g., teknoir.cloud)")
 	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "", "Target namespace")
 	rootCmd.PersistentFlags().StringVar(&device, "device", "", "Target device ID")
-	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "Enable debug output")
+	rootCmd.PersistentFlags().BoolVar(&config.Debug, "debug", false, "Enable debug output")
 
 	// Bind flags to viper
 	viper.BindPFlag("domain", rootCmd.PersistentFlags().Lookup("domain"))
 	viper.BindPFlag("flag_namespace", rootCmd.PersistentFlags().Lookup("namespace"))
 	viper.BindPFlag("flag_device", rootCmd.PersistentFlags().Lookup("device"))
-	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
 
 	// Bind environment variables
 	viper.BindEnv("flag_namespace", "TNCTL_NAMESPACE")

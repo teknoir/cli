@@ -1,0 +1,19 @@
+CREATE_USER=${CREATE_USER:-ask}
+if [ "${OS_BUILD}" ] || [ "${CREATE_USER}" = true ]; then
+  setup_user
+else
+  if id -u "${_FIRST_USER_NAME}" >/dev/null 2>&1; then
+    warn "The user ${_FIRST_USER_NAME} already exist! This operation will change the password and OVERWRITE ssh keys for this users."
+  fi
+  warn "Do you want to add \"${_FIRST_USER_NAME}\" as a user and enable tunneling? [yY]"
+  read REPLY
+
+  case ${REPLY} in
+    [Yy]* )
+      setup_user
+      ;;
+    * )
+      info "Skipping tunneling setup"
+      ;;
+  esac
+fi
