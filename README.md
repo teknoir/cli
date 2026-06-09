@@ -98,3 +98,9 @@ export TNCTL_NAMESPACE=my-namespace
 ## License
 
 Apache License 2.0
+
+# Upcoming Features
+- [ ] Device Management / bootstrap script generation
+- [ ] Device tunneling enablement
+- [ ] Device VPN / Wireguard tunneling
+- [ ] User management
