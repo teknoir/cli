@@ -1,0 +1,1444 @@
+#!/bin/sh
+set -e
+set -o noglob
+#set -x
+umask 027
+
+# This is the drop in device bootstrap script for the Teknoir platform.
+# It should work for most arm32/arm64/amd64 devices running Debian or Ubuntu.
+
+# Usage:
+#   TBD
+#
+# Environment variables:
+#   OS_BUILD=true (default: false, for OS builds)
+#   INSECURE=true (default: false, for OS builds, or if you want to run without ssl cert verification)
+#   INSTALL_WATCHDOG=true (default: false, enable or disable the teknoir watchdog service)
+#   USE_DOCKER=true (default: false, enable the use of docker as container runtime for k3sm inly works for k3s < 1.24)
+#   CREATE_USER=false (default: ask, create a user for the device without asking)
+
+
+# --- helper functions for logs ---
+info()
+{
+    echo '[INFO] ' "$@"
+}
+warn()
+{
+    echo '[WARN] ' "$@" >&2
+}
+fatal()
+{
+    echo '[ERROR] ' "$@" >&2
+    exit 1
+}
+
+# Exit if not running as root
+[ $(id -u) -eq 0 ] || fatal 'You must run this script as root'
+
+DOWNLOADER=
+# --- download ---
+download() {
+    [ $# -eq 2 ] || fatal 'download needs exactly 2 arguments'
+
+    case $DOWNLOADER in
+        curl)
+            if [ ${OS_BUILD} ] || [ ${INSECURE} ]; then
+                info "Running installation without verifying ssl certs on URLs"
+                $SUDO curl --insecure -o $1 -sSfL $2
+            else
+                $SUDO curl -o $1 -sSfL $2
+            fi
+            ;;
+        wget)
+            $SUDO wget -qO $1 $2
+            ;;
+        *)
+            fatal "Incorrect executable '$DOWNLOADER'"
+            ;;
+    esac
+
+    # Abort if download command failed
+    [ $? -eq 0 ] || fatal 'Download failed'
+}
+
+# --- verify existence of network downloader executable ---
+verify_downloader() {
+    # Return failure if it doesn't exist or is no executable
+    [ -x "$(command -v $1)" ] || return 1
+
+    # Set verified executable as our downloader program and return success
+    DOWNLOADER=$1
+    return 0
+}
+
+verify_downloader curl || verify_downloader wget || fatal 'Can not find curl or wget for downloading files'
+
+
+TMP=$(mktemp -dt)
+# --- cleanup/error trap ---
+error() {
+  local code="$1"
+  echo "[ERROR] Error: exiting with status ${code}"
+  exit "${code}"
+}
+cleanup() {
+  rm -rf "$TMP"
+  [ $? -eq 0 ] && exit
+  error "$?"
+}
+trap 'cleanup' EXIT
+
+cd $TMP
+info "Teknoir bootstrapping...${TMP}"
+
+_DOMAIN="{{.Domain}}"
+_DEVICE_ID="{{.DeviceID}}"
+_NAMESPACE="{{.Namespace}}"
+_FIRST_USER_NAME="{{.Username}}"
+_FIRST_USER_PASS="{{.Password}}"
+_FIRST_USER_KEY="{{.PublicSSHKey}}"
+_RSA_PUBLIC="{{.RSAPublic}}"
+_RSA_PRIVATE="{{.RSAPrivate}}"
+_K3S_TOKEN="{{.K3SToken}}"
+
+info "Install device specific keys"
+export CONFIG_PATH=/etc/teknoir
+$SUDO mkdir -p ${CONFIG_PATH}
+$SUDO mkdir -p /toe_conf && $SUDO rm -rf /toe_conf && $SUDO ln -s ${CONFIG_PATH}/ /toe_conf # For backward compatibility
+download ${CONFIG_PATH}/roots.pem https://pki.goog/roots.pem
+$SUDO chmod 440 ${CONFIG_PATH}/roots.pem
+$SUDO chown 65532:root ${CONFIG_PATH}/roots.pem
+$SUDO tee ${CONFIG_PATH}/rsa_private.pem > /dev/null << EOL
+${_RSA_PRIVATE}
+EOL
+$SUDO chmod 440 ${CONFIG_PATH}/rsa_private.pem
+$SUDO chown 65532:root ${CONFIG_PATH}/rsa_private.pem
+$SUDO tee ${CONFIG_PATH}/rsa_public.pem > /dev/null << EOL
+${_RSA_PUBLIC}
+EOL
+$SUDO chmod 444 ${CONFIG_PATH}/rsa_public.pem
+$SUDO chown 65532:root ${CONFIG_PATH}/rsa_public.pem
+$SUDO chgrp 65532 /etc/teknoir
+info "Prepare K3s CA Certs"
+export PRODUCT="${PRODUCT:-k3s}"
+export DATA_DIR="${DATA_DIR:-/var/lib/rancher/${PRODUCT}}"
+
+if command -v openssl-3 >/dev/null 2>&1; then
+  OPENSSL=openssl-3
+else
+  OPENSSL=openssl
+fi
+
+info "Using ${OPENSSL}: $(${OPENSSL} version)"
+
+if ! ${OPENSSL} ecparam -name prime256v1 -genkey -noout -out /dev/null >/dev/null 2>&1; then
+  fatal "openssl not found or missing Elliptic Curve (ecparam) support."
+fi
+
+${OPENSSL} version | grep -qF 'OpenSSL 3' && OPENSSL_GENRSA_FLAGS=-traditional
+
+mkdir -p "${DATA_DIR}/server/tls/etcd"
+
+cp ${CONFIG_PATH}/rsa_public.pem ${DATA_DIR}/server/tls/root-ca.pem
+cp ${CONFIG_PATH}/rsa_private.pem ${DATA_DIR}/server/tls/root-ca.key
+
+cd "${DATA_DIR}/server/tls"
+
+# Set up temporary openssl configuration
+mkdir -p ".ca/certs"
+trap "rm -rf .ca" EXIT
+touch .ca/index
+openssl rand -hex 8 > .ca/serial
+cat >.ca/config <<'EOF'
+[ca]
+default_ca = ca_default
+[ca_default]
+dir = ./.ca
+database = $dir/index
+serial = $dir/serial
+new_certs_dir = $dir/certs
+default_md = sha256
+policy = policy_anything
+[policy_anything]
+commonName = supplied
+[req]
+distinguished_name = req_distinguished_name
+[req_distinguished_name]
+[v3_ca]
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+basicConstraints = critical, CA:true
+keyUsage = critical, digitalSignature, keyEncipherment, keyCertSign
+EOF
+
+if [ -e service.key ]; then
+  info "Generating additional Kubernetes service account issuer RSA key"
+  OLD_SERVICE_KEY="$(cat service.key)"
+else
+  info "Generating Kubernetes service account issuer RSA key"
+fi
+${OPENSSL} genrsa ${OPENSSL_GENRSA_FLAGS:-} -out service.key 2048
+echo "${OLD_SERVICE_KEY}" >> service.key
+
+cat root-ca.pem > root-ca.crt
+
+if [ ! -e root-ca.key ]; then
+  fatal "Cannot generate intermediate certificate without root certificate private key"
+fi
+
+info "Generating intermediate certificate authority RSA key and certificate"
+${OPENSSL} genrsa ${OPENSSL_GENRSA_FLAGS:-} -out intermediate-ca.key 4096
+${OPENSSL} req -new -nodes \
+               -subj "/CN=${PRODUCT}-intermediate-ca@${_DEVICE_ID}.${_DOMAIN}" \
+               -key intermediate-ca.key |
+${OPENSSL} ca  -batch -notext -days 3700 \
+               -in /dev/stdin \
+               -out intermediate-ca.pem \
+               -keyfile root-ca.key \
+               -cert root-ca.pem \
+               -config .ca/config \
+               -extensions v3_ca
+
+cat intermediate-ca.pem root-ca.pem > intermediate-ca.crt
+
+if [ ! -e intermediate-ca.key ]; then
+  fatal "Cannot generate leaf certificates without intermediate certificate private key"
+fi
+
+# Generate new leaf CAs for all the control-plane and etcd components
+for TYPE in client server request-header etcd/peer etcd/server; do
+  CERT_NAME="${PRODUCT}-$(echo ${TYPE} | tr / -)-ca"
+  info "Generating ${CERT_NAME} leaf certificate authority EC key and certificate"
+  ${OPENSSL} ecparam -name prime256v1 -genkey -noout -out ${TYPE}-ca.key
+  ${OPENSSL} req -new -nodes \
+                 -subj "/CN=${CERT_NAME}@${_DEVICE_ID}.${_DOMAIN}" \
+                 -key ${TYPE}-ca.key |
+  ${OPENSSL} ca  -batch -notext -days 3700 \
+                 -in /dev/stdin \
+                 -out ${TYPE}-ca.pem \
+                 -keyfile intermediate-ca.key \
+                 -cert intermediate-ca.pem \
+                 -config .ca/config \
+                 -extensions v3_ca
+  cat ${TYPE}-ca.pem \
+      intermediate-ca.pem \
+      root-ca.pem > ${TYPE}-ca.crt
+done
+
+info "Install Rancher K3s"
+export K3S_CONFIG_PATH=/etc/rancher/k3s
+$SUDO mkdir -p ${K3S_CONFIG_PATH}
+$SUDO tee ${K3S_CONFIG_PATH}/config.yaml > /dev/null << EOL
+disable:
+  - traefik
+node-name: teknoir-master
+EOL
+cat >/etc/sysctl.d/teknoir-k3s.conf << EOF
+fs.inotify.max_user_instances=1024
+EOF
+sysctl --system
+
+download k3s_installer.sh https://get.k3s.io
+$SUDO chmod +x k3s_installer.sh
+
+if [ ${OS_BUILD} ] || [ ${INSECURE} ]; then
+    info "Running installation without verifying ssl certs on URLs"
+    $SUDO sed -i "s#curl -w#curl --insecure -w#g" k3s_installer.sh
+    $SUDO sed -i "s#curl -o#curl --insecure -o#g" k3s_installer.sh
+fi
+
+if [ ${OS_BUILD} ]; then
+    info "OS Build specifics"
+    export INSTALL_K3S_SKIP_START=true
+    $SUDO sed -i "s#-d /run/systemd#true#g" k3s_installer.sh
+fi
+
+export INSTALL_K3S_EXEC="server --token ${_K3S_TOKEN} --tls-san ${_DEVICE_ID}.${_DOMAIN} --tls-san 10.0.0.10 ${INSTALL_K3S_EXEC}"
+if [ "${USE_DOCKER}" = true ]; then
+    info "Use docker container-runtime for K3s"
+    export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
+fi
+
+export INSTALL_K3S_SYMLINK=force
+$SUDO ./k3s_installer.sh
+
+info "Install Teknoir Manifests"
+$SUDO mkdir -p /var/lib/rancher/k3s/server/manifests
+$SUDO tee /var/lib/rancher/k3s/server/manifests/teknoir.yaml > /dev/null << EOL
+
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: artifact-registry-secret
+  namespace: kube-system
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: "{{.DockerSecret}}"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: artifact-registry-secret
+  namespace: default
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: "{{.DockerSecret}}"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: default
+imagePullSecrets:
+- name: artifact-registry-secret
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: kube-system
+imagePullSecrets:
+- name: artifact-registry-secret
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority-mqtt
+  namespace: kube-system
+value: 900000000
+globalDefault: false
+description: "This priority class should be used for mqtt service pods only."
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mqtt
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mqtt
+  template:
+    metadata:
+      labels:
+        app: mqtt
+    spec:
+      priorityClassName: high-priority-mqtt
+      containers:
+        - name: mqtt
+          image: emqx/emqx-edge:latest
+          imagePullPolicy: Always
+          env:
+           - name: EMQX_MQTT__MAX_PACKET_SIZE
+             value: 3MB
+          ports:
+            - containerPort: 1883
+            - containerPort: 18083
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "150m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mqtt
+  namespace: kube-system
+spec:
+  type: NodePort
+  ports:
+    - nodePort: 31883
+      port: 1883
+      protocol: TCP
+      targetPort: 1883
+  selector:
+    app: mqtt
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mqtt-dashboard
+  namespace: kube-system
+spec:
+  type: NodePort
+  selector:
+    app: mqtt
+  ports:
+    - nodePort: 31083
+      port: 18083
+      protocol: TCP
+      targetPort: 18083
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority-toe
+  namespace: kube-system
+value: 1000000000
+globalDefault: false
+description: "This priority class should be used for toe service pods only."
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.12.0
+  name: toes.teknoir.org
+spec:
+  group: teknoir.org
+  names:
+    kind: TOE
+    listKind: TOEList
+    plural: toes
+    singular: toe
+  scope: Cluster
+  versions:
+    - name: v1
+      schema:
+        openAPIV3Schema:
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              properties:
+                config:
+                  properties:
+                    apiVersion:
+                      type: string
+                    items:
+                      items:
+                        properties:
+                          apiVersion:
+                            type: string
+                          binaryData:
+                            additionalProperties:
+                              format: byte
+                              type: string
+                            type: object
+                          data:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          kind:
+                            type: string
+                          metadata:
+                            properties:
+                              annotations:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                              creationTimestamp:
+                                format: date-time
+                                type: string
+                              deletionGracePeriodSeconds:
+                                format: int64
+                                type: integer
+                              deletionTimestamp:
+                                format: date-time
+                                type: string
+                              finalizers:
+                                items:
+                                  type: string
+                                type: array
+                              generateName:
+                                type: string
+                              generation:
+                                format: int64
+                                type: integer
+                              labels:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                              managedFields:
+                                items:
+                                  properties:
+                                    apiVersion:
+                                      type: string
+                                    fieldsType:
+                                      type: string
+                                    fieldsV1:
+                                      type: object
+                                    manager:
+                                      type: string
+                                    operation:
+                                      type: string
+                                    subresource:
+                                      type: string
+                                    time:
+                                      format: date-time
+                                      type: string
+                                  type: object
+                                type: array
+                              name:
+                                type: string
+                              namespace:
+                                type: string
+                              ownerReferences:
+                                items:
+                                  properties:
+                                    apiVersion:
+                                      type: string
+                                    blockOwnerDeletion:
+                                      type: boolean
+                                    controller:
+                                      type: boolean
+                                    kind:
+                                      type: string
+                                    name:
+                                      type: string
+                                    uid:
+                                      type: string
+                                  required:
+                                    - apiVersion
+                                    - kind
+                                    - name
+                                    - uid
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                type: array
+                              resourceVersion:
+                                type: string
+                              selfLink:
+                                type: string
+                              uid:
+                                type: string
+                            type: object
+                          spec:
+                            x-kubernetes-preserve-unknown-fields: true
+                          status:
+                            x-kubernetes-preserve-unknown-fields: true
+                        required:
+                          - metadata
+                        type: object
+                      type: array
+                    kind:
+                      type: string
+                    metadata:
+                      properties:
+                        continue:
+                          type: string
+                        remainingItemCount:
+                          format: int64
+                          type: integer
+                        resourceVersion:
+                          type: string
+                        selfLink:
+                          type: string
+                      type: object
+                  required:
+                    - items
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+              type: object
+            status:
+              properties:
+                last_applied_config:
+                  properties:
+                    apiVersion:
+                      type: string
+                    items:
+                      items:
+                        properties:
+                          apiVersion:
+                            type: string
+                          binaryData:
+                            additionalProperties:
+                              format: byte
+                              type: string
+                            type: object
+                          data:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          kind:
+                            type: string
+                          metadata:
+                            properties:
+                              annotations:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                              creationTimestamp:
+                                format: date-time
+                                type: string
+                              deletionGracePeriodSeconds:
+                                format: int64
+                                type: integer
+                              deletionTimestamp:
+                                format: date-time
+                                type: string
+                              finalizers:
+                                items:
+                                  type: string
+                                type: array
+                              generateName:
+                                type: string
+                              generation:
+                                format: int64
+                                type: integer
+                              labels:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                              managedFields:
+                                items:
+                                  properties:
+                                    apiVersion:
+                                      type: string
+                                    fieldsType:
+                                      type: string
+                                    fieldsV1:
+                                      type: object
+                                    manager:
+                                      type: string
+                                    operation:
+                                      type: string
+                                    subresource:
+                                      type: string
+                                    time:
+                                      format: date-time
+                                      type: string
+                                  type: object
+                                type: array
+                              name:
+                                type: string
+                              namespace:
+                                type: string
+                              ownerReferences:
+                                items:
+                                  properties:
+                                    apiVersion:
+                                      type: string
+                                    blockOwnerDeletion:
+                                      type: boolean
+                                    controller:
+                                      type: boolean
+                                    kind:
+                                      type: string
+                                    name:
+                                      type: string
+                                    uid:
+                                      type: string
+                                  required:
+                                    - apiVersion
+                                    - kind
+                                    - name
+                                    - uid
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                type: array
+                              resourceVersion:
+                                type: string
+                              selfLink:
+                                type: string
+                              uid:
+                                type: string
+                            type: object
+                          spec:
+                            x-kubernetes-preserve-unknown-fields: true
+                          status:
+                            x-kubernetes-preserve-unknown-fields: true
+                        required:
+                          - metadata
+                        type: object
+                      type: array
+                    kind:
+                      type: string
+                    metadata:
+                      properties:
+                        continue:
+                          type: string
+                        remainingItemCount:
+                          format: int64
+                          type: integer
+                        resourceVersion:
+                          type: string
+                        selfLink:
+                          type: string
+                      type: object
+                  required:
+                    - items
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+              type: object
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: controller-manager-sa
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serviceaccount
+    app.kubernetes.io/part-of: teknoir
+  name: teknoir-controller-manager
+  namespace: kube-system
+#imagePullSecrets:
+#- name: artifact-registry-secret
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: leader-election-role
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: role
+    app.kubernetes.io/part-of: teknoir
+  name: teknoir-leader-election-role
+  namespace: kube-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: teknoir-manager-role
+rules:
+- apiGroups:
+  - teknoir.org
+  resources:
+  - toes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - teknoir.org
+  resources:
+  - toes/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - teknoir.org
+  resources:
+  - toes/status
+  verbs:
+  - get
+  - patch
+  - update
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: kube-rbac-proxy
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: metrics-reader
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/part-of: teknoir
+  name: teknoir-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: kube-rbac-proxy
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: proxy-role
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/part-of: teknoir
+  name: teknoir-proxy-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: manager-rolebinding
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: clusterrolebinding
+    app.kubernetes.io/part-of: teknoir
+  name: teknoir-admin-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: teknoir-controller-manager
+  namespace: kube-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: leader-election-rolebinding
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: rolebinding
+    app.kubernetes.io/part-of: teknoir
+  name: teknoir-leader-election-rolebinding
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: teknoir-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: teknoir-controller-manager
+  namespace: kube-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: manager-rolebinding
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: clusterrolebinding
+    app.kubernetes.io/part-of: teknoir
+  name: teknoir-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: teknoir-manager-role
+subjects:
+- kind: ServiceAccount
+  name: teknoir-controller-manager
+  namespace: kube-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: kube-rbac-proxy
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: proxy-rolebinding
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: clusterrolebinding
+    app.kubernetes.io/part-of: teknoir
+  name: teknoir-proxy-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: teknoir-proxy-role
+subjects:
+- kind: ServiceAccount
+  name: teknoir-controller-manager
+  namespace: kube-system
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: kube-rbac-proxy
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: controller-manager-metrics-service
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: service
+    app.kubernetes.io/part-of: teknoir
+    control-plane: controller-manager
+  name: toe-metrics-service
+  namespace: kube-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: https
+  selector:
+    control-plane: controller-manager
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: manager
+    app.kubernetes.io/created-by: teknoir
+    app.kubernetes.io/instance: controller-manager
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: deployment
+    app.kubernetes.io/part-of: teknoir
+    control-plane: controller-manager
+  name: toe
+  namespace: kube-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        teknoir.org/app: toe
+        app: toe
+        control-plane: controller-manager
+    spec:
+      priorityClassName: high-priority-toe
+      containers:
+      - args:
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=127.0.0.1:8080
+        env:
+        - name: CLIENT_ID
+          value: "{{.DeviceID}}"
+        - name: TOE_PROJECT
+          value: "teknoir"
+        - name: TOE_DOMAIN
+          value: "{{.Domain}}"
+        - name: TOE_IOT_REGISTRY
+          value: "{{.Namespace}}"
+        - name: TOE_DEVICE
+          value: "{{.DeviceID}}"
+        - name: TOE_CA_CERT
+          value: "/etc/teknoir/roots.pem"
+        - name: TOE_PRIVATE_KEY
+          value: "/etc/teknoir/rsa_private.pem"
+        volumeMounts:
+        - name: toe-volume
+          mountPath: /etc/teknoir
+        command:
+        - /manager
+        image: docker.io/tekn0ir/toe:toe_v3
+        imagePullPolicy: Always
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: toe
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      serviceAccountName: teknoir-controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: toe-volume
+        hostPath:
+          # directory location on host
+          path: "/etc/teknoir"
+EOL
+
+INSTALL_WATCHDOG=${INSTALL_WATCHDOG:-false}
+if [ "${INSTALL_WATCHDOG}" = true ]; then
+    info "Install Teknoir Watchdog"
+    $SUDO mkdir -p /usr/local/lib/teknoir
+    $SUDO chmod 755 /usr/local/lib/teknoir
+    info "Install apt dependencies"
+    $SUDO apt install -y python3-pip libsystemd-dev
+    $SUDO apt autoremove --purge -y || true
+    $SUDO apt clean || true
+    $SUDO pip3 install -U pip netifaces kubernetes systemd-watchdog python-statemachine
+
+    $SUDO tee /usr/local/lib/teknoir/watchdog.py > /dev/null << EOL
+import argparse
+import logging
+import socket
+import subprocess
+import sys
+import time
+import yaml
+import json
+
+import kubernetes
+from kubernetes.stream import stream
+from kubernetes.stream.ws_client import ERROR_CHANNEL
+import systemd_watchdog
+from statemachine import StateMachine, State
+
+INTERVAL = 60
+ERRORS = 20
+
+class WatchdogSM(StateMachine):
+
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        super(WatchdogSM, self).__init__()
+        self.wait_count = 0
+
+    uninitialized = State('Uninitialized', initial=True)
+
+    running = State('Idle')
+    checkping = State('CheckPing')
+    checktoe = State('CheckTOE')
+    checkkubernetesapi = State('CheckK8sAPI')
+
+    reboot = State('Reboot')
+
+    progress = uninitialized.to(running)
+
+    run = running.to.itself()
+
+    healthcheck = running.to(checkping) | \
+                  checkping.to(checktoe) | \
+                  checktoe.to(checkkubernetesapi) | \
+                  checkkubernetesapi.to(running)
+
+    degress = reboot.to.itself()
+
+    error = checkping.to(checktoe) | \
+            checktoe.to(checkkubernetesapi) | \
+            checkkubernetesapi.to(running) | \
+            uninitialized.to.itself() | \
+            reboot.to.itself()
+
+    escalate = reboot.from_(checkping, checktoe, checkkubernetesapi)
+
+    def on_run(self):
+        # self.logger.info(f'Healtcheck wait count: {self.wait_count}')
+        self.wait_count += 1
+
+
+class Watchdog(object):
+
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        self.sm = WatchdogSM(**kwargs)
+        self.e_checkping = 0
+        self.e_checktoe = 0
+        self.e_checkkubernetesapi = 0
+
+    def tick(self):
+        self.logger.info(self.sm.current_state.name)
+
+        if self.sm.current_state == self.sm.uninitialized:
+            self.sm.progress()
+
+        #######################################################################################################################
+
+        elif self.sm.current_state == self.sm.running:
+            if self.sm.wait_count >= self.interval:
+                self.sm.wait_count = 0
+                self.sm.healthcheck()
+            else:
+                self.sm.run()
+
+        elif self.sm.current_state == self.sm.checkping:
+            if self.wrap_action(self.checkping):
+                self.sm.healthcheck()
+                self.e_checkping = 0
+            else:
+                self.e_checkping += 1
+                self.logger.warning(f'{self.sm.current_state.name} error no {self.e_checkping}')
+                self.sm.escalate() if self.e_checkping >= self.errors else self.sm.error()
+
+        elif self.sm.current_state == self.sm.checktoe:
+            if self.wrap_action(self.checktoe):
+                self.sm.healthcheck()
+                self.e_checktoe = 0
+            else:
+                self.e_checktoe += 1
+                self.logger.warning(f'{self.sm.current_state.name} error no {self.e_checktoe}')
+                self.sm.escalate() if self.e_checktoe >= self.errors else self.sm.error()
+
+        elif self.sm.current_state == self.sm.checkkubernetesapi:
+            if self.wrap_action(self.checkkubernetesapi):
+                self.sm.healthcheck()
+                self.e_checkkubernetesapi = 0
+            else:
+                self.e_checkkubernetesapi += 1
+                self.logger.warning(f'{self.sm.current_state.name} error no {self.e_checkkubernetesapi}')
+                self.sm.escalate() if self.e_checkkubernetesapi >= self.errors else self.sm.error()
+
+        #######################################################################################################################
+
+        elif self.sm.current_state == self.sm.reboot:
+            if self.wrap_action(self.reboot):
+                self.sm.degress()
+            else:
+                self.sm.error()
+
+    def wrap_action(self, action):
+        try:
+            return action()
+        except:
+            e = sys.exc_info()[0]
+            self.logger.warning("Exception: %s" % e)
+            return False
+
+    def reboot(self):
+        self.logger.warning(f'Rebooting the device')
+        proc = subprocess.run(['reboot'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode != 0:
+            self.logger.warning(f'The exit code was: {proc.returncode}')
+            return False
+        return True
+
+    def checkping(self):
+        try:
+            socket.create_connection(("1.1.1.1", 53))
+            return True
+        except OSError:
+            pass
+        self.logger.warning('Cannot ping IP: 1.1.1.1 on port 53')
+        return False
+
+    def checktoe(self):
+        kubernetes.config.load_kube_config("/etc/rancher/k3s/k3s.yaml")
+        try:
+            api_instance = kubernetes.client.CoreV1Api()
+            label_selector = "app=toe"
+            api_response = api_instance.list_pod_for_all_namespaces(watch=False, label_selector=label_selector)
+            toe = next(iter(api_response.items), None)
+            if toe == None:
+                self.logger.warning(f'There is no TOE POD')
+                return False
+            toe_container_status = next(iter(toe.status.container_statuses), None)
+            if toe_container_status == None:
+                self.logger.warning(f'There is no container status for TOE POD')
+                return False
+            self.logger.info(f'TOE POD NAME: {toe_container_status.name}, Ready: {str(toe_container_status.ready)}')
+            return toe_container_status.ready
+        except kubernetes.client.rest.ApiException as e:
+            self.logger.warning('Found exception in reading TOE pod')
+        return False
+
+    def checkkubernetesapi(self):
+        kubernetes.config.load_kube_config("/etc/rancher/k3s/k3s.yaml")
+        try:
+            api_instance = kubernetes.client.CoreV1Api()
+            name = 'healtcheck'
+            namespace = 'kube-system'
+            resp = None
+            try:
+                resp = api_instance.read_namespaced_pod(name=name, namespace=namespace)
+            except kubernetes.client.rest.ApiException as e:
+                if e.status != 404:
+                    logger.info(f"Unknown error: {e}")
+                    return False
+            if not resp:
+                logger.info(f"Pod {name} does not exist. Creating it...")
+                pod_manifest = {
+                    'apiVersion': 'v1',
+                    'kind': 'Pod',
+                    'metadata': {
+                        'name': name
+                    },
+                    'spec': {
+                        'containers': [{
+                            'image': 'busybox',
+                            'name': 'sleep',
+                            "args": [
+                                "/bin/sh",
+                                "-c",
+                                "while true;do date;sleep 5; done"
+                            ]
+                        }]
+                    }
+                }
+                resp = api_instance.create_namespaced_pod(body=pod_manifest, namespace=namespace)
+                while True:
+                    resp = api_instance.read_namespaced_pod(name=name, namespace=namespace)
+                    if resp.status.phase != 'Pending':
+                        break
+                    time.sleep(1)
+                logger.info(f"Pod {name} created")
+
+            # Calling exec and waiting for response
+            exec_command = [
+                'nc', '-zvn', '-w', '2', 'kubernetes.default', '443']
+            client = stream(api_instance.connect_get_namespaced_pod_exec,
+                            name,
+                            namespace,
+                            command=exec_command,
+                            stderr=True, stdin=False,
+                            stdout=True, tty=False, _preload_content=False)
+
+            client.run_forever(timeout=10)
+            err = client.read_channel(ERROR_CHANNEL)
+            result = yaml.safe_load(err)
+            if result['status'] != "Success":
+                logger.error(f'Failed to run command "{" ".join(exec_command)}"')
+                logger.error('Reason: ' + result['reason'])
+                logger.error('Message: ' + result['message'])
+                logger.error('Details: ' + ';'.join(map(lambda x: json.dumps(x), result['details']['causes'])))
+                return False
+
+        except kubernetes.client.rest.ApiException as e:
+            logger.warning(f'Exception during healthcheck of kubernetes API: {e}')
+            return False
+
+        return True
+
+def parse_args():
+    # Parse input arguments
+    desc = 'Teknoir Device Watchdog'
+    parser = argparse.ArgumentParser(description=desc)
+    parser.add_argument('--interval', dest='interval',
+                        help='Set interval in seconds between check',
+                        default=INTERVAL, type=int)
+    parser.add_argument('--errors', dest='errors',
+                        help='Set number of errors to reboot',
+                        default=ERRORS, type=int)
+    args = parser.parse_args()
+    return args
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    logger = logging.getLogger('tnw')
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter('[%(name)s] [%(levelname)s] %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+    logger.setLevel(logging.INFO)
+
+    logger.info("TΞꓘN01R")
+    logger.info("TΞꓘN01R")
+    logger.info("TΞꓘN01R")
+    logger.info("TΞꓘN01R")
+
+    wd = systemd_watchdog.watchdog()
+    if not wd.is_enabled:
+        # Then it's probably not running is systemd with watchdog enabled
+        raise Exception("Watchdog not enabled")
+
+    watchdog = Watchdog(logger=logger, wd=wd, **args.__dict__)
+
+    # Report that the program init is complete
+    wd.ready()
+    wd.status("Init is complete...")
+    wd.notify()
+
+    wd.status("Starting up watchdog...")
+    while True:
+        watchdog.tick()
+        time.sleep(1)
+        wd.notify()
+EOL
+  $SUDO chmod 644 /usr/local/lib/teknoir/watchdog.py
+
+  $SUDO tee /lib/systemd/system/tn-watchdog.service > /dev/null << EOL
+[Unit]
+Description=Teknoir Device Watchdog
+After=network.target
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+ExecStart=/usr/bin/python3 /usr/local/lib/teknoir/watchdog.py --interval 60 --errors 20
+Type=notify
+WatchdogSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+
+  $SUDO chmod 644 /lib/systemd/system/tn-watchdog.service
+  info "Enable and start watchdog service"
+  if [ ${OS_BUILD} ]; then
+      info "OS Build specifics"
+      $SUDO ln -s /lib/systemd/system/tn-watchdog.service /etc/systemd/system/multi-user.target.wants/tn-watchdog.service
+  else
+      $SUDO systemctl enable --now tn-watchdog.service
+  fi
+fi
+
+info "Device bootstrapped successfully!"
+
+info ""
+info " _____ _____ _  ___   _  ___ ___ ____ "
+info "|_   _| ____| |/ / \ | |/ _ \_ _|  _ \ "
+info "  | | |  _| | ' /|  \| | | | | || |_) | "
+info "  | | | |___| . \| |\  | |_| | ||  _ <  "
+info "  |_| |_____|_|\_\_| \_|\___/___|_| \_\ "
+info ""
+info "Notice!"
+info "No networking or user settings has been changed to match settings in the platform."
+
+_FIRST_USER_NAME="{{.Username}}"
+_FIRST_USER_PASS="{{.Password}}"
+_FIRST_USER_KEY="{{.PublicSSHKey}}"
+
+warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
+
+on_sudo() {
+  $SUDO sh -- "$@"
+}
+
+setup_user() {
+  $SUDO mkdir -p /home/${_FIRST_USER_NAME}
+  if ! id -u ${_FIRST_USER_NAME} >/dev/null 2>&1; then
+    $SUDO adduser --disabled-password --gecos "" ${_FIRST_USER_NAME}
+  fi
+
+  if command -v chpasswd &> /dev/null; then
+    echo "${_FIRST_USER_NAME}:${_FIRST_USER_PASS}" | $SUDO chpasswd
+  elif command -v passwd &> /dev/null; then
+    echo -e "${_FIRST_USER_PASS}\n${_FIRST_USER_PASS}" | passwd ${_FIRST_USER_NAME}
+  elif command -v usermod &> /dev/null && command -v openssl &> /dev/null; then
+    usermod --password $(openssl passwd -1 ${_FIRST_USER_PASS}) ${_FIRST_USER_NAME}
+  else
+      warn "Could not set password for user ${_FIRST_USER_NAME}"
+      info "Skipping tunneling setup"
+      exit
+  fi
+
+  on_sudo << EOF
+mkdir -p /home/${_FIRST_USER_NAME}/.ssh
+cp ${CONFIG_PATH}/rsa_private.pem /home/${_FIRST_USER_NAME}/.ssh/id_rsa
+ssh-keygen -y -f ${CONFIG_PATH}/rsa_private.pem > /home/${_FIRST_USER_NAME}/.ssh/id_rsa.pub
+cat /home/${_FIRST_USER_NAME}/.ssh/id_rsa.pub > /home/${_FIRST_USER_NAME}/.ssh/authorized_keys
+if [ -z ${_FIRST_USER_KEY+x} ] || [ "${_FIRST_USER_KEY}" = "" ]; then
+  echo "[INFO] _FIRST_USER_KEY is not set, will continue with only password auth";
+else
+  echo "${_FIRST_USER_KEY}" >> /home/${_FIRST_USER_NAME}/.ssh/authorized_keys
+fi
+chmod 600 /home/${_FIRST_USER_NAME}/.ssh/*
+chmod 744 /home/${_FIRST_USER_NAME}/.ssh
+chown -R ${_FIRST_USER_NAME}:${_FIRST_USER_NAME} /home/${_FIRST_USER_NAME}
+
+# Add root user to users and sudo groups
+if [ -e /etc/group ]; then
+    sed -i "/^users:/s/\(.*\)/\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
+    sed -i "/^sudo:/s/\(.*\)/\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
+fi
+EOF
+}
+
+CREATE_USER=${CREATE_USER:-ask}
+if [ ${OS_BUILD} ] || [ "${CREATE_USER}" = true ]; then
+  setup_user
+else
+  if id -u ${_FIRST_USER_NAME} >/dev/null 2>&1; then
+    warn "The user ${_FIRST_USER_NAME} already exist! This operation will change the password and OVERWRITE ssh keys for this users."
+  fi
+  warn "Do you want to add \"${_FIRST_USER_NAME}\" as a user and enable tunneling? [yY]"
+  read REPLY
+
+  case ${REPLY} in
+    [Yy]* )
+      setup_user
+      ;;
+    * )
+      info "Skipping tunneling setup"
+      ;;
+  esac
+fi
+
+cd ..
+info "Device bootstrapped successfully!"
+

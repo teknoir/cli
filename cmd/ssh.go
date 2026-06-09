@@ -1,15 +1,12 @@
 package cmd
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
-	"time"
 
 	"teknoir/cli/pkg/api"
-	authPkg "teknoir/cli/pkg/auth"
 	"teknoir/cli/pkg/config"
 
 	"github.com/ktr0731/go-fuzzyfinder"
@@ -42,7 +39,7 @@ var sshCmd = &cobra.Command{
 
 		if deviceName == "" {
 			// Fetch and select device via fuzzy finder
-			devices, err := fetchDevices(cmd.Context(), domain, namespace)
+			devices, err := api.FetchDevices(cmd.Context(), domain, namespace)
 			if err != nil {
 				return err
 			}
@@ -61,7 +58,7 @@ var sshCmd = &cobra.Command{
 		}
 
 		// Fetch device details from Backstage API
-		device, err := fetchDeviceDetails(cmd.Context(), domain, namespace, deviceName)
+		device, err := api.FetchDeviceDetails(cmd.Context(), domain, namespace, deviceName)
 		if err != nil {
 			return err
 		}
@@ -137,117 +134,6 @@ var sshCmd = &cobra.Command{
 
 		return sshExec.Run()
 	},
-}
-
-type backstageDevice struct {
-	Metadata struct {
-		Name string `json:"name"`
-	} `json:"metadata"`
-	Spec struct {
-		Settings struct {
-			Username   string `json:"username"`
-			Password   string `json:"userpassword"`
-			RSAPrivate string `json:"rsa_private"`
-		} `json:"settings"`
-		Subresources struct {
-			Status struct {
-				RemoteAccess struct {
-					Active bool   `json:"active"`
-					Port   string `json:"port"`
-				} `json:"remote_access"`
-			} `json:"status"`
-		} `json:"subresources"`
-	} `json:"spec"`
-}
-
-type backstageResponse struct {
-	Items []backstageDevice `json:"items"`
-}
-
-func fetchDeviceDetails(ctx context.Context, domain, namespace, deviceName string) (*backstageDevice, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-
-	auth, exists := cfg.Auths[config.SanitizeDomain(domain)]
-	if !exists || auth.AccessToken == "" {
-		return nil, fmt.Errorf("no credentials found for domain %s. Please log in first", domain)
-	}
-
-	token, err := authPkg.GetValidToken(ctx, domain, auth)
-	if err != nil {
-		return nil, err
-	}
-
-	// Update config with new token if refreshed
-	if token.AccessToken != auth.AccessToken || token.RefreshToken != auth.RefreshToken {
-		auth.AccessToken = token.AccessToken
-		auth.RefreshToken = token.RefreshToken
-		auth.Expiry = token.Expiry.Format(time.RFC3339)
-		cfg.Auths[config.SanitizeDomain(domain)] = auth
-		if err := cfg.Save(); err != nil {
-			return nil, fmt.Errorf("failed to save refreshed token: %w", err)
-		}
-	}
-
-	url := fmt.Sprintf("https://%s/api/catalog/entities/by-refs", domain)
-	payload := map[string][]string{
-		"entityRefs": {fmt.Sprintf("resource:%s/%s", namespace, deviceName)},
-	}
-
-	var resp backstageResponse
-	if err := api.RequestWithBody(ctx, "POST", url, token.AccessToken, payload, &resp); err != nil {
-		return nil, err
-	}
-
-	if len(resp.Items) == 0 {
-		return nil, fmt.Errorf("device %s/%s not found", namespace, deviceName)
-	}
-
-	return &resp.Items[0], nil
-}
-
-func fetchDevices(ctx context.Context, domain, namespace string) ([]string, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-
-	auth, exists := cfg.Auths[config.SanitizeDomain(domain)]
-	if !exists || auth.AccessToken == "" {
-		return nil, fmt.Errorf("no credentials found for domain %s. Please log in first", domain)
-	}
-
-	token, err := authPkg.GetValidToken(ctx, domain, auth)
-	if err != nil {
-		return nil, err
-	}
-
-	// Update config with new token if refreshed
-	if token.AccessToken != auth.AccessToken || token.RefreshToken != auth.RefreshToken {
-		auth.AccessToken = token.AccessToken
-		auth.RefreshToken = token.RefreshToken
-		auth.Expiry = token.Expiry.Format(time.RFC3339)
-		cfg.Auths[config.SanitizeDomain(domain)] = auth
-		if err := cfg.Save(); err != nil {
-			return nil, fmt.Errorf("failed to save refreshed token: %w", err)
-		}
-	}
-
-	url := fmt.Sprintf("https://%s/api/catalog/entities?filter=kind%%3Dresource%%2Cspec.type%%3Ddevice%%2Cmetadata.namespace%%3D%s&order=asc%%3Ametadata.name", domain, namespace)
-
-	var items []backstageDevice
-	if err := api.Request(ctx, "GET", url, token.AccessToken, &items); err != nil {
-		return nil, err
-	}
-
-	var devices []string
-	for _, item := range items {
-		devices = append(devices, item.Metadata.Name)
-	}
-
-	return devices, nil
 }
 
 func init() {

@@ -11,6 +11,7 @@ import (
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"teknoir/cli/pkg/api"
 	"teknoir/cli/pkg/config"
 )
 
@@ -55,7 +56,7 @@ Example:
 
 		if deviceName == "" {
 			// Fetch and select device via fuzzy finder
-			devices, err := fetchDevices(cmd.Context(), domain, namespace)
+			devices, err := api.FetchDevices(cmd.Context(), domain, namespace)
 			if err != nil {
 				return err
 			}
@@ -89,7 +90,7 @@ Example:
 		}
 
 		// Fetch device details from Backstage API
-		device, err := fetchDeviceDetails(cmd.Context(), domain, namespace, deviceName)
+		device, err := api.FetchDeviceDetails(cmd.Context(), domain, namespace, deviceName)
 		if err != nil {
 			return err
 		}

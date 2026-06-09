@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
+	"teknoir/cli/pkg/api"
 	"teknoir/cli/pkg/config"
 )
 
@@ -30,7 +31,7 @@ var deviceCmd = &cobra.Command{
 		}
 
 		// Fetch devices from Backstage
-		devices, err := fetchDevices(cmd.Context(), domain, namespace)
+		devices, err := api.FetchDevices(cmd.Context(), domain, namespace)
 		if err != nil {
 			return err
 		}
