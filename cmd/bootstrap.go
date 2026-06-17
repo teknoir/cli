@@ -35,8 +35,8 @@ var bootstrapCmd = &cobra.Command{
 		var deviceName string
 		if len(args) > 0 {
 			deviceName = args[0]
-		} else if cmd.Flags().Changed("device") {
-			deviceName = cfg.GetDevice()
+		} else if device != "" {
+			deviceName = device
 		}
 
 		if deviceName == "" {

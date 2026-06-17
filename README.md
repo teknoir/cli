@@ -38,9 +38,13 @@ tnctl login
 
 This will open your default browser to complete the login sequence. Use `--domain` if you are targeting a specific environment.
 
-### 2. Context Management
+```bash
+tnctl login --domain teknoir.cloud
+```
 
-`tnctl` uses a persistent configuration to store your active domain, namespace, and device.
+### 2. Context & Device Management
+
+`tnctl` uses a persistent configuration to store your active domain and namespace.
 
 - **Switch Domain**:
   ```bash
@@ -51,11 +55,19 @@ This will open your default browser to complete the login sequence. Use `--domai
   tnctl ns [namespace]
   ```
   If no namespace is provided, an interactive fuzzy-finder will appear.
-- **Switch Device**:
+- **Device Status**:
   ```bash
   tnctl device [device]
   ```
-  If no device is provided, an interactive fuzzy-finder will appear.
+  Prints detailed status for a device, including resource usage and alerts. If no device is provided, an interactive fuzzy-finder will appear.
+- **List Devices**:
+  ```bash
+  tnctl devices [labels...]
+  ```
+  Prints a summary list of all devices in the current namespace. You can filter by metadata labels using `key=value` pairs.
+  ```bash
+  tnctl devices env=prod region=us-east
+  ```
 
 ### 3. Remote Access
 
@@ -100,7 +112,29 @@ export TNCTL_NAMESPACE=my-namespace
 Apache License 2.0
 
 # Upcoming Features
-- [ ] Device Management / bootstrap script generation
-- [ ] Device tunneling enablement
-- [ ] Device VPN / Wireguard tunneling
-- [ ] User management
+- [ ] helm add
+- [ ] helm repo list
+- [x] device <device name>
+- [x] devices <metadata labels>
+- [ ] device(s) add
+- [ ] device(s) deploy
+- [ ] device(s) apply
+- [ ] device tunneling --enable/--disable
+- [ ] device vpn (Wireguard tunneling)
+- [ ] device top
+- [ ] user (management)
+
+
+## device apply
+* `device <device name> apply <manifest file>`, and if `<device name>` left out of the command, the CLI will prompt you to select a device, and if `<manifest file>` is left out of the command, the CLI will prompt you to select a manifest file from local directory.
+* Starting with a simple example:
+  * `device apply <manifest file>`, where `<manifest file>` is a YAML file containing any set of supported K8s resources / manifests. Ex: `device apply deployment.yaml`
+* Using `devices <metadata labels> apply <manifest file>`, apply the manifest file to all devices in the namespace selected by the current context in the CLI and the metadata labels, after the list of devices has been presented to the user and approved.
+
+## device deploy
+* `device <device name> deploy <app name>`, and if `<device name>` left out of the command, the CLI will prompt you to select a device, and if `<app name>` is left out of the command, the CLI will prompt you to select an app listed from the Backstage backend.
+* An app is a K3s HelmChart, and you are able to override the default values.yaml file by passing in a custom values.yaml file and a name for the release.
+  *  `device <device name> deploy <app name> --values <values.yaml file> --release <release name>`
+* Before releasing the app, the CLI will render the HelmChart in pretty yaml and prompt you to confirm the release.
+* An alternative `device <device name> deploy <app name> --values <values.yaml file> --release <release name>`
+* Using `devices <metadata labels> deploy <app name> --values <values.yaml file> --release <release name>`, deploy the app to all devices in the namespace selected by the current context in the CLI and the metadata labels, after the list of devices has been presented to the user and approved.

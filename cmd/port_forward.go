@@ -47,8 +47,8 @@ Example:
 		if len(args) > argIdx && !strings.Contains(args[argIdx], ":") {
 			deviceName = args[argIdx]
 			argIdx++
-		} else if cmd.Flags().Changed("device") {
-			deviceName = cfg.GetDevice()
+		} else if device != "" {
+			deviceName = device
 		}
 
 		if deviceName == "" {

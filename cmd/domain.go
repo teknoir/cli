@@ -45,9 +45,6 @@ var domainCmd = &cobra.Command{
 		if ns := cfg.GetNamespace(); ns != "" {
 			fmt.Printf("Active namespace: %s\n", ns)
 		}
-		if dev := cfg.GetDevice(); dev != "" {
-			fmt.Printf("Active device: %s\n", dev)
-		}
 		return nil
 	},
 }

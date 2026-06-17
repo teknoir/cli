@@ -16,7 +16,6 @@ type AuthConfig struct {
 	ClientID     string `mapstructure:"client_id" yaml:"client_id,omitempty"`
 	ClientSecret string `mapstructure:"client_secret" yaml:"client_secret,omitempty"`
 	Namespace    string `mapstructure:"namespace" yaml:"namespace,omitempty"`
-	Device       string `mapstructure:"device" yaml:"device,omitempty"`
 }
 
 const ClientID = "teknoir-cli"
@@ -54,23 +53,6 @@ func (c *Config) GetNamespace() string {
 	return "default"
 }
 
-// GetDevice returns the active device.
-// Precedence: Flags/Env > Domain-specific Config > Top-level Config > Empty.
-func (c *Config) GetDevice() string {
-	if dev := viper.GetString("flag_device"); dev != "" {
-		return dev
-	}
-	if c.Domain != "" {
-		if auth, ok := c.Auths[SanitizeDomain(c.Domain)]; ok && auth.Device != "" {
-			return auth.Device
-		}
-	}
-	if dev := viper.GetString("device"); dev != "" {
-		return dev
-	}
-	return ""
-}
-
 // Load reads the configuration from Viper.
 func Load() (*Config, error) {
 	var cfg Config
@@ -87,7 +69,7 @@ func Load() (*Config, error) {
 func (c *Config) Save() error {
 	viper.Set("domain", c.Domain)
 	viper.Set("auths", c.Auths)
-	// Clear top-level namespace/device/debug to ensure they are only in Auths (or not at all for debug)
+	// Clear top-level namespace/debug to ensure they are only in Auths (or not at all for debug)
 	viper.Set("namespace", nil)
 	viper.Set("device", nil)
 	viper.Set("debug", nil)
@@ -120,19 +102,6 @@ func (c *Config) SetNamespace(ns string) {
 		key := SanitizeDomain(c.Domain)
 		auth := c.Auths[key]
 		auth.Namespace = ns
-		c.Auths[key] = auth
-	}
-}
-
-// SetDevice updates the active device and stores it in the current domain's context.
-func (c *Config) SetDevice(dev string) {
-	if c.Domain != "" {
-		if c.Auths == nil {
-			c.Auths = make(map[string]AuthConfig)
-		}
-		key := SanitizeDomain(c.Domain)
-		auth := c.Auths[key]
-		auth.Device = dev
 		c.Auths[key] = auth
 	}
 }

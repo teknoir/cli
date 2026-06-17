@@ -49,8 +49,8 @@ Example:
 			}
 		}
 
-		if deviceName == "" && cmd.Flags().Changed("device") {
-			deviceName = cfg.GetDevice()
+		if deviceName == "" && device != "" {
+			deviceName = device
 		}
 
 		if deviceName == "" {

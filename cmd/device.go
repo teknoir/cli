@@ -6,12 +6,13 @@ import (
 	"github.com/spf13/cobra"
 	"teknoir/cli/pkg/api"
 	"teknoir/cli/pkg/config"
+	"teknoir/cli/pkg/ui"
 )
 
 var deviceCmd = &cobra.Command{
 	Use:     "device [device]",
 	Aliases: []string{"dev"},
-	Short:   "Select active device",
+	Short:   "Print device status",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {
@@ -25,34 +26,37 @@ var deviceCmd = &cobra.Command{
 			return fmt.Errorf("domain and namespace are required. Please set them via flags or config")
 		}
 
+		var selected string
 		if len(args) > 0 {
-			cfg.SetDevice(args[0])
-			return cfg.Save()
+			selected = args[0]
+		} else {
+			// Fetch devices from Backstage
+			devices, err := api.FetchDevices(cmd.Context(), domain, namespace)
+			if err != nil {
+				return err
+			}
+
+			if len(devices) == 0 {
+				return fmt.Errorf("no devices found in namespace %s", namespace)
+			}
+
+			idx, err := fuzzyfinder.Find(devices, func(i int) string {
+				return devices[i]
+			})
+			if err != nil {
+				return err
+			}
+
+			selected = devices[idx]
 		}
 
-		// Fetch devices from Backstage
-		devices, err := api.FetchDevices(cmd.Context(), domain, namespace)
+		// Fetch and print device details
+		deviceDetails, err := api.FetchDeviceDetails(cmd.Context(), domain, namespace, selected)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to fetch device details: %w", err)
 		}
 
-		if len(devices) == 0 {
-			return fmt.Errorf("no devices found in namespace %s", namespace)
-		}
-
-		idx, err := fuzzyfinder.Find(devices, func(i int) string {
-			return devices[i]
-		})
-		if err != nil {
-			return err
-		}
-
-		selected := devices[idx]
-		cfg.SetDevice(selected)
-		if err := cfg.Save(); err != nil {
-			return err
-		}
-		fmt.Printf("Switched to device: %s\n", selected)
+		ui.PrintDeviceStatus(deviceDetails)
 		return nil
 	},
 }
