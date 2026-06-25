@@ -1,0 +1,28 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: tnctl
+  title: tnctl (Teknoir Control)
+  description: >-
+    The official command-line interface for managing Teknoir cloud resources
+    and edge devices, handling authentication, context switching, and secure
+    remote access.
+  annotations:
+    github.com/project-slug: teknoir/cli
+    backstage.io/techdocs-ref: dir:.
+  tags:
+    - cli
+    - go
+    - golang
+    - teknoir
+  links:
+    - url: https://github.com/teknoir/cli
+      title: Source Repository
+      icon: github
+    - url: https://github.com/teknoir/cli/releases
+      title: Releases
+      icon: github
+spec:
+  type: tool
+  lifecycle: experimental
+  owner: teknoir

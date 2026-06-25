@@ -1,0 +1,50 @@
+site_name: tnctl (Teknoir Control)
+site_description: The official command-line interface for managing Teknoir cloud resources and edge devices.
+site_author: Teknoir
+repo_url: https://github.com/teknoir/cli
+edit_uri: edit/main/docs/
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Getting Started: getting-started.md
+  - Configuration: configuration.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - Contexts (Domain & Namespace): concepts/contexts.md
+      - Remote Access: concepts/remote-access.md
+  - Command Reference:
+      - Overview: commands/index.md
+      - login: commands/login.md
+      - add: commands/add.md
+      - domain: commands/domain.md
+      - ns: commands/ns.md
+      - device: commands/device.md
+      - devices: commands/devices.md
+      - ssh: commands/ssh.md
+      - port-forward: commands/port-forward.md
+      - socks-proxy: commands/socks-proxy.md
+      - bootstrap: commands/bootstrap.md
+  - Troubleshooting: troubleshooting.md
+  - FAQ: faq.md
+
+plugins:
+  - techdocs-core
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - tables
+  - attr_list
