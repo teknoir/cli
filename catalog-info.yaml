@@ -25,4 +25,4 @@ metadata:
 spec:
   type: tool
   lifecycle: experimental
-  owner: teknoir
+  owner: group:teknoir/public
