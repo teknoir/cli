@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
-	"teknoir/cli/pkg/api"
-	"teknoir/cli/pkg/config"
-	"teknoir/cli/pkg/ui"
+	"github.com/teknoir/cli/pkg/api"
+	"github.com/teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/ui"
 )
 
 var deviceCmd = &cobra.Command{

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"teknoir/cli/pkg/api"
-	authPkg "teknoir/cli/pkg/auth"
-	"teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/api"
+	authPkg "github.com/teknoir/cli/pkg/auth"
+	"github.com/teknoir/cli/pkg/config"
 
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"

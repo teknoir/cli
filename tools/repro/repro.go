@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"teknoir/cli/pkg/api"
+	"github.com/teknoir/cli/pkg/api"
 )
 
 func main() {

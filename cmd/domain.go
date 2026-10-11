@@ -5,7 +5,7 @@ import (
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
 	"slices"
-	"teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/config"
 )
 
 var domainCmd = &cobra.Command{

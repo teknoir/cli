@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/config"
 )
 
 func TestRequest_HTMLDetection(t *testing.T) {

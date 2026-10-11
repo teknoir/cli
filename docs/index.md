@@ -66,7 +66,7 @@ flowchart LR
 
 !!! info "Project facts"
     - **Binary name:** `tnctl`
-    - **Go module:** `teknoir/cli`
+    - **Go module:** `github.com/teknoir/cli`
     - **Default domain:** `teknoir.cloud`
     - **Config file:** `~/.tnctl.yaml`
     - **License:** Apache 2.0

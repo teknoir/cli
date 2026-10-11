@@ -1,4 +1,4 @@
-module teknoir/cli
+module github.com/teknoir/cli
 
 go 1.25.0
 
@@ -41,3 +41,7 @@ require (
 	golang.org/x/term v0.40.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 )
+
+require github.com/teknoir/cli/pkg/templates v0.0.0
+
+replace github.com/teknoir/cli/pkg/templates => ./pkg/templates

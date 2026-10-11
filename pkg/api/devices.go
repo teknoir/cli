@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"time"
 
-	"teknoir/cli/pkg/auth"
-	"teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/auth"
+	"github.com/teknoir/cli/pkg/config"
 )
 
 type DeviceAlert struct {

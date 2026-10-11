@@ -2,7 +2,7 @@
 
 ## Identity
 - **Binary Name**: `tnctl`
-- **Module Name**: `teknoir/cli`
+- **Module Name**: `github.com/teknoir/cli`
 - **Purpose**: A command-line interface for managing Teknoir cloud resources and edge devices.
 
 ## Development Rules

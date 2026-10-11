@@ -107,6 +107,26 @@ export TNCTL_DOMAIN=teknoir.cloud
 export TNCTL_NAMESPACE=my-namespace
 ```
 
+## Using the templates from Go
+
+The device bootstrap script templates are published as a separate, dependency-free Go module, so other
+programs can render the same scripts `tnctl bootstrap` produces without pulling in the CLI's dependencies:
+
+```sh
+go get github.com/teknoir/cli/pkg/templates@<commit>
+```
+
+```go
+import "github.com/teknoir/cli/pkg/templates"
+
+script, err := templates.RenderServer(templates.TemplateData{Domain: "example.com", Namespace: "my-teamspace", DeviceID: "my-device" /* ... */})
+```
+
+`RenderServer` validates the input first (`ValidateTemplateData` rejects `"`, `` ` ``, `$` and `\` in every field,
+and newlines in every field except `RSAPrivate` and `RSAPublic`). Errors name the field, never the value.
+`TemplatesSHA256()` returns a fingerprint of all embedded templates, to detect a stale rendered script.
+No tags are published yet, so pin a commit (`go get` resolves it to a pseudo-version).
+
 ## License
 
 Apache License 2.0
