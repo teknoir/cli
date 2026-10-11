@@ -1,0 +1,64 @@
+name: k3s-ca
+
+# The k3s custom-CA library (pkg/templates/scripts/tn-k3s-ca.sh) and its harness.
+# Unit tests run on every change; the docker matrix against real rancher/k3s
+# releases is started by hand (it needs privileged containers and several minutes).
+
+on:
+  pull_request:
+    paths:
+      - 'pkg/templates/**'
+      - 'test/k3s-ca/**'
+      - '.github/workflows/k3s-ca.yml'
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: 'run.sh --suite value'
+        default: 'fresh,remediation'
+      versions:
+        description: 'k3s versions (space separated)'
+        default: 'v1.34.11 v1.36.5'
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: shellcheck
+        run: |
+          shellcheck -s sh -S warning pkg/templates/scripts/tn-k3s-ca.sh
+      - name: go test
+        run: go test ./pkg/templates/... ./test/k3s-ca/...
+
+  docker-matrix:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: run the harness
+        env:
+          TN_K3S_CA_LIB: ${{ github.workspace }}/pkg/templates/scripts/tn-k3s-ca.sh
+          SUITES: ${{ inputs.suites }}
+          VERSIONS: ${{ inputs.versions }}
+        run: |
+          test/k3s-ca/run.sh --suite "$SUITES" --versions "$VERSIONS" --gens bs-o111 -j 3 --out "$RUNNER_TEMP/k3sca"
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k3sca-results
+          path: |
+            ${{ runner.temp }}/k3sca/results.tsv
+            ${{ runner.temp }}/k3sca/logs
