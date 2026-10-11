@@ -325,11 +325,29 @@ tn_inst_agent_target() {
   tn_inst_fatal "cannot read the k3s release of the server at ${K3S_URL:-(K3S_URL is not set)} (${K3S_URL:-https://<server>:6443}/static/teknoir/k3s-version): an agent must not run a newer k3s than its server, so this script does not guess. $_tn_why Or say which release the server runs: INSTALL_K3S_VERSION=v1.xx.y+k3sN (tnctl bootstrap --k3s-version), or set TN_K3S_FORCE=true to install ${_tn_pin:-the release the installer picks} anyway. $(tn_inst_state_note)"
 }
 
+# tn_inst_normalize_pin: the k3s installer takes INSTALL_K3S_VERSION as an EXACT release (it downloads that
+# tag, so "stable" would be a 404) and INSTALL_K3S_CHANNEL as a channel. A channel name given as the version
+# (stable, latest, testing, or a minor such as v1.34) is moved to INSTALL_K3S_CHANNEL and the version is
+# unset, so that every later check sees what the installer will see. An exact release is not touched.
+tn_inst_normalize_pin() {
+  [ -n "${INSTALL_K3S_VERSION:-}" ] || return 0
+  case $INSTALL_K3S_VERSION in
+    stable|latest|testing) ;;
+    v[0-9]*) printf '%s\n' "$INSTALL_K3S_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+$' || return 0 ;;
+    *) return 0 ;;
+  esac
+  INSTALL_K3S_CHANNEL=$INSTALL_K3S_VERSION
+  export INSTALL_K3S_CHANNEL
+  unset INSTALL_K3S_VERSION
+  tn_inst_info "$INSTALL_K3S_CHANNEL is a k3s channel, not a release: the installer gets INSTALL_K3S_CHANNEL=$INSTALL_K3S_CHANNEL"
+}
+
 # tn_inst_plan: applies the policy at the top. Reads INSTALL_K3S_VERSION / INSTALL_K3S_CHANNEL,
 # sets and exports them for the installer. Sets TN_INST_INSTALLED, TN_INST_ACTION
 # (install|same|keep|upgrade) and TN_INST_EFFECTIVE (the exact release that will run, or nothing
 # when only a channel is known). Exits through tn_inst_fatal when it refuses.
 tn_inst_plan() {
+  tn_inst_normalize_pin
   tn_inst_installed_version
   if [ -z "$TN_INST_INSTALLED" ] && tn_inst_k3s_present; then
     if [ "${TN_K3S_FORCE:-}" = true ]; then
@@ -429,7 +447,7 @@ tn_inst_cgroup_flag_in_text() {
 tn_inst_cgroup_configured_elsewhere() {
   _tn_cd=${TN_K3S_CONFIG_DIR:-/etc/rancher/k3s}
   TN_INST_CGROUP_WHERE=; TN_INST_CGROUP_PERSISTENT=0
-  for _tn_cf in "$_tn_cd/config.yaml" $(find "$_tn_cd/config.yaml.d" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null | LC_ALL=C sort); do
+  for _tn_cf in "$_tn_cd/config.yaml" $(find "$_tn_cd/config.yaml.d" -maxdepth 1 -type f \( -iname '*.yaml' -o -iname '*.yml' \) 2>/dev/null | LC_ALL=C sort); do
     [ -r "$_tn_cf" ] || continue
     [ "$_tn_cf" != "$_tn_cd/config.yaml.d/$TN_INST_CGROUP_FILE" ] || continue
     if tn_inst_cgroup_flag_in_text < "$_tn_cf"; then TN_INST_CGROUP_WHERE=$_tn_cf; TN_INST_CGROUP_PERSISTENT=1; return 0; fi

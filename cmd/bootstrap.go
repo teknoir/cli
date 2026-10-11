@@ -176,7 +176,7 @@ func generateK3SToken() (string, error) {
 func init() {
 	bootstrapCmd.Flags().Bool("skip-upload", false, "Skip uploading the generated scripts")
 	bootstrapCmd.Flags().String("k3s-version", templates.DefaultK3SVersion,
-		"k3s release the scripts install (INSTALL_K3S_VERSION): an exact release like v1.36.5+k3s1, or stable / latest for the installer's channels. Server and agent scripts use the same value")
+		"k3s release the scripts install (INSTALL_K3S_VERSION): an exact release like v1.36.5+k3s1, or a channel (stable, latest, testing, v1.34, passed as INSTALL_K3S_CHANNEL). Server and agent scripts use the same value")
 	bootstrapCmd.Flags().Bool("k3s-upgrade", false,
 		"let the scripts replace an installed k3s with --k3s-version (TN_K3S_UPGRADE=true is the default in the scripts). Without it a re-run keeps the installed k3s; a downgrade is always refused")
 	bootstrapCmd.Flags().Bool("force", false,

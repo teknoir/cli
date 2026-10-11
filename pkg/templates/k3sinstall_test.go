@@ -856,7 +856,10 @@ func TestRenderedPinThroughThePolicy(t *testing.T) {
 		{"env opts in", TemplateData{}, "v1.35.9+k3s1", []string{"TN_K3S_UPGRADE=true"}, 0, "version=v1.36.5+k3s1 channel=unset action=upgrade"},
 		{"env pin beats the template pin on a new device", TemplateData{}, "", []string{"INSTALL_K3S_VERSION=v1.34.11+k3s1"}, 0, "version=v1.34.11+k3s1 channel=unset action=install"},
 		{"latest channel, installed", TemplateData{K3SVersion: "latest"}, "v1.35.9+k3s1", nil, 0, "version=v1.35.9+k3s1 channel=unset action=keep"},
-		{"stable, fresh", TemplateData{K3SVersion: "stable"}, "", nil, 0, "version=unset channel=unset action=install"},
+		{"stable, fresh", TemplateData{K3SVersion: "stable"}, "", nil, 0, "version=unset channel=stable action=install"},
+		{"v1.34 channel, fresh", TemplateData{K3SVersion: "v1.34"}, "", nil, 0, "version=unset channel=v1.34 action=install"},
+		{"stable, installed, kept", TemplateData{K3SVersion: "stable"}, "v1.35.9+k3s1", nil, 0, "version=v1.35.9+k3s1 channel=unset action=keep"},
+		{"channel in INSTALL_K3S_VERSION at run time", TemplateData{}, "", []string{"INSTALL_K3S_VERSION=stable"}, 0, "version=unset channel=stable action=install"},
 		{"latest, fresh", TemplateData{K3SVersion: "latest"}, "", nil, 0, "version=unset channel=latest action=install"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

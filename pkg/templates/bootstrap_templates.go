@@ -16,14 +16,17 @@ const DefaultK3SVersion = "v1.36.5+k3s1"
 
 var k3sVersionRE = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$`)
 
+// k3sChannelRE is a k3s release channel: stable, latest, testing, or a minor version such as v1.34.
+var k3sChannelRE = regexp.MustCompile(`^(stable|latest|testing|v[0-9]+\.[0-9]+)$`)
+
 // ValidateK3SVersion accepts an exact release (v1.36.5+k3s1), or the channels "stable" (the
 // installer's own default: whatever stable is when the script runs) and "latest". The value ends up
 // in a shell script, so nothing else is let through.
 func ValidateK3SVersion(v string) error {
-	if v == "" || v == "stable" || v == "latest" || k3sVersionRE.MatchString(v) {
+	if v == "" || k3sChannelRE.MatchString(v) || k3sVersionRE.MatchString(v) {
 		return nil
 	}
-	return fmt.Errorf("invalid k3s version %q: want an exact release like %s, or stable or latest", v, DefaultK3SVersion)
+	return fmt.Errorf("invalid k3s version %q: want an exact release like %s, or a channel (stable, latest, testing, v1.34)", v, DefaultK3SVersion)
 }
 
 type TemplateData struct {
@@ -37,7 +40,7 @@ type TemplateData struct {
 	PublicSSHKey string
 	K3SToken     string
 	DockerSecret string
-	// K3SVersion is the k3s release to install: an exact release, "stable" or "latest".
+	// K3SVersion is the k3s release to install: an exact release, or a channel (stable, latest, testing, v1.34).
 	// Empty means DefaultK3SVersion.
 	K3SVersion string
 	// K3SVersionExplicit is true when K3SVersion was asked for (`tnctl bootstrap --k3s-version`), not
@@ -58,19 +61,20 @@ func (d TemplateData) k3sVersion() string {
 	return d.K3SVersion
 }
 
-// K3SPin is the value for INSTALL_K3S_VERSION, or "" when the installer is to pick (stable, latest).
+// K3SPin is the value for INSTALL_K3S_VERSION, or "" when a channel is asked for (see K3SChannel).
 func (d TemplateData) K3SPin() string {
-	if v := d.k3sVersion(); v != "stable" && v != "latest" {
+	if v := d.k3sVersion(); !k3sChannelRE.MatchString(v) {
 		return v
 	}
 	return ""
 }
 
-// K3SChannel is the value for INSTALL_K3S_CHANNEL: "latest", or "" (the installer's default,
-// stable, and the pinned releases).
+// K3SChannel is the value for INSTALL_K3S_CHANNEL when --k3s-version names a channel (stable, latest,
+// testing, v1.34), and "" for an exact release. The installer reads INSTALL_K3S_VERSION as an exact
+// release only, so a channel must never be put there.
 func (d TemplateData) K3SChannel() string {
-	if d.k3sVersion() == "latest" {
-		return "latest"
+	if v := d.k3sVersion(); k3sChannelRE.MatchString(v) {
+		return v
 	}
 	return ""
 }

@@ -242,6 +242,12 @@ tn_ca_unit_env_datadir() {
   [ -z "$_tn_ev" ] || echo "$_tn_ev"
 }
 
+# tn_ca_config_dropins DIR: the drop-ins k3s reads from DIR, in the order it reads them (the last one wins):
+# *.yaml and *.yml, the suffix without regard to case (k3s: HasSuffixI in pkg/configfilearg), by name.
+tn_ca_config_dropins() {
+  find "$1" -maxdepth 1 -type f \( -iname '*.yaml' -o -iname '*.yml' \) 2>/dev/null | LC_ALL=C sort
+}
+
 tn_ca_resolve_datadir() {
   _tn_pr=${PRODUCT:-k3s}
   if [ -n "${DATA_DIR:-}" ]; then
@@ -253,7 +259,7 @@ tn_ca_resolve_datadir() {
   _tn_v=$(tn_ca_unit_datadir)
   if [ -n "$_tn_v" ]; then DATA_DIR=$_tn_v; TN_CA_DATADIR_SRC="ExecStart of $(tn_ca_unit_name)"; fi
   if [ -z "$_tn_v" ] && [ -d "$_tn_cd/config.yaml.d" ]; then
-    for _tn_f in $(find "$_tn_cd/config.yaml.d" -maxdepth 1 -type f -name '*.yaml' 2>/dev/null | LC_ALL=C sort); do
+    for _tn_f in $(tn_ca_config_dropins "$_tn_cd/config.yaml.d"); do
       _tn_x=$(tn_ca_yaml_datadir "$_tn_f")
       if [ -n "$_tn_x" ]; then _tn_v=$_tn_x; TN_CA_DATADIR_SRC=$_tn_f; fi
     done
@@ -282,7 +288,7 @@ tn_ca_datadir_consistent() {
   TN_CA_CFG_DATADIR=; TN_CA_CFG_DATADIR_SRC=
   _tn_cd=${TN_K3S_CONFIG_DIR:-/etc/rancher/${PRODUCT:-k3s}}
   if [ -d "$_tn_cd/config.yaml.d" ]; then
-    for _tn_f in $(find "$_tn_cd/config.yaml.d" -maxdepth 1 -type f -name '*.yaml' 2>/dev/null | LC_ALL=C sort); do
+    for _tn_f in $(tn_ca_config_dropins "$_tn_cd/config.yaml.d"); do
       _tn_x=$(tn_ca_yaml_datadir "$_tn_f")
       if [ -n "$_tn_x" ]; then TN_CA_CFG_DATADIR=$_tn_x; TN_CA_CFG_DATADIR_SRC=$_tn_f; fi
     done
