@@ -101,6 +101,13 @@ func newPKI(t *testing.T) *pki {
 	t.Helper()
 	needTool(t, "sh")
 	needTool(t, "openssl")
+	// every test runs with a failing `info` binary first in PATH, like a Debian/Ubuntu machine
+	// with the GNU info reader: nothing may call it
+	fake := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fake, "info"), []byte("#!/bin/sh\necho GNU-INFO-WAS-CALLED \"$*\" >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fake+":"+os.Getenv("PATH"))
 	p := &pki{t: t, dir: t.TempDir()}
 	p.cfg = filepath.Join(p.dir, "etc")
 	p.data = filepath.Join(p.dir, "data")
@@ -139,6 +146,9 @@ func (p *pki) sh(script string, env ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	if bytes.Contains(out, []byte("PRIVATE KEY")) {
 		p.t.Errorf("a private key was printed:\n%s", out)
+	}
+	if bytes.Contains(out, []byte("GNU-INFO-WAS-CALLED")) {
+		p.t.Errorf("the info binary was called:\n%s", out)
 	}
 	return string(out), err
 }
@@ -568,6 +578,33 @@ func TestCheckStates(t *testing.T) {
 	}
 	if out, err := p.sh("tn_ca_openssl; tn_ca_remediate prepare"); err == nil {
 		t.Errorf("prepare on a foreign CA succeeded:\n%s", out)
+	}
+}
+
+// On Debian and Ubuntu `info` is the GNU info reader. The library must not depend on a caller's
+// info/warn/fatal, which a stand-alone run does not have.
+func TestStandAloneDoesNotCallTheInfoBinary(t *testing.T) {
+	p := newPKI(t)
+	p.legacyCert()
+	p.legacyPKI(true)
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "info"), []byte("#!/bin/sh\necho GNU-INFO-WAS-CALLED \"$*\"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", libPath, "check", "--data-dir", p.data, "--config-dir", p.cfg)
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	out, _ := cmd.CombinedOutput()
+	if strings.Contains(string(out), "GNU-INFO-WAS-CALLED") || !strings.Contains(string(out), "needs-rotation") {
+		t.Errorf("check output: %s", out)
+	}
+	// and the setup path that logs with [INFO] lines
+	q := newPKI(t)
+	q.legacyCert()
+	cmd = exec.Command("sh", "-c", "set -e; set -o noglob; umask 027; . "+libPath+"; tn_k3s_ca_setup")
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "CONFIG_PATH="+q.cfg, "DATA_DIR="+q.data, "_DEVICE_ID=dev1", "_DOMAIN=test.local")
+	out, err := cmd.CombinedOutput()
+	if err != nil || strings.Contains(string(out), "GNU-INFO-WAS-CALLED") || !strings.Contains(string(out), "[INFO]") {
+		t.Errorf("setup without info/warn/fatal in the caller: %v\n%s", err, out)
 	}
 }
 

@@ -51,10 +51,12 @@ TN_K3S_CA_LIB_VERSION=1
 export TN_K3S_CA_LIB_VERSION
 
 # ----------------------------------------------------------------- messages
-# info/warn/fatal come from the bootstrap script header. Fallbacks for a bare run.
-command -v info >/dev/null 2>&1 || info() { echo '[INFO] ' "$@"; }
-command -v warn >/dev/null 2>&1 || warn() { echo '[WARN] ' "$@" >&2; }
-command -v fatal >/dev/null 2>&1 || fatal() { echo '[ERROR] ' "$@" >&2; exit 1; }
+# The library prints with its own functions, in the format of header.sh.tmpl. It must not use a
+# caller's info/warn/fatal (there may be none: a stand-alone run) and must not trust `info`
+# to be a function either: on Debian/Ubuntu it is the GNU info reader.
+tn_ca_info() { echo '[INFO] ' "$@"; }
+tn_ca_warn() { echo '[WARN] ' "$@" >&2; }
+tn_ca_fatal() { echo '[ERROR] ' "$@" >&2; exit 1; }
 
 # ----------------------------------------------------------------- small helpers
 
@@ -65,11 +67,11 @@ tn_ca_openssl() {
   elif command -v openssl >/dev/null 2>&1; then
     OPENSSL=openssl
   else
-    warn "openssl not found"
+    tn_ca_warn "openssl not found"
     return 1
   fi
   if ! "$OPENSSL" ecparam -name prime256v1 -genkey -noout -out /dev/null >/dev/null 2>&1; then
-    warn "openssl missing Elliptic Curve (ecparam) support"
+    tn_ca_warn "openssl missing Elliptic Curve (ecparam) support"
     return 1
   fi
   return 0
@@ -141,8 +143,8 @@ EOF
     -set_serial "0x$_tn_serial" -days 7300 -sha256 -out "$3" >/dev/null 2>&1
   _tn_rc=$?
   rm -rf "$_tn_rw"
-  if [ "$_tn_rc" -ne 0 ]; then warn "cannot re-issue the root certificate from $1"; return 1; fi
-  tn_ca_has_certsign "$3" || { warn "re-issued root has no keyCertSign"; return 1; }
+  if [ "$_tn_rc" -ne 0 ]; then tn_ca_warn "cannot re-issue the root certificate from $1"; return 1; fi
+  tn_ca_has_certsign "$3" || { tn_ca_warn "re-issued root has no keyCertSign"; return 1; }
 }
 
 # ----------------------------------------------------------------- PKI generation
@@ -190,13 +192,13 @@ EOF
     # quiet openssl, but show what it said when it fails
     quiet() { "$@" > .ca/log 2>&1 || { cat .ca/log >&2; return 1; }; }
 
-    info "Generating Kubernetes service account issuer RSA key"
+    tn_ca_info "Generating Kubernetes service account issuer RSA key"
     # shellcheck disable=SC2086
     quiet "$OPENSSL" genrsa $GENRSA_FLAGS -out service.key 2048
 
     cat root-ca.pem > root-ca.crt
 
-    info "Generating intermediate certificate authority RSA key and certificate"
+    tn_ca_info "Generating intermediate certificate authority RSA key and certificate"
     # shellcheck disable=SC2086
     quiet "$OPENSSL" genrsa $GENRSA_FLAGS -out intermediate-ca.key 4096
     "$OPENSSL" req -new -nodes -subj "/CN=$(cn "${product}-intermediate-ca@${suffix}")" \
@@ -208,7 +210,7 @@ EOF
     # a new leaf CA for every control-plane and etcd component
     for TYPE in client server request-header etcd/peer etcd/server; do
       name="${product}-$(echo "$TYPE" | tr / -)-ca"
-      info "Generating ${name} leaf certificate authority EC key and certificate"
+      tn_ca_info "Generating ${name} leaf certificate authority EC key and certificate"
       quiet "$OPENSSL" ecparam -name prime256v1 -genkey -noout -out "${TYPE}-ca.key"
       "$OPENSSL" req -new -nodes -subj "/CN=$(cn "${name}@${suffix}")" -key "${TYPE}-ca.key" 2>/dev/null |
       quiet "$OPENSSL" ca -batch -notext -days 3700 -in /dev/stdin -out "${TYPE}-ca.pem" \
@@ -313,11 +315,11 @@ tn_ca_pki_current() {
 tn_ca_backup_tls() {
   [ -d "$1/server/tls" ] || return 0
   _tn_bk="$1/server/tls-backup-tn-$(tn_ca_ts).tar"
-  ( umask 077; tar -C "$1/server" -cf "$_tn_bk" tls ) || { warn "cannot back up $1/server/tls"; return 1; }
+  ( umask 077; tar -C "$1/server" -cf "$_tn_bk" tls ) || { tn_ca_warn "cannot back up $1/server/tls"; return 1; }
   chmod 600 "$_tn_bk" 2>/dev/null || true
   # the tar holds keys: keep only the newest one
   for _tn_o in $(find "$1/server" -maxdepth 1 -type f -name 'tls-backup-tn-*.tar' 2>/dev/null | sort | sed '$d'); do rm -f "$_tn_o"; done
-  info "Previous CA files saved to $_tn_bk"
+  tn_ca_info "Previous CA files saved to $_tn_bk"
 }
 
 # tn_ca_install_pki DATA_DIR SUFFIX: build a complete new PKI from the device certificate and
@@ -326,17 +328,17 @@ tn_ca_install_pki() {
   _tn_dd=$1 _tn_sfx=$2
   _tn_cfg=${CONFIG_PATH:-/etc/teknoir}
   [ -s "$_tn_cfg/rsa_public.pem" ] && [ -s "$_tn_cfg/rsa_private.pem" ] ||
-    { warn "device certificate or key missing in $_tn_cfg"; return 1; }
+    { tn_ca_warn "device certificate or key missing in $_tn_cfg"; return 1; }
   mkdir -p "$_tn_dd/server" || return 1
   _tn_new=$(mktemp -d "$_tn_dd/server/.tn-tls-new.XXXXXX") || return 1
   _tn_rt=$(mktemp -d) || { rm -rf "$_tn_new"; return 1; }
-  info "Re-issuing the device certificate as the k3s root CA (keyCertSign)"
+  tn_ca_info "Re-issuing the device certificate as the k3s root CA (keyCertSign)"
   if ! tn_ca_reissue_root "$_tn_cfg/rsa_public.pem" "$_tn_cfg/rsa_private.pem" "$_tn_rt/root.pem"; then
     rm -rf "$_tn_new" "$_tn_rt"; return 1
   fi
   mkdir -p "$_tn_new/etcd"
   if ! tn_ca_generate_pki "$_tn_new" "$_tn_rt/root.pem" "$_tn_cfg/rsa_private.pem" "$_tn_sfx"; then
-    warn "PKI generation failed"
+    tn_ca_warn "PKI generation failed"
     rm -rf "$_tn_new" "$_tn_rt"; return 1
   fi
   rm -rf "$_tn_rt"
@@ -357,38 +359,38 @@ tn_ca_install_pki() {
 #   started, ok     -> leave everything alone (re-running a bootstrap script is safe)
 #   started, old    -> repair it first (TN_K3S_CA_AUTO_REMEDIATE=false: stop with advice)
 tn_k3s_ca_setup() {
-  info "Prepare K3s CA Certs"
+  tn_ca_info "Prepare K3s CA Certs"
   export PRODUCT="${PRODUCT:-k3s}"
   export DATA_DIR="${DATA_DIR:-/var/lib/rancher/${PRODUCT}}"
-  tn_ca_openssl || fatal "openssl not found or missing Elliptic Curve (ecparam) support."
-  info "Using ${OPENSSL}: $("$OPENSSL" version)"
+  tn_ca_openssl || tn_ca_fatal "openssl not found or missing Elliptic Curve (ecparam) support."
+  tn_ca_info "Using ${OPENSSL}: $("$OPENSSL" version)"
   _tn_cfg=${CONFIG_PATH:-/etc/teknoir}
   [ -s "$_tn_cfg/rsa_public.pem" ] && [ -s "$_tn_cfg/rsa_private.pem" ] ||
-    fatal "device certificate or key missing in $_tn_cfg"
+    tn_ca_fatal "device certificate or key missing in $_tn_cfg"
 
   if tn_ca_initialised "$DATA_DIR"; then
     tn_ca_state "$DATA_DIR" || true
     case $TN_CA_STATE in
       ok|not-a-server|foreign)
-        info "k3s has already started on this device: the existing CA is left alone ($TN_CA_STATE: $TN_CA_MSG)"
+        tn_ca_info "k3s has already started on this device: the existing CA is left alone ($TN_CA_STATE: $TN_CA_MSG)"
         return 0 ;;
       needs-rotation)
-        warn "$TN_CA_MSG"
+        tn_ca_warn "$TN_CA_MSG"
         if [ "${TN_K3S_CA_AUTO_REMEDIATE:-true}" != true ]; then
-          fatal "TN_K3S_CA_AUTO_REMEDIATE is not true: run 'sh tn-k3s-ca.sh remediate' and then this script again, or the k3s installer below will break the device"
+          tn_ca_fatal "TN_K3S_CA_AUTO_REMEDIATE is not true: run 'sh tn-k3s-ca.sh remediate' and then this script again, or the k3s installer below will break the device"
         fi
-        info "Repairing the CA of this device before k3s is installed or updated"
-        tn_ca_remediate all || fatal "CA remediation failed; the device was not changed beyond the saved backup. See the messages above"
+        tn_ca_info "Repairing the CA of this device before k3s is installed or updated"
+        tn_ca_remediate all || tn_ca_fatal "CA remediation failed; the device was not changed beyond the saved backup. See the messages above"
         return 0 ;;
-      *) fatal "unexpected CA state '$TN_CA_STATE': $TN_CA_MSG" ;;
+      *) tn_ca_fatal "unexpected CA state '$TN_CA_STATE': $TN_CA_MSG" ;;
     esac
   fi
 
   if tn_ca_pki_current "$DATA_DIR"; then
-    info "A valid CA already exists in ${DATA_DIR}/server/tls (k3s has not started yet): keeping it"
+    tn_ca_info "A valid CA already exists in ${DATA_DIR}/server/tls (k3s has not started yet): keeping it"
     return 0
   fi
-  tn_ca_install_pki "$DATA_DIR" "$(tn_ca_suffix "$DATA_DIR")" || fatal "Cannot generate the k3s CA"
+  tn_ca_install_pki "$DATA_DIR" "$(tn_ca_suffix "$DATA_DIR")" || tn_ca_fatal "Cannot generate the k3s CA"
   return 0
 }
 
@@ -412,22 +414,22 @@ tn_ca_prepare() {
   tn_ca_state "$_tn_dd" || _tn_rc=$?
   _tn_rc=${_tn_rc:-0}
   case $TN_CA_STATE in
-    not-a-server) info "$TN_CA_MSG"; return 0 ;;
-    ok) info "root CA already fine: nothing to do"; return 0 ;;
-    foreign) warn "$TN_CA_MSG"; return 4 ;;
+    not-a-server) tn_ca_info "$TN_CA_MSG"; return 0 ;;
+    ok) tn_ca_info "root CA already fine: nothing to do"; return 0 ;;
+    foreign) tn_ca_warn "$TN_CA_MSG"; return 4 ;;
     needs-regeneration)
-      warn "$TN_CA_MSG"
-      info "Regenerating the PKI in $_tn_dd/server/tls (k3s never finished a start on this device)"
+      tn_ca_warn "$TN_CA_MSG"
+      tn_ca_info "Regenerating the PKI in $_tn_dd/server/tls (k3s never finished a start on this device)"
       tn_ca_install_pki "$_tn_dd" "$(tn_ca_suffix "$_tn_dd")" || return 1
       # whatever the hung start left behind was made with the old CA
-      info "Done. Restart k3s: it starts from the new CA. Nothing to rotate."
+      tn_ca_info "Done. Restart k3s: it starts from the new CA. Nothing to rotate."
       return 0 ;;
     needs-rotation) ;;
-    *) warn "$TN_CA_MSG"; return 1 ;;
+    *) tn_ca_warn "$TN_CA_MSG"; return 1 ;;
   esac
 
   if [ -d "$_tn_dd/server/db/etcd" ]; then
-    warn "this server uses embedded etcd: with several servers, read https://docs.k3s.io/cli/certificate first; this tool was tested with one server (sqlite)"
+    tn_ca_warn "this server uses embedded etcd: with several servers, read https://docs.k3s.io/cli/certificate first; this tool was tested with one server (sqlite)"
   fi
   _tn_tls=$_tn_dd/server/tls
   _tn_ts=$(tn_ca_ts)
@@ -470,7 +472,7 @@ tn_ca_prepare() {
     rm -rf "$_tn_s/b"; mkdir -p "$_tn_s/b"
     tn_ca_split "$_tn_s/server/tls/$_tn_b" "$_tn_s/b" >/dev/null
     if ! "$OPENSSL" verify -CAfile "$_tn_s/newroot.pem" -untrusted "$_tn_s/server/tls/intermediate-ca.crt" "$_tn_s/b/c0.pem" >/dev/null 2>&1; then
-      warn "the new root does not verify $_tn_b: nothing was changed"
+      tn_ca_warn "the new root does not verify $_tn_b: nothing was changed"
       rm -rf "$_tn_s"; return 1
     fi
   done
@@ -486,7 +488,7 @@ tn_ca_prepare() {
   elif "$OPENSSL" x509 -in "$_tn_s/oldroot.pem" -noout -text | grep -q 'X509v3 Key Usage' && ! tn_ca_has_certsign "$_tn_s/oldroot.pem"; then
     _tn_force=' --force'; _tn_fwhy="the old root has a key usage without keyCertSign"
   fi
-  [ -z "$_tn_force" ] || info "rotate-ca will use --force ($_tn_fwhy, so k3s cannot verify the new CA bundle against it); the new bundle was verified here"
+  [ -z "$_tn_force" ] || tn_ca_info "rotate-ca will use --force ($_tn_fwhy, so k3s cannot verify the new CA bundle against it); the new bundle was verified here"
   tn_ca_backup_tls "$_tn_dd" || { rm -rf "$_tn_s"; return 1; }
   cp "$_tn_s/w/c0.pem" "$_tn_s/trust.pem" || { rm -rf "$_tn_s"; return 1; }
   rm -rf "$_tn_s/w" "$_tn_s/oldroot.pem"
@@ -494,8 +496,8 @@ tn_ca_prepare() {
   # supervisor. Trusting the running server's own leaf CA for this one call allows that.
   printf '%s\n' "SSL_CERT_FILE='$_tn_s/trust.pem' $(tn_ca_k3s_bin) certificate rotate-ca --data-dir '$_tn_dd' --path '$_tn_s/server'$_tn_force && touch '$_tn_s/ROTATED'" > "$_tn_s/ROTATE_CMD" ||
     { rm -rf "$_tn_s"; return 1; }
-  info "Staged $_tn_s"
-  info "Next: run its ROTATE_CMD against the running k3s server (remediate --phase rotate), then --phase finalize and restart k3s"
+  tn_ca_info "Staged $_tn_s"
+  tn_ca_info "Next: run its ROTATE_CMD against the running k3s server (remediate --phase rotate), then --phase finalize and restart k3s"
 }
 
 # rotate: run ROTATE_CMD of the newest staging
@@ -503,14 +505,14 @@ tn_ca_rotate() {
   _tn_s=$(tn_ca_newest_stage "$1")
   if [ -z "$_tn_s" ]; then
     tn_ca_state "$1" >/dev/null || true
-    case $TN_CA_STATE in needs-regeneration|ok|not-a-server) info "nothing to rotate"; return 0 ;; esac
-    warn "no staged rotation in $1/server: run 'remediate --phase prepare' first"; return 1
+    case $TN_CA_STATE in needs-regeneration|ok|not-a-server) tn_ca_info "nothing to rotate"; return 0 ;; esac
+    tn_ca_warn "no staged rotation in $1/server: run 'remediate --phase prepare' first"; return 1
   fi
-  [ -f "$_tn_s/ROTATE_CMD" ] || { warn "$_tn_s has no ROTATE_CMD"; return 1; }
-  info "Rotating the CA in the running k3s server (rotate-ca)"
+  [ -f "$_tn_s/ROTATE_CMD" ] || { tn_ca_warn "$_tn_s has no ROTATE_CMD"; return 1; }
+  tn_ca_info "Rotating the CA in the running k3s server (rotate-ca)"
   if ! sh -c "$(cat "$_tn_s/ROTATE_CMD")"; then
-    warn "k3s certificate rotate-ca failed. Is the k3s server running (systemctl status k3s)? A server that refuses the old root is fine, it only has to be up."
-    warn "Nothing was changed on disk. To go back to a working state: stop k3s and install the previous k3s patch release (v1.34.11, v1.35.8, v1.36.4 or v1.37.0), then run remediate again."
+    tn_ca_warn "k3s certificate rotate-ca failed. Is the k3s server running (systemctl status k3s)? A server that refuses the old root is fine, it only has to be up."
+    tn_ca_warn "Nothing was changed on disk. To go back to a working state: stop k3s and install the previous k3s patch release (v1.34.11, v1.35.8, v1.36.4 or v1.37.0), then run remediate again."
     return 1
   fi
 }
@@ -519,25 +521,25 @@ tn_ca_rotate() {
 tn_ca_finalize() {
   _tn_dd=$1
   _tn_s=$(tn_ca_newest_stage "$_tn_dd")
-  if [ -z "$_tn_s" ]; then info "nothing to finalize"; return 0; fi
-  [ -f "$_tn_s/ROTATED" ] || { warn "the rotation in $_tn_s has not completed (no ROTATED marker): not touching $_tn_dd/server/tls"; return 1; }
+  if [ -z "$_tn_s" ]; then tn_ca_info "nothing to finalize"; return 0; fi
+  [ -f "$_tn_s/ROTATED" ] || { tn_ca_warn "the rotation in $_tn_s has not completed (no ROTATED marker): not touching $_tn_dd/server/tls"; return 1; }
   for _tn_f in $TN_CA_BUNDLES root-ca.pem; do
     [ -f "$_tn_s/server/tls/$_tn_f" ] || continue
     cp "$_tn_s/server/tls/$_tn_f" "$_tn_dd/server/tls/$_tn_f.tn-new" && mv "$_tn_dd/server/tls/$_tn_f.tn-new" "$_tn_dd/server/tls/$_tn_f" || return 1
   done
   rm -rf "$_tn_s"
-  info "CA files updated in $_tn_dd/server/tls"
+  tn_ca_info "CA files updated in $_tn_dd/server/tls"
 }
 
 tn_ca_restart() {
   if [ -n "${TN_K3S_RESTART_CMD:-}" ]; then
-    info "Restarting k3s: $TN_K3S_RESTART_CMD"
+    tn_ca_info "Restarting k3s: $TN_K3S_RESTART_CMD"
     sh -c "$TN_K3S_RESTART_CMD"
   elif command -v systemctl >/dev/null 2>&1 && systemctl cat k3s.service >/dev/null 2>&1; then
-    info "Restarting k3s"
+    tn_ca_info "Restarting k3s"
     systemctl restart k3s
   else
-    warn "restart k3s yourself now (no systemd unit found and TN_K3S_RESTART_CMD is not set)"
+    tn_ca_warn "restart k3s yourself now (no systemd unit found and TN_K3S_RESTART_CMD is not set)"
   fi
 }
 
@@ -552,7 +554,7 @@ tn_ca_remediate() {
     all)
       tn_ca_state "$_tn_dd" >/dev/null || true
       case $TN_CA_STATE in
-        ok|not-a-server) info "$TN_CA_MSG"; return 0 ;;
+        ok|not-a-server) tn_ca_info "$TN_CA_MSG"; return 0 ;;
       esac
       _tn_was=$TN_CA_STATE
       tn_ca_prepare "$_tn_dd" || return 1
@@ -562,7 +564,7 @@ tn_ca_remediate() {
       fi
       tn_ca_restart
       ;;
-    *) warn "unknown phase '$1' (prepare, rotate, finalize or all)"; return 2 ;;
+    *) tn_ca_warn "unknown phase '$1' (prepare, rotate, finalize or all)"; return 2 ;;
   esac
 }
 
@@ -608,7 +610,7 @@ tn_ca_main() {
   case $_tn_cmd in
     check) tn_ca_check ;;
     remediate)
-      [ "$(id -u)" -eq 0 ] || { warn "run as root"; return 1; }
+      [ "$(id -u)" -eq 0 ] || { tn_ca_warn "run as root"; return 1; }
       tn_ca_remediate "$_tn_phase" ;;
   esac
 }
