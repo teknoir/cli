@@ -26,7 +26,10 @@ usage: run.sh [options]
   --compat-images "I ..." openssl-compat suite: images, optionally prefixed with a platform,
                           e.g. linux/arm64/ubuntu:20.04 (default: the full distro/arch list)
   --device-cert FILE      externally generated device certificate; with --device-key adds generator 'ext'
-  --device-key FILE       and makes it the default generator for every suite
+  --device-key FILE       and makes it the default generator for every suite. The expected outcome of the
+                          legacy-script cases is derived from the certificate (keyCertSign present = READY on
+                          post-fix k3s, absent = FAIL)
+  --expect READY|FAIL     override that expectation for legacy cases on post-fix k3s (default: derived)
   -j N                    parallel cases (default 4)
   --out DIR               output directory (default $TMPDIR/tn-k3sca-<runid>)
   --keep                  keep containers, work dirs and generated keys for debugging
@@ -41,7 +44,7 @@ USAGE
 # runs anything: editing this file during a long run cannot break the run.
 {
 SUITES=control VERSIONS_OPT="" GENS_OPT="" AGENT_CA="" AGENT_TRUST=both HELPERS_OPT="" COMPAT_IMAGES_OPT=""
-DEVICE_CERT="" DEVICE_KEY="" JOBS=4 OUT="" KEEP=0 DRY=0
+DEVICE_CERT="" DEVICE_KEY="" EXPECT_OVERRIDE="" JOBS=4 OUT="" KEEP=0 DRY=0
 while [ $# -gt 0 ]; do
   case $1 in
     --suite) SUITES=${2//,/ }; shift 2 ;;
@@ -54,6 +57,7 @@ while [ $# -gt 0 ]; do
     --compat-images) COMPAT_IMAGES_OPT=$2; shift 2 ;;
     --device-cert) DEVICE_CERT=$2; shift 2 ;;
     --device-key) DEVICE_KEY=$2; shift 2 ;;
+    --expect) EXPECT_OVERRIDE=$2; shift 2 ;;
     -j) JOBS=$2; shift 2 ;;
     -j*) JOBS=${1#-j}; shift ;;
     --out) OUT=$2; shift 2 ;;
@@ -72,6 +76,8 @@ done
 . "$HERE/lib/suites.sh"
 
 [ "$SUITES" = all ] && SUITES="control fresh legacy-with-cert agent remediation rerun host openssl-compat"
+case $EXPECT_OVERRIDE in ""|READY|FAIL) ;; *) die "--expect must be READY or FAIL" ;; esac
+export EXPECT_OVERRIDE
 if [ -n "$DEVICE_CERT$DEVICE_KEY" ]; then
   [ -f "$DEVICE_CERT" ] && [ -f "$DEVICE_KEY" ] || die "--device-cert and --device-key must both be given and exist"
   [ -n "$GENS_OPT" ] || GENS_OPT=ext
@@ -118,17 +124,17 @@ trap 'exit 143' TERM
 
 log "run $RUNID, out=$OUT, suites: $SUITES, -j $JOBS"
 
-# ---- build the Go tools (stdlib only; no network)
+# ---- build the Go tools (stdlib only; no network). Each tool is one main.go built on its own, so
+# this works inside the cli module and in a repository that vendors the harness without a go.mod.
 build_tools() {
   log "building k3sverify and gencert-go"
-  ( cd "$REPO"
-    CGO_ENABLED=0 go build -o "$OUT/bin/k3sverify" ./test/k3s-ca/cmd/k3sverify
-    CGO_ENABLED=0 go build -o "$OUT/bin/gencert-go" ./test/k3s-ca/cmd/gencert-go
-    case " $SUITES " in *" openssl-compat "*)
-      mkdir -p "$OUT/bin/linux_arm64" "$OUT/bin/linux_arm_v7"
-      CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$OUT/bin/linux_arm64/k3sverify" ./test/k3s-ca/cmd/k3sverify
-      CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -o "$OUT/bin/linux_arm_v7/k3sverify" ./test/k3s-ca/cmd/k3sverify ;;
-    esac )
+  CGO_ENABLED=0 go build -o "$OUT/bin/k3sverify" "$HERE/cmd/k3sverify/main.go"
+  CGO_ENABLED=0 go build -o "$OUT/bin/gencert-go" "$HERE/cmd/gencert-go/main.go"
+  case " $SUITES " in *" openssl-compat "*)
+    mkdir -p "$OUT/bin/linux_arm64" "$OUT/bin/linux_arm_v7"
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$OUT/bin/linux_arm64/k3sverify" "$HERE/cmd/k3sverify/main.go"
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -o "$OUT/bin/linux_arm_v7/k3sverify" "$HERE/cmd/k3sverify/main.go" ;;
+  esac
 }
 [ "$DRY" = 1 ] || build_tools
 
@@ -194,8 +200,10 @@ done
 pool_wait
 
 # ---- results
+# (names go to a file first: `cat | grep -q` under pipefail dies of SIGPIPE on big result sets)
+cat "$OUT"/results.d/*.tsv 2>/dev/null | cut -f2 > "$OUT/result-names.txt" || true
 for n in "${JOB_NAMES[@]}"; do
-  if ! cat "$OUT"/results.d/*.tsv 2>/dev/null | cut -f2 | grep -qE "^$n(:|$)"; then
+  if ! grep -qE "^$n(:|$)" "$OUT/result-names.txt"; then
     result_write "${SUITES%% *}" "$n" - - - - ERROR 0 "job produced no result; see $OUT/logs/$n.log"
   fi
 done

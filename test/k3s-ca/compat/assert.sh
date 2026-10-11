@@ -66,7 +66,44 @@ one() { # GEN
   rm -rf "$w"
 }
 
+# remed GEN: a device bootstrapped with the old scripts (the device certificate as root) is checked,
+# prepared, "rotated" with a fake k3s, finalized and checked again, with the same tools and
+# openssl as setup. Only for certificates that need it (no keyCertSign).
+remed() { # GEN
+  g=$1
+  w=$(mktemp -d)
+  mkdir -p "$w/etc" "$w/data/server/tls"
+  cp "$GENDIR/$g/rsa_public.pem" "$GENDIR/$g/rsa_private.pem" "$w/etc/"
+  printf '#!/bin/sh\necho "$*" >> "%s/k3s.calls"\n' "$w" > "$w/fake-k3s"
+  chmod 755 "$w/fake-k3s"
+  if ! out=$( (
+        set -e; set -o noglob; umask 027
+        info() { echo '[INFO] ' "$@"; }; warn() { echo '[WARN] ' "$@" >&2; }; fatal() { echo '[ERROR] ' "$@" >&2; exit 1; }
+        CONFIG_PATH=$w/etc DATA_DIR=$w/data PRODUCT=k3s _DEVICE_ID=compat _DOMAIN=test.local
+        K3S_BIN=$w/fake-k3s TN_K3S_RESTART_CMD=true
+        export CONFIG_PATH DATA_DIR PRODUCT _DEVICE_ID _DOMAIN K3S_BIN TN_K3S_RESTART_CMD
+        . /h/legacy-ca.sh
+        tn_legacy_ca "$w/data/server/tls" "$w/etc/rsa_public.pem" "$w/etc/rsa_private.pem" compat.test.local >/dev/null 2>&1
+        echo 'K10fake::server:fake' > "$w/data/server/token"
+        . "$LIB"
+        rc=0; tn_ca_check || rc=$?
+        [ "$rc" = 2 ] || { echo "check before: rc=$rc (want 2)"; exit 1; }
+        tn_ca_remediate all
+        if [ ! -f "$w/k3s.calls" ] || ! grep -q 'certificate rotate-ca' "$w/k3s.calls"; then echo "rotate-ca was not called"; exit 1; fi
+        tn_ca_check
+      ) 2>&1 ); then
+    echo "RESULT $g-remediate FAIL $(echo "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)"; rm -rf "$w"; return
+  fi
+  if ! out=$("$BIN/k3sverify" -orig "$w/etc/rsa_public.pem" -key "$w/etc/rsa_private.pem" -days 7300 "$w/data/server/tls" 2>&1); then
+    echo "RESULT $g-remediate FAIL k3sverify after remediation: $(echo "$out" | grep '^FAIL' | head -3 | tr '\n' ' ' | cut -c1-300)"; rm -rf "$w"; return
+  fi
+  if ls -a "$w/data/server" | grep -q '^\.tn-ca-rotate'; then echo "RESULT $g-remediate FAIL staging dir left behind"; rm -rf "$w"; return; fi
+  echo "RESULT $g-remediate PASS check 2 -> remediate -> check 0"
+  rm -rf "$w"
+}
+
 for g in $GENS; do
   if [ ! -s "$GENDIR/$g/rsa_public.pem" ]; then echo "RESULT $g FAIL no generated cert"; continue; fi
   one "$g"
+  if openssl x509 -in "$GENDIR/$g/rsa_public.pem" -noout -text | grep -q 'Certificate Sign'; then :; else remed "$g"; fi
 done

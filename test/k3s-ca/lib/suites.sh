@@ -159,8 +159,10 @@ scenario_s5() { # SCEN GEN HELPER_IMG
 # S6 (bricked after upgrade) and S7 (hung fresh bootstrap on post-fix k3s).
 # MODE brick: legacy on v1.34.11 -> Ready -> swap to v1.36.5 -> FAIL -> remediate on the post-fix server.
 # MODE hung:  legacy directly on v1.36.5 -> FAIL -> remediate.
-scenario_postfix() { # SCEN MODE GEN HELPER_IMG
-  local scen=$1 mode=$2 gen=$3 img=$4 t0 pre=v1.34.11-k3s1 post=v1.36.5-k3s1 ok=0
+# With FORCE_FALLBACK=1 (5th argument) the in-place remediation is skipped, to exercise the
+# documented downgrade fallback itself.
+scenario_postfix() { # SCEN MODE GEN HELPER_IMG [FORCE_FALLBACK]
+  local scen=$1 mode=$2 gen=$3 img=$4 force=${5:-0} t0 pre=v1.34.11-k3s1 post=v1.36.5-k3s1 ok=0
   case_init "$scen"; t0=$(now)
   d_pull "$K3S_IMAGE:$post" || true
   ca_prepare legacy "$gen" "$img" "$WORK" "dev.test.local" || { step "$scen" 1-bootstrap - "$gen" legacy READY ERROR 0 "CA preparation failed"; case_end; return 0; }
@@ -174,14 +176,24 @@ scenario_postfix() { # SCEN MODE GEN HELPER_IMG
   step "$scen" 2-postfix-rejects "$post" "$gen" legacy FAIL "$W_STATE" $(( $(now) - t0 )) "$W_NOTE"
   [ "$W_STATE" = FAIL ] || { save_logs "$SRV" server; case_end; return 0; }
 
-  # remediate through the running post-fix server (SSL_CERT_FILE path)
+  # remediate through the running post-fix server (SSL_CERT_FILE path). A hung fresh bootstrap
+  # (mode hung) never initialised its datastore: nothing to rotate, the PKI is regenerated.
   t0=$(now)
-  if remediate "$gen" "$img"; then
+  if [ "$force" = 1 ]; then
+    log "FORCE_FALLBACK: skipping the in-place remediation"
+  elif remediate "$gen" "$img" "$([ "$mode" = hung ] && echo 0 || echo 1)"; then
     wait_k3s server "$SRV" "$T_UPGRADE" "$SINCE"
     if [ "$W_STATE" = READY ]; then
       ok=1
       local m=""; [ "$mode" = brick ] && { marker_ok && m="marker ok" || m="marker MISSING"; }
-      step "$scen" 3-remediate-postfix "$post" "$gen" lib READY READY $(( $(now) - t0 )) "via SSL_CERT_FILE on the post-fix server. $m"
+      [ "$mode" != hung ] || m="$R_NOTE"
+      step "$scen" 3-remediate-postfix "$post" "$gen" lib READY READY $(( $(now) - t0 )) "post-fix server. $m"
+      t0=$(now); h_mounts "$WORK" "$gen"
+      if d_helper "$img" "${HM[@]}" -e DATA_DIR=/var/lib/rancher/k3s -- sh -c "$TN_REMEDIATE_CHECK" >"$OUT/logs/$CASE.check.log" 2>&1; then
+        step "$scen" 3b-check "-" "$gen" lib 0 0 $(( $(now) - t0 )) "check exit 0"
+      else
+        step "$scen" 3b-check "-" "$gen" lib 0 "$?" $(( $(now) - t0 )) "check did not return 0"
+      fi
     else
       step "$scen" 3-remediate-postfix "$post" "$gen" lib READY "$W_STATE" $(( $(now) - t0 )) "$W_NOTE"
     fi
@@ -211,14 +223,30 @@ suite_remediation() {
   : "${TN_REMEDIATE_CHECK:=sh /tn/tn-k3s-ca.sh check --data-dir /var/lib/rancher/k3s}"
   local g h
   for g in $(gens_for "bs-o111 go-sha1 expired"); do
+    if ! gen_remediable "$g"; then
+      result_write remediation "rem-s5-$g:skipped" - "$g" lib READY SKIP 0 "device cert has keyCertSign: the old scripts already give a root k3s accepts, nothing to remediate"
+      continue
+    fi
     for h in ${HELPERS_OPT:-$REMED_HELPERS_DEFAULT}; do
       local hi; hi=$(helper_image "$h")
       pool_run "rem-s5-$g-$(echo "$h" | tr ':.' '--')" scenario_s5 "rem-s5-$g-$(echo "$h" | tr ':.' '--')" "$g" "$hi"
     done
   done
   local g1; g1=$(gens_for bs-o111); g1=${g1%% *}
+  if ! gen_remediable "$g1"; then
+    result_write remediation "rem-s6-s7:skipped" - "$g1" lib READY SKIP 0 "device cert has keyCertSign: nothing to remediate"
+    return 0
+  fi
   pool_run "rem-s6-bricked" scenario_postfix rem-s6-bricked brick "$g1" "$(helper_image debian:bookworm)"
+  # the other certificate kinds on a post-fix server too: go-sha1 (keyUsage without keyCertSign) and
+  # expired roots need rotate-ca --force, which must work through the SSL_CERT_FILE path as well
+  local g6
+  for g6 in $(gens_for "go-sha1 expired"); do
+    [ "$g6" = "$g1" ] || ! gen_remediable "$g6" || pool_run "rem-s6-bricked-$g6" scenario_postfix "rem-s6-bricked-$g6" brick "$g6" "$(helper_image debian:bookworm)"
+  done
   pool_run "rem-s7-hung" scenario_postfix rem-s7-hung hung "$g1" "$(helper_image debian:bookworm)"
+  # the documented fallback, forced: pre-fix patch of the minor -> remediate -> upgrade again
+  pool_run "rem-s6-fallback" scenario_postfix rem-s6-fallback brick "$g1" "$(helper_image debian:bookworm)" 1
 }
 
 # ------------------------------------------------------------ S8 re-run on an initialised data dir
@@ -276,10 +304,53 @@ scenario_host() {
   case_end
 }
 
+# S10: a re-run of the (fixed) bootstrap script on a device bootstrapped with the old root, as root on the
+# host: tn_k3s_ca_setup, sourced under set -e / noglob, repairs the CA itself (auto-remediate) before
+# the k3s installer would run. Then the upgrade through the fix.
+scenario_host_setup() {
+  local scen=host-s10 gen t0 pre=v1.34.11-k3s1 dir
+  gen=$(gens_for bs-o111); gen=${gen%% *}
+  case_init "$scen"; t0=$(now)
+  if ! sudo -n true 2>/dev/null; then result_write host "$scen" - "$gen" lib READY SKIP 0 "needs passwordless sudo"; case_end; return 0; fi
+  dir="$WORK/k3s"; DATA_CT=$dir
+  d_pull "$K3S_IMAGE:$pre" || true
+  ca_prepare legacy "$gen" "$HELPER_IMAGE" "$WORK" "dev.test.local" || { step "$scen" 1-bootstrap "$pre" "$gen" legacy READY ERROR 0 "CA preparation failed"; DATA_CT=/var/lib/rancher/k3s; case_end; return 0; }
+  srv_up "$pre"; wait_k3s server "$SRV" "$T_SERVER" "$SINCE"
+  step "$scen" 1-prefix-ready "$pre" "$gen" legacy READY "$W_STATE" $(( $(now) - t0 )) "$W_NOTE"
+  [ "$W_STATE" = READY ] || { DATA_CT=/var/lib/rancher/k3s; case_end; return 0; }
+  marker_set
+  t0=$(now); SINCE=$(now)
+  if sudo -n env "K3S_BIN=docker exec $SRV k3s" "TN_K3S_RESTART_CMD=docker restart $SRV" "CONFIG_PATH=$(gen_dir "$gen")" "DATA_DIR=$dir" PRODUCT=k3s _DEVICE_ID=dev _DOMAIN=test.local \
+       sh -c ". $HERE/shim.sh; . $CA_LIB; tn_k3s_ca_setup" >"$OUT/logs/$CASE.setup.log" 2>&1; then
+    wait_k3s server "$SRV" "$T_UPGRADE" "$SINCE"
+    step "$scen" 2-setup-repairs "$pre" "$gen" lib READY "$W_STATE" $(( $(now) - t0 )) "tn_k3s_ca_setup on the host $W_NOTE"
+  else
+    step "$scen" 2-setup-repairs "$pre" "$gen" lib READY ERROR $(( $(now) - t0 )) "setup exited non-zero (see log)"
+    save_logs "$SRV" server; DATA_CT=/var/lib/rancher/k3s; case_end; return 0
+  fi
+  t0=$(now); upgrade_step "$scen" 3-upgrade-1.36.5 v1.36.5-k3s1 "$gen" "$t0" || true
+  # a second run is a no-op
+  t0=$(now)
+  local d1 d2; d1=$(tls_digest "$gen")
+  sudo -n env "CONFIG_PATH=$(gen_dir "$gen")" "DATA_DIR=$dir" PRODUCT=k3s sh -c ". $HERE/shim.sh; . $CA_LIB; tn_k3s_ca_setup" >"$OUT/logs/$CASE.setup2.log" 2>&1 || true
+  d2=$(tls_digest "$gen")
+  if [ "$d1" = "$d2" ]; then step "$scen" 4-second-setup-noop "-" "$gen" lib UNCHANGED UNCHANGED $(( $(now) - t0 )) "tls sha256 stable"
+  else step "$scen" 4-second-setup-noop "-" "$gen" lib UNCHANGED CHANGED $(( $(now) - t0 )) "tls digest changed"; fi
+  save_logs "$SRV" server
+  DATA_CT=/var/lib/rancher/k3s
+  case_end
+}
+
 suite_host() {
   SUITE=host
   need_lib host || return 0
+  local g; g=$(gens_for bs-o111); g=${g%% *}
+  if ! gen_remediable "$g"; then
+    result_write host "host:skipped" - "$g" lib READY SKIP 0 "device cert has keyCertSign: nothing to remediate"
+    return 0
+  fi
   pool_run host-s9 scenario_host
+  pool_run host-s10 scenario_host_setup
 }
 
 # ------------------------------------------------------------ openssl-compat (no k3s)
@@ -311,7 +382,7 @@ run_compat() { # SPEC (platform/image or image)
   tag=$(helper_image "$image" "$platform") || { result_write openssl-compat "$name" - - lib PASS ERROR 0 "cannot build helper image"; return 0; }
   out="$OUT/logs/$name.out"
   docker run --rm --label "$LABEL" --name "$PREFIX-$name" ${platform:+--platform "$platform"} \
-    -v "$OUT/gen:/gens:ro" -v "$HERE/compat:/c:ro" -v "$(compat_bin_dir "$platform"):/tnbin:ro" -v "$CA_LIB:/tn/tn-k3s-ca.sh:ro" \
+    -v "$OUT/gen:/gens:ro" -v "$HERE/compat:/c:ro" -v "$HERE:/h:ro" -v "$(compat_bin_dir "$platform"):/tnbin:ro" -v "$CA_LIB:/tn/tn-k3s-ca.sh:ro" \
     -e "GENS=$COMPAT_GENS" "$tag" sh /c/assert.sh > "$out" 2>&1 || true
   local seen=""
   while IFS= read -r line; do

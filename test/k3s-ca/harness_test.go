@@ -143,6 +143,36 @@ func TestExpectedOutcome(t *testing.T) {
 	}
 }
 
+// --device-cert ("ext"): the expectation follows the certificate, so a correct
+// WP3-WP5 fix is not reported as a failure.
+func TestExpectedOutcomeExternalCert(t *testing.T) {
+	cases := []struct{ env, ca, ver, want string }{
+		// real generator output with keyCertSign: old scripts work on every version
+		{"EXT_CERTSIGN=1", "legacy", "v1.36.5-k3s1", "READY"},
+		{"EXT_CERTSIGN=1", "legacy", "v1.34.11-k3s1", "READY"},
+		{"EXT_CERTSIGN=1", "legacy", "v1.33.5-k3s1", "READY"},
+		{"EXT_CERTSIGN=1", "lib", "v1.36.5-k3s1", "READY"},
+		// a pre-fix certificate: rejected by post-fix k3s only
+		{"EXT_CERTSIGN=0", "legacy", "v1.36.5-k3s1", "FAIL"},
+		{"EXT_CERTSIGN=0", "legacy", "v1.34.12-k3s1", "FAIL"},
+		{"EXT_CERTSIGN=0", "legacy", "v1.34.11-k3s1", "READY"},
+		{"EXT_CERTSIGN=0", "lib", "v1.36.5-k3s1", "READY"},
+		{"EXT_CERTSIGN=0", "proper", "v1.37.1-k3s1", "READY"},
+		// unknown certificate properties: informational
+		{"EXT_CERTSIGN=", "legacy", "v1.36.5-k3s1", "ANY"},
+		// --expect overrides the derived value on post-fix k3s only
+		{"EXT_CERTSIGN=1 EXPECT_OVERRIDE=FAIL", "legacy", "v1.36.5-k3s1", "FAIL"},
+		{"EXT_CERTSIGN=1 EXPECT_OVERRIDE=FAIL", "legacy", "v1.34.11-k3s1", "READY"},
+		{"EXT_CERTSIGN=0 EXPECT_OVERRIDE=READY", "legacy", "v1.36.5-k3s1", "READY"},
+		{"EXT_CERTSIGN=0 EXPECT_OVERRIDE=READY", "lib", "v1.36.5-k3s1", "READY"},
+	}
+	for _, c := range cases {
+		if got := bashEval(t, c.env+" expected_outcome "+c.ca+" ext "+c.ver); got != c.want {
+			t.Errorf("%s expected_outcome %s ext %s = %s, want %s", c.env, c.ca, c.ver, got, c.want)
+		}
+	}
+}
+
 func TestResolveVersionsDeduplicates(t *testing.T) {
 	got := bashEval(t, `resolve_versions v1.36.5 1.36.5 v1.36.5+k3s1 v1.34.11 | tr '\n' ' '`)
 	if got != "v1.36.5-k3s1 v1.34.11-k3s1" {

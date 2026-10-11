@@ -105,22 +105,44 @@ resolve_versions() {
 
 # ---------------------------------------------------------------- expectations
 
+# gen_certsign GEN -> 1 | 0 | "" : does the device certificate of generator GEN carry keyCertSign?
+# The replicas are known by name. For 'ext' (--device-cert) run.sh inspects the real
+# certificate and exports EXT_CERTSIGN (1|0); without it the answer is unknown (empty).
+gen_certsign() {
+  case $1 in
+    fixed-*) echo 1 ;;
+    bs-*|go-*|expired) echo 0 ;;
+    ext) echo "${EXT_CERTSIGN:-}" ;;
+    *) echo "" ;;
+  esac
+}
+
+# gen_remediable GEN: 0 if a device built with the old scripts from this certificate needs remediation
+# (no keyCertSign). A fixed certificate gives a root that k3s accepts already: nothing to remediate.
+gen_remediable() { [ "$(gen_certsign "$1")" != 1 ]; }
+
 # expected_outcome CA_MODE GEN K3S_VERSION -> READY | FAIL | ANY
 #  - proper and lib roots carry keyCertSign: READY everywhere.
-#  - legacy copies the device cert verbatim: READY on pre-fix k3s, FAIL on post-fix k3s,
-#    unless the device cert is one of the fixed generators (it then has keyCertSign).
+#  - legacy copies the device cert verbatim to root-ca.pem. On pre-fix k3s that is READY.
+#    On post-fix k3s it is READY only if the device cert itself has keyCertSign (the fixed
+#    generators, or an external --device-cert that has it) and FAIL if it has not.
+#  - EXPECT_OVERRIDE=READY|FAIL (run.sh --expect) replaces the derived value for legacy cases on
+#    post-fix k3s, for a certificate whose outcome cannot be derived from keyCertSign alone.
+#  - An external certificate (gen 'ext') of unknown properties gives ANY (reported as INFO).
 expected_outcome() {
-  local ca=$1 gen=$2 ver=$3 rc=0
+  local ca=$1 gen=$2 ver=$3 rc=0 cs
   case $ca in
     proper|lib) echo READY; return ;;
   esac
-  case $gen in
-    fixed-*) echo READY; return ;;
-  esac
+  cs=$(gen_certsign "$gen")
   ver_is_postfix "$ver" || rc=$?
+  case ${EXPECT_OVERRIDE:-} in
+    READY|FAIL) [ "$rc" != 0 ] || { echo "$EXPECT_OVERRIDE"; return; } ;;
+  esac
+  [ "$cs" != 1 ] || { echo READY; return; }
   case $rc in
-    0) echo FAIL ;;
     1) echo READY ;;
+    0) if [ "$cs" = 0 ]; then echo FAIL; else echo ANY; fi ;;
     *) echo ANY ;;
   esac
 }

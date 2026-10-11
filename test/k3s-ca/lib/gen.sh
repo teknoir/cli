@@ -75,6 +75,11 @@ gen_check() { # NAME
       if grep -q 'Certificate Sign' <<<"$txt"; then die "generator $g unexpectedly has keyCertSign"; fi ;;
     fixed-*)
       grep -q 'Certificate Sign' <<<"$txt" || die "generator $g lacks keyCertSign" ;;
+    ext)
+      # the real WP3-WP5 certificate: what the legacy scripts do with it depends on keyCertSign
+      if grep -q 'Certificate Sign' <<<"$txt"; then EXT_CERTSIGN=1; else EXT_CERTSIGN=0; fi
+      export EXT_CERTSIGN
+      log "device cert 'ext': keyCertSign=$([ "$EXT_CERTSIGN" = 1 ] && echo yes || echo no) -> legacy scripts expected $(expected_outcome legacy ext v1.36.5-k3s1) on post-fix k3s${EXPECT_OVERRIDE:+ (--expect $EXPECT_OVERRIDE)}" ;;
   esac
   if [ "$g" = expired ]; then
     d_helper "$img" -v "$dir:/out:ro" -- openssl x509 -in /out/rsa_public.pem -noout -checkend 0 >/dev/null 2>&1 &&

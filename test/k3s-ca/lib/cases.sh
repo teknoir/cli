@@ -207,18 +207,25 @@ remediate_hooks_ready() {
   return 0
 }
 
-# remediate GEN HELPER_IMG TAG_FOR_ROTATE: prepare (helper) -> rotate (docker exec) -> finalize (helper) -> restart.
+# remediate GEN HELPER_IMG [ROTATE_REQUIRED=1]: prepare (helper) -> rotate (docker exec) -> finalize (helper) -> restart.
 # Sets R_NOTE; returns non-zero if a phase failed. Logs the exact rotate command (no secrets in it).
+# A datastore that k3s never initialised (hung fresh bootstrap, S7) has nothing to rotate: prepare
+# regenerates the PKI and leaves no ROTATE_CMD. That is accepted only with ROTATE_REQUIRED=0.
 remediate() {
-  local gen=$1 img=$2 rc=0 rotate
+  local gen=$1 img=$2 required=${3:-1} rc=0 rotate
   R_NOTE=""
   h_mounts "$WORK" "$gen"
   # the helper sees the data dir at the same path as the k3s container
   d_helper "$img" "${HM[@]}" -e DATA_DIR=/var/lib/rancher/k3s -e K3S_BIN=k3s -- sh -c "$TN_REMEDIATE_PREPARE" || { R_NOTE="prepare failed"; return 1; }
   rotate=$(d_helper "$img" "${HM[@]}" -- sh -c 'f=$(ls -d /var/lib/rancher/k3s/server/.tn-ca-rotate-*/ROTATE_CMD 2>/dev/null | tail -1); [ -n "$f" ] && cat "$f"') || true
-  if [ -z "$rotate" ]; then R_NOTE="prepare left no ROTATE_CMD"; return 1; fi
-  log "rotate command: $rotate"
-  if ! docker exec "$SRV" sh -c "$rotate"; then R_NOTE="rotate-ca failed"; rc=1; fi
+  if [ -z "$rotate" ]; then
+    if [ "$required" = 1 ]; then R_NOTE="prepare left no ROTATE_CMD"; return 1; fi
+    R_NOTE="nothing to rotate (PKI regenerated)"
+    log "prepare left no ROTATE_CMD: $R_NOTE"
+  else
+    log "rotate command: $rotate"
+    if ! docker exec "$SRV" sh -c "$rotate"; then R_NOTE="rotate-ca failed"; rc=1; fi
+  fi
   if [ "$rc" = 0 ]; then
     d_helper "$img" "${HM[@]}" -e DATA_DIR=/var/lib/rancher/k3s -- sh -c "$TN_REMEDIATE_FINALIZE" || { R_NOTE="finalize failed"; return 1; }
     SINCE=$(now); docker restart "$SRV" >/dev/null || { R_NOTE="restart failed"; return 1; }

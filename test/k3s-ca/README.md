@@ -88,9 +88,9 @@ hung k3s cannot stall a run.
 | `fresh` (S2) | `lib` x the same generators x versions | READY on all |
 | `legacy-with-cert` (S3) | legacy scripts with the **fixed** device certs `fixed-bs`, `fixed-go` x {v1.34.11, v1.36.5, v1.37.1, stable} | READY: the generator fix alone rescues new devices that run old scripts |
 | `agent` (S4) | server + 1 agent (same version, raw token), `--ca-mode`, with and without `--agent-os-trust` | agent node Ready |
-| `remediation` (S5-S7) | persistent data dirs: bootstrap legacy on v1.34.11 with an agent and a marker ConfigMap, remediate, upgrade through the fix to v1.36.5 (`check` = 0, second remediate = no-op); bricked (v1.34.11 -> v1.36.5) and hung fresh bootstrap (directly v1.36.5), remediated through the post-fix server, with the documented downgrade fallback | see the table printed by the run |
+| `remediation` (S5-S7) | persistent data dirs: **S5** bootstrap legacy on v1.34.11 with an agent and a marker ConfigMap, remediate, upgrade through the fix to v1.36.5 (`check` = 0, second remediate = no-op); **S6** bricked (v1.34.11 -> v1.36.5 swap, datastore initialised): rotate through the running post-fix server; **S7** hung fresh bootstrap (legacy CA directly on v1.36.5, `server/token` never written): nothing to rotate, `prepare` regenerates the PKI in place and k3s starts from it. The downgrade fallback (pre-fix patch -> remediate -> upgrade) runs only if S6/S7 fail | see the table printed by the run |
 | `rerun` (S8) | `lib` setup on v1.36.5, Ready, setup again on the initialised dir: tls sha256 unchanged, k3s restarts Ready | |
-| `host` (S9) | `remediate --phase all` as root on the host with `K3S_BIN='docker exec <srv> k3s'`, `TN_K3S_RESTART_CMD='docker restart <srv>'`, data dir bind-mounted at an identical path (needs passwordless sudo) | |
+| `host` (S9, S10) | as root on the host, with `K3S_BIN='docker exec <srv> k3s'`, `TN_K3S_RESTART_CMD='docker restart <srv>'`, data dir bind-mounted at an identical path (needs passwordless sudo). **S9** `remediate --phase all`. **S10** `tn_k3s_ca_setup` sourced under `set -e`/noglob on a device bootstrapped with the old root repairs the CA itself, k3s then upgrades to v1.36.5 with the marker intact, and a second setup is a no-op | |
 | `openssl-compat` | the library's setup, run twice per generator under `/bin/sh` (dash) in distro containers, no k3s (see below) | PASS everywhere |
 | `all` | everything above | |
 
@@ -113,6 +113,12 @@ extensions, the replica of k3s v1.36.5 `appendCertsFromPEM`/`hashCA` verifies
 `server-ca.crt` through the pruned pool, `openssl verify` of the chain, and
 `rsa_public.pem` / `rsa_private.pem` byte-identical before and after.
 
+For every generator without `keyCertSign` it also builds a device the old way (`legacy-ca.sh` plus a
+`server/token`), checks that `check` returns 2, runs `remediate --phase all` with a fake `K3S_BIN`
+that only records its arguments (`rotate-ca` must be called) and a no-op restart, and then
+verifies the result with `k3sverify` and `check` = 0: the remediation text handling (`awk`, `find`,
+`sort`, `tar`, `openssl verify`) on the same distro/arch matrix.
+
 Default images: debian bullseye, bookworm, trixie; ubuntu 18.04, 20.04, 22.04,
 24.04; `linux/arm64` ubuntu 20.04 and 22.04 (Jetson); `linux/arm/v7`
 debian:bookworm (Raspberry Pi OS 32-bit, 32-bit `time_t`); `linux/arm64`
@@ -126,7 +132,8 @@ example `--compat-images "debian:bookworm linux/arm64/ubuntu:22.04"`.
 --versions "V ..."      --gens "G ..."      --ca-mode lib|proper (agent suite)
 --agent-os-trust yes|no|both                --helpers "ubuntu:20.04 debian:bookworm" (remediation)
 --compat-images "..."   --helper-image IMG  -j N (default 4)
---device-cert F --device-key F              --out DIR (default $TMPDIR/tn-k3sca-<runid>)
+--device-cert F --device-key F              --expect READY|FAIL (legacy cases on post-fix k3s)
+--out DIR (default $TMPDIR/tn-k3sca-<runid>)
 --keep                  keep containers, work dirs and the generated keys
 --list                  print the plan only
 ```
@@ -147,7 +154,7 @@ is skipped with a message (a `SKIP` row) when the hook is absent.
 |---|---|
 | `TN_K3S_CA_LIB` | path of `tn-k3s-ca.sh` (cli: `pkg/templates/scripts/tn-k3s-ca.sh`; bootstrap-device: `templates/04_tn_k3s_ca_lib.sh`). It is **sourced** (`. file`, no arguments, must not run anything) in a shell that has `set -e`, `set -o noglob`, `umask 027` and `info`/`warn`/`fatal` as in `header.sh.tmpl` (`shim.sh`), with `CONFIG_PATH` (a dir holding `rsa_public.pem` and `rsa_private.pem`), `DATA_DIR`, `PRODUCT=k3s`, `_DEVICE_ID`, `_DOMAIN` set, and must provide `tn_k3s_ca_setup`. As a program (`sh tn-k3s-ca.sh check\|remediate [--phase prepare\|rotate\|finalize\|all] [--data-dir D]`) it is the remediation tool |
 | `TN_REMEDIATE_PREPARE` | command run in a helper container (root, data dir at `/var/lib/rancher/k3s`, the library at `/tn/tn-k3s-ca.sh`, device files at `/etc/teknoir`, `DATA_DIR` and `K3S_BIN=k3s` in the environment). Default: `sh /tn/tn-k3s-ca.sh remediate --phase prepare --data-dir /var/lib/rancher/k3s` |
-| rotate command | not a variable: the prepare phase must leave the exact command in `$DATA_DIR/server/.tn-ca-rotate-*/ROTATE_CMD` (the newest one is used). The harness runs it with `docker exec <server> sh -c "$(cat ROTATE_CMD)"` |
+| rotate command | not a variable: for an initialised datastore the prepare phase must leave the exact command in `$DATA_DIR/server/.tn-ca-rotate-*/ROTATE_CMD` (the newest one is used). The harness runs it with `docker exec <server> sh -c "$(cat ROTATE_CMD)"`. A datastore that k3s never initialised (S7) has nothing to rotate: prepare may leave no `ROTATE_CMD` there, and only there (S5/S6 fail without it) |
 | `TN_REMEDIATE_FINALIZE` | like PREPARE for the finalize phase. The harness then runs `docker restart <server>` |
 | `TN_REMEDIATE_CHECK` | command whose exit code must be 0 after remediation. Default: `sh /tn/tn-k3s-ca.sh check --data-dir /var/lib/rancher/k3s` |
 | `HELPER_IMAGE` | image preparing the tls dir (default `debian:bookworm`) |
@@ -165,8 +172,14 @@ Used to test certificates produced by the real generators (Backstage
 ```
 
 Giving both options adds the generator `ext` and makes it the default for every
-suite. Expect READY for a certificate that has `keyCertSign` even with the old
-scripts (`legacy`), and FAIL on post-fix versions for one that does not.
+suite. The expected outcome of the `legacy` cases (today's scripts, which copy the
+certificate verbatim to `root-ca.pem`) is **derived from the certificate**:
+`run.sh` inspects it, prints `device cert 'ext': keyCertSign=yes|no -> legacy scripts expected ...`
+and exports `EXT_CERTSIGN`. With `keyCertSign` the legacy scripts are READY on every
+version (the acceptance mode for the WP3-WP5 generators: a correct fix is PASS); without it they
+are READY on pre-fix k3s and FAIL on post-fix k3s. `lib` and `proper` cases are READY either way.
+`--expect READY|FAIL` overrides the derived value for the legacy cases on post-fix k3s (for
+a certificate that the keyCertSign rule cannot explain; pre-fix k3s stays READY).
 
 ## Safety and cleanup
 
