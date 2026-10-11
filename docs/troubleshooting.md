@@ -73,12 +73,20 @@ including resolved URLs and the exact `ssh` invocation used.
     in this repository and is embedded in every generated `bootstrap_server_*.sh`):
 
     ```bash
-    sh tn-k3s-ca.sh check     # exit 0 = ok, 2 = needs rotation, 3 = needs regeneration, 4 = foreign CA
+    sh tn-k3s-ca.sh check     # exit 0 = ok, 2 = needs rotation, 3 = needs regeneration, 4 = foreign CA or no server data found
     ```
+
+    Without `--data-dir`, the tool finds the k3s data dir the way k3s does (`--data-dir`/`-d` in the
+    `ExecStart` of `k3s.service`, then the last `data-dir` in `/etc/rancher/k3s/config.yaml.d/*.yaml`,
+    then `data-dir` in `/etc/rancher/k3s/config.yaml`, then `K3S_DATA_DIR` of the unit, then
+    `/var/lib/rancher/k3s`) and tells which one it used (`data dir ... (source)` on stderr). If a k3s
+    **server unit exists but the data dir it found has no `server/tls/server-ca.crt`**, `check` is never
+    "ok": it exits 4 (`no-server-data`) and names the directory it looked in. Either k3s has not
+    started on this device yet, or its data dir is somewhere the tool cannot see; pass `--data-dir DIR`.
 
     | Situation | How to tell | What to do |
     | --- | --- | --- |
-    | **Fresh bootstrap that hangs**: k3s was never Ready on this device | `check` says `needs-regeneration`; `/var/lib/rancher/k3s/server/token` does not exist | Run the fixed `bootstrap_server_*.sh` again, or `sh tn-k3s-ca.sh remediate`. Nothing was ever stored in the cluster, so there is nothing to rotate: the PKI is regenerated (the old files are saved as `server/tls-backup-tn-*.tar`) and k3s is restarted. `rotate-ca` cannot be used here, it needs the token a started server writes |
+    | **Fresh bootstrap that hangs**: k3s was never Ready on this device | `check` says `needs-regeneration`; `<data dir>/server/token` (`/var/lib/rancher/k3s/server/token`) does not exist | Run the fixed `bootstrap_server_*.sh` again, or `sh tn-k3s-ca.sh remediate`. Nothing was ever stored in the cluster, so there is nothing to rotate: k3s is stopped while `server/tls` is replaced (the old dir is moved aside, the result is validated, and the old dir is put back if anything fails), the old files are saved as `server/tls-backup-tn-*.tar`, and k3s is started again. `rotate-ca` cannot be used here, it needs the token a started server writes |
     | **Bricked by an upgrade**: the device worked, then k3s was upgraded and does not start | `check` says `needs-rotation`; k3s logs the error above | `sh tn-k3s-ca.sh remediate`. k3s must be running (a k3s that loops on the error is fine, it listens). The tool stages the new CA files, runs `k3s certificate rotate-ca` against the running server, copies the files and restarts k3s. Workloads and the datastore are kept. Details below |
     | **Still works, not upgraded yet** | `check` says `needs-rotation`; `k3s --version` shows v1.34.11, v1.35.8, v1.36.4 or v1.37.0 or older | Do it now: `sh tn-k3s-ca.sh remediate`, or run the fixed bootstrap script again (it repairs the CA before it touches k3s; `TN_K3S_CA_AUTO_REMEDIATE=false` makes it stop with advice instead) |
     | **`foreign`** | `check` says `foreign` | The root is not the Teknoir device CA (no matching key in `server/tls/root-ca.key` or `/etc/teknoir/rsa_private.pem`). The tool does not touch it |
@@ -94,6 +102,29 @@ including resolved URLs and the exact `ssh` invocation used.
     vouch for anything any more, so for those the tool verifies the new bundle itself with openssl and
     adds `--force` to `rotate-ca` (it says so when it stages the rotation). A root without any key usage
     (the Backstage certificates) is rotated without `--force`.
+
+    Also with `--force`: an old root that is not yet valid, has no `basicConstraints` or `CA:FALSE`, and,
+    generally, any old root against which openssl cannot verify the old chain while the new chain
+    verifies. The reason is printed when the rotation is staged.
+
+    A k3s older than v1.24.12 / v1.25.8 / v1.26.3 has no `certificate rotate-ca`. The tool stops
+    before it changes anything and says so: that k3s still accepts the current root (the `keyCertSign`
+    check only came with v1.34.12 and later), so upgrade it one minor version at a time to a release
+    with `rotate-ca` that is older than v1.34.12 (v1.27 to v1.34.11), then run `remediate`, then go on.
+
+    **When the CA was changed but a later step failed** (`remediate` exits 5; the bootstrap script stops
+    with "the k3s CA of this device WAS changed"): `rotate-ca` succeeded, so the datastore of k3s holds
+    the new CA. If copying the files failed, fix the cause and run `sh tn-k3s-ca.sh remediate --phase
+    finalize`; if the restart failed, look at `systemctl status k3s` / `journalctl -u k3s` and restart
+    it. Running `remediate` again finalizes a completed rotation instead of rotating twice.
+
+    **Rollback limits.** The tool saves `server/tls` as `server/tls-backup-tn-<time>.tar` (the newest 3
+    are kept; they hold keys, mode 600). A rotation also writes the new CA into the datastore of k3s,
+    which the tool does not back up: after a successful `rotate-ca`, restoring the tar alone does not go
+    back (files and datastore would disagree). A real rollback needs a copy of `server/db` taken before
+    with k3s stopped. Before `rotate-ca` has succeeded nothing on disk is changed. A leftover staging dir
+    `server/.tn-ca-rotate-*` (it holds copies of the keys) is removed by the next `remediate` or
+    bootstrap run once the CA is fine.
 
     If `rotate-ca` fails, nothing was changed on disk. Use the fallback: put the last release before
     the fix of **the same minor** in place, remediate, and upgrade again.
@@ -120,6 +151,12 @@ including resolved URLs and the exact `ssh` invocation used.
     servers one by one and read the [k3s documentation](https://docs.k3s.io/cli/certificate) for
     `rotate-ca` first. Agent nodes need nothing: they have no CA of their own and pick up the new
     root from the server.
+
+??? question "Which k3s version do the bootstrap scripts install?"
+    A pinned one, `v1.36.5+k3s1` by default (`tnctl bootstrap --k3s-version` changes it, `stable`
+    restores "whatever the installer's stable channel is today", and `INSTALL_K3S_VERSION=... sh
+    bootstrap_*.sh` overrides it when the script runs). An agent must run the version of its server.
+    See [`tnctl bootstrap`](commands/bootstrap.md#the-k3s-version).
 
 ??? failure "Bootstrap fails with `string too long maxsize=64`"
     The generated CA certificates carry the device ID and the domain in their common name, which is

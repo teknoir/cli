@@ -2,8 +2,29 @@ package templates
 
 import (
 	"embed"
+	"fmt"
+	"regexp"
 	"text/template"
 )
+
+// DefaultK3SVersion is the k3s release the bootstrap scripts install unless told otherwise
+// (`tnctl bootstrap --k3s-version`, or INSTALL_K3S_VERSION when the script runs). It is the stable
+// channel (https://update.k3s.io/v1-release/channels) at the time of writing, and the release the
+// CA harness in test/k3s-ca proves with the re-issued root. Server and agent scripts use the same
+// value, so a cluster is not installed with two versions by accident.
+const DefaultK3SVersion = "v1.36.5+k3s1"
+
+var k3sVersionRE = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$`)
+
+// ValidateK3SVersion accepts an exact release (v1.36.5+k3s1), or the channels "stable" (the
+// installer's own default: whatever stable is when the script runs) and "latest". The value ends up
+// in a shell script, so nothing else is let through.
+func ValidateK3SVersion(v string) error {
+	if v == "" || v == "stable" || v == "latest" || k3sVersionRE.MatchString(v) {
+		return nil
+	}
+	return fmt.Errorf("invalid k3s version %q: want an exact release like %s, or stable or latest", v, DefaultK3SVersion)
+}
 
 type TemplateData struct {
 	Domain       string
@@ -16,6 +37,33 @@ type TemplateData struct {
 	PublicSSHKey string
 	K3SToken     string
 	DockerSecret string
+	// K3SVersion is the k3s release to install: an exact release, "stable" or "latest".
+	// Empty means DefaultK3SVersion.
+	K3SVersion string
+}
+
+func (d TemplateData) k3sVersion() string {
+	if d.K3SVersion == "" {
+		return DefaultK3SVersion
+	}
+	return d.K3SVersion
+}
+
+// K3SPin is the value for INSTALL_K3S_VERSION, or "" when the installer is to pick (stable, latest).
+func (d TemplateData) K3SPin() string {
+	if v := d.k3sVersion(); v != "stable" && v != "latest" {
+		return v
+	}
+	return ""
+}
+
+// K3SChannel is the value for INSTALL_K3S_CHANNEL: "latest", or "" (the installer's default,
+// stable, and the pinned releases).
+func (d TemplateData) K3SChannel() string {
+	if d.k3sVersion() == "latest" {
+		return "latest"
+	}
+	return ""
 }
 
 //go:embed agent.sh.tmpl

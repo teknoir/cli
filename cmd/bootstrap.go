@@ -20,6 +20,10 @@ var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap [device-name]",
 	Short: "Generate bootstrap scripts for a device",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		k3sVersion, _ := cmd.Flags().GetString("k3s-version")
+		if err := templates.ValidateK3SVersion(k3sVersion); err != nil {
+			return err
+		}
 		cfg, err := config.Load()
 		if err != nil {
 			return err
@@ -113,6 +117,7 @@ var bootstrapCmd = &cobra.Command{
 			PublicSSHKey: publicSSHKey,
 			K3SToken:     k3sToken,
 			DockerSecret: dockerSecret,
+			K3SVersion:   k3sVersion,
 		}
 
 		generate := func(tmpl *template.Template, filename string) error {
@@ -162,6 +167,8 @@ func generateK3SToken() (string, error) {
 
 func init() {
 	bootstrapCmd.Flags().Bool("skip-upload", false, "Skip uploading the generated scripts")
+	bootstrapCmd.Flags().String("k3s-version", templates.DefaultK3SVersion,
+		"k3s release the scripts install (INSTALL_K3S_VERSION): an exact release like v1.36.5+k3s1, or stable / latest for the installer's channels. Server and agent scripts use the same value")
 	bootstrapCmd.Flags().String("docker-secret", "", "The contents of the .dockerconfigjson")
 	rootCmd.AddCommand(bootstrapCmd)
 }

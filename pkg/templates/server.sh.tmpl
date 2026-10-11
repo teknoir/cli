@@ -51,6 +51,11 @@ disable:
   - traefik
 node-name: teknoir-master
 EOL
+# The CA above was made in ${DATA_DIR}, the data dir that k3s uses on this device. The file just
+# written and the unit that the installer writes (it has no --data-dir) must keep it there.
+if [ "${DATA_DIR}" != "/var/lib/rancher/k3s" ]; then
+    echo "data-dir: ${DATA_DIR}" | $SUDO tee -a ${K3S_CONFIG_PATH}/config.yaml > /dev/null
+fi
 cat >/etc/sysctl.d/teknoir-k3s.conf << EOF
 fs.inotify.max_user_instances=1024
 EOF
@@ -77,12 +82,13 @@ if [ "${USE_DOCKER}" = true ]; then
     export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
 fi
 
+{{template "k3s_version.sh.tmpl" .}}
 export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
 
 info "Install Teknoir Manifests"
-$SUDO mkdir -p /var/lib/rancher/k3s/server/manifests
-$SUDO tee /var/lib/rancher/k3s/server/manifests/teknoir.yaml > /dev/null << EOL
+$SUDO mkdir -p ${DATA_DIR}/server/manifests
+$SUDO tee ${DATA_DIR}/server/manifests/teknoir.yaml > /dev/null << EOL
 {{template "manifests.yaml.tmpl" .}}
 EOL
 

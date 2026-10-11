@@ -7,6 +7,7 @@
 #   K3S_URL=https://<IP or mDNS name>:6443 (default: generated at master node creation time)
 #   K3S_TOKEN="32 char string" (default: generated at master node creation time)
 #   CREATE_USER=false (default: ask, create a user for the device without asking)
+#   INSTALL_K3S_VERSION=v1.xx.y+k3sN (default: the version tnctl pinned; must be the version of the server)
 
 {{template "variables.sh.tmpl" .}}
 
@@ -51,6 +52,7 @@ if [ "${USE_DOCKER}" = true ]; then
     export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
 fi
 
+{{template "k3s_version.sh.tmpl" .}}
 export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
 

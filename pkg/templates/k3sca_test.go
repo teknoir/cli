@@ -96,6 +96,10 @@ type pki struct {
 	dir  string // work dir
 	cfg  string // CONFIG_PATH
 	data string // DATA_DIR
+	// k3sCfg is the TN_K3S_CONFIG_DIR (/etc/rancher/k3s), unit the TN_K3S_UNIT_FILE (k3s.service);
+	// neither exists until a test writes it
+	k3sCfg string
+	unit   string
 }
 
 func newPKI(t *testing.T) *pki {
@@ -112,6 +116,11 @@ func newPKI(t *testing.T) *pki {
 	p := &pki{t: t, dir: t.TempDir()}
 	p.cfg = filepath.Join(p.dir, "etc")
 	p.data = filepath.Join(p.dir, "data")
+	// never read the real /etc/rancher/k3s or the systemd units of the machine running the tests
+	p.k3sCfg = filepath.Join(p.dir, "rancher-k3s")
+	p.unit = filepath.Join(p.dir, "k3s.service")
+	t.Setenv("TN_K3S_CONFIG_DIR", p.k3sCfg)
+	t.Setenv("TN_K3S_UNIT_FILE", p.unit)
 	for _, d := range []string{p.cfg, p.data} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
