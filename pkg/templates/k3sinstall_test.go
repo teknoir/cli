@@ -420,27 +420,17 @@ func TestCgroupV1DropinGoesWhenNotNeeded(t *testing.T) {
 }
 
 func TestCgroupV1RespectsTheDevicesOwnSetting(t *testing.T) {
-	for name, tc := range map[string]struct {
-		file, content string
-		env           string
-	}{
-		"config.yaml":      {"config.yaml", "kubelet-arg:\n  - fail-cgroupv1=true\n", ""},
-		"config.yaml.d":    {"config.yaml.d/20-x.yaml", "kubelet-arg+:\n  - fail-cgroupv1=true\n", ""},
-		"INSTALL_K3S_EXEC": {"", "", "INSTALL_K3S_EXEC=server --kubelet-arg=fail-cgroupv1=true"},
+	// the device sets the flag in a file that the running k3s reads: our drop-in goes, theirs wins
+	for name, tc := range map[string]struct{ file, content string }{
+		"config.yaml":   {"config.yaml", "kubelet-arg:\n  - fail-cgroupv1=true\n"},
+		"config.yaml.d": {"config.yaml.d/10-user.yaml", "kubelet-arg+:\n  - fail-cgroupv1=true\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			i := newInst(t)
 			i.installed("")
-			env := []string{"TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1"}
-			if tc.file != "" {
-				write(t, filepath.Join(i.k3sCfg, tc.file), tc.content)
-			}
-			if tc.env != "" {
-				env = append(env, tc.env)
-			}
-			// our own file from an earlier run is removed, theirs wins
+			write(t, filepath.Join(i.k3sCfg, tc.file), tc.content)
 			write(t, i.dropin(), "kubelet-arg+:\n  - \"fail-cgroupv1=false\"\n")
-			out, err := i.run("tn_inst_prepare server", env...)
+			out, err := i.run("tn_inst_prepare server", "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1")
 			if err != nil || !strings.Contains(out, "set by the device itself") {
 				t.Fatalf("%v\n%s", err, out)
 			}
@@ -448,6 +438,89 @@ func TestCgroupV1RespectsTheDevicesOwnSetting(t *testing.T) {
 				t.Error("our drop-in overrides the device's own setting")
 			}
 		})
+	}
+}
+
+// A fail-cgroupv1 that only the INSTALL_K3S_EXEC of the caller carries reaches the unit when the
+// installer has run. Until then a k3s that restarts (the CA step restarts it) or a device that reboots
+// reads no flag, so the drop-in must stay if it is there, and be written if it is not.
+func TestCgroupV1DropinStaysWhenTheOnlyOtherSettingIsInstallK3sExec(t *testing.T) {
+	exec := "INSTALL_K3S_EXEC=server --kubelet-arg=fail-cgroupv1=false"
+	env := []string{"TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1", exec}
+	// present: it stays, byte for byte
+	i := newInst(t)
+	i.installed("")
+	i.run("tn_inst_prepare server", "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1")
+	before := string(mustRead(t, i.dropin()))
+	out, err := i.run("tn_inst_prepare server", env...)
+	if err != nil || !strings.Contains(out, "set by the device itself (INSTALL_K3S_EXEC)") || !strings.Contains(out, "stays until the installer") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if _, err := os.Stat(i.dropin()); err != nil || string(mustRead(t, i.dropin())) != before {
+		t.Errorf("the drop-in did not survive tn_inst_prepare: %v", err)
+	}
+	if strings.Contains(out, "Removed") {
+		t.Errorf("something was removed:\n%s", out)
+	}
+	// absent: it is written
+	i = newInst(t)
+	i.installed("")
+	if out, err = i.run("tn_inst_prepare server", env...); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(string(mustRead(t, i.dropin())), "fail-cgroupv1=false") {
+		t.Error("no drop-in although only INSTALL_K3S_EXEC has the flag")
+	}
+	// the flag is in a persistent file AND in INSTALL_K3S_EXEC: the file counts, ours goes
+	i = newInst(t)
+	i.installed("")
+	write(t, filepath.Join(i.k3sCfg, "config.yaml.d", "10-user.yaml"), "kubelet-arg+:\n  - fail-cgroupv1=false\n")
+	write(t, i.dropin(), "kubelet-arg+:\n  - \"fail-cgroupv1=false\"\n")
+	if out, err = i.run("tn_inst_prepare server", env...); err != nil || !strings.Contains(out, "10-user.yaml") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if _, err := os.Stat(i.dropin()); err == nil {
+		t.Error("our drop-in stays although a persistent file has the flag")
+	}
+}
+
+// With no flag from the device at all the drop-in is written.
+func TestCgroupV1DropinIsWrittenWithoutAFlagFromTheDevice(t *testing.T) {
+	i := newInst(t)
+	i.installed("")
+	out, err := i.run("tn_inst_prepare server", "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1", "INSTALL_K3S_EXEC=server --node-label=a=b")
+	if err != nil || !strings.Contains(string(mustRead(t, i.dropin())), "fail-cgroupv1=false") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+}
+
+// An installed k3s older than v1.31 that is being upgraded cannot start with the flag: it is not
+// written (and an existing one is removed) before the installer, and tn_inst_finish writes it after.
+func TestCgroupV1FlagWaitsForTheInstallerWhenTheInstalledK3sIsTooOld(t *testing.T) {
+	for _, withDropin := range []bool{false, true} {
+		i := newInst(t)
+		i.installed("v1.30.14+k3s1")
+		if withDropin {
+			write(t, i.dropin(), "kubelet-arg+:\n  - \"fail-cgroupv1=false\"\n")
+		}
+		env := []string{"TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.31.4+k3s1", "TN_K3S_UPGRADE=true", "TN_K3S_PIN_SOURCE=flag"}
+		out, err := i.run("tn_inst_prepare server", env...)
+		if err != nil || !strings.Contains(out, "after the installer has upgraded it") {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		if _, err := os.Stat(i.dropin()); err == nil {
+			t.Errorf("withDropin=%v: the old kubelet would read the flag before the installer ran\n%s", withDropin, out)
+		}
+		out, err = i.run("tn_inst_prepare server; tn_inst_finish", env...)
+		if err != nil || !strings.Contains(string(mustRead(t, i.dropin())), "fail-cgroupv1=false") {
+			t.Fatalf("withDropin=%v: not written after the installer: %v\n%s", withDropin, err, out)
+		}
+		// finish without a deferred write does nothing, and prepare resets it
+		i2 := newInst(t)
+		i2.installed("")
+		if out, err = i2.run("tn_inst_prepare server; tn_inst_finish", "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1"); err != nil || strings.Contains(out, "held back") {
+			t.Errorf("%v\n%s", err, out)
+		}
 	}
 }
 

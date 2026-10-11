@@ -108,6 +108,8 @@ fi
 # The release (INSTALL_K3S_VERSION) and the kubelet flag were decided by tn_inst_prepare above.
 export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
+# The kubelet flag that had to wait for the installer (an installed k3s older than v1.31 that was upgraded)
+tn_inst_finish
 
 # Tell the agents which k3s release this server runs: they install exactly that one (a kubelet must not be
 # newer than its apiserver), and k3s does not answer /version to an anonymous caller. Served by k3s at

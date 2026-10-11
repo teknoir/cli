@@ -73,6 +73,8 @@ fi
 tn_inst_prepare agent
 export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
+# The kubelet flag that had to wait for the installer (an installed k3s older than v1.31 that was upgraded)
+tn_inst_finish
 
 info "K3s agent node joined successfully!"
 

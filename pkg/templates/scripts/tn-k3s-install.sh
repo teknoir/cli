@@ -5,6 +5,7 @@
 # tn-k3s-ca.sh (the server only).
 #
 #   . tn-k3s-install.sh; tn_inst_prepare server|agent       (once, right before the installer)
+#   tn_inst_finish                                           (once, right after the installer)
 #   tn_inst_config_ensure FILE KEY TEXT                      (config.yaml without clobbering it)
 #
 # POSIX sh. It runs under `set -e` and `set -o noglob` (as the bootstrap scripts do) and does not
@@ -59,6 +60,21 @@
 # deprecated upstream: move the device to cgroup v2 (kernel command line
 # systemd.unified_cgroup_hierarchy=1, or a newer OS release).
 #
+# Order of effects. Everything before the installer (tn_inst_prepare, the CA step, the download) can
+# be interrupted by a restart of k3s (the CA step restarts it) or by a reboot of the device, and the
+# running k3s then reads the configuration again. So tn_inst_prepare only makes changes that are safe
+# for the k3s that is running NOW, and never takes a protection away before its replacement is in place:
+#   - the drop-in is REMOVED early only when the running k3s does not need it: the host is on cgroup v2;
+#     the release that will run is older than v1.31 (an older kubelet fails on the unknown flag); or the
+#     device sets fail-cgroupv1 in a PERSISTENT config file that k3s already reads (config.yaml or another
+#     config.yaml.d/*.yaml). A fail-cgroupv1 only in INSTALL_K3S_EXEC reaches the unit when the installer
+#     has run, so until then the drop-in stays (or is written): the same value twice is harmless, and
+#     the command line wins when they differ.
+#   - the drop-in is WRITTEN early, except when the k3s that is installed now is older than v1.31 (an
+#     upgrade): its kubelet would fail on the flag if it restarted before the installer replaced it.
+#     That write waits for tn_inst_finish, after the installer. An existing drop-in is removed at once in
+#     that case, because the old kubelet cannot take it.
+#
 # Environment (all optional):
 #   INSTALL_K3S_VERSION, INSTALL_K3S_CHANNEL   the pin of the script (read, and set to what the installer must get)
 #   TN_K3S_UPGRADE      true: the pin may replace an installed k3s
@@ -76,7 +92,7 @@
 #   TN_K3S_CONFIG_DIR   /etc/rancher/k3s
 #   OS_BUILD            set by the OS image builds: the host is not the device, cgroup cannot be detected
 
-TN_K3S_INSTALL_LIB_VERSION=2
+TN_K3S_INSTALL_LIB_VERSION=3
 export TN_K3S_INSTALL_LIB_VERSION
 
 # ----------------------------------------------------------------- messages
@@ -382,15 +398,19 @@ tn_inst_cgroup_state() {
   esac
 }
 
-# tn_inst_cgroup_configured_elsewhere: 0 if the device sets fail-cgroupv1 itself (not in our file)
+# tn_inst_cgroup_configured_elsewhere: 0 if the device sets fail-cgroupv1 itself (not in our file).
+# Sets TN_INST_CGROUP_WHERE to where, and TN_INST_CGROUP_PERSISTENT to 1 when that is a config file that
+# the running k3s reads (config.yaml, config.yaml.d/*.yaml), and to 0 when it is only INSTALL_K3S_EXEC
+# (which reaches the unit when the installer has run). Files win over INSTALL_K3S_EXEC.
 tn_inst_cgroup_configured_elsewhere() {
   _tn_cd=${TN_K3S_CONFIG_DIR:-/etc/rancher/k3s}
-  case ${INSTALL_K3S_EXEC:-} in *fail-cgroupv1*) TN_INST_CGROUP_WHERE=INSTALL_K3S_EXEC; return 0 ;; esac
+  TN_INST_CGROUP_WHERE=; TN_INST_CGROUP_PERSISTENT=0
   for _tn_cf in "$_tn_cd/config.yaml" $(find "$_tn_cd/config.yaml.d" -maxdepth 1 -type f -name '*.yaml' 2>/dev/null | LC_ALL=C sort); do
     [ -r "$_tn_cf" ] || continue
     [ "$_tn_cf" != "$_tn_cd/config.yaml.d/$TN_INST_CGROUP_FILE" ] || continue
-    if grep -q 'fail-cgroupv1' "$_tn_cf" 2>/dev/null; then TN_INST_CGROUP_WHERE=$_tn_cf; return 0; fi
+    if grep -q 'fail-cgroupv1' "$_tn_cf" 2>/dev/null; then TN_INST_CGROUP_WHERE=$_tn_cf; TN_INST_CGROUP_PERSISTENT=1; return 0; fi
   done
+  case ${INSTALL_K3S_EXEC:-} in *fail-cgroupv1*) TN_INST_CGROUP_WHERE=INSTALL_K3S_EXEC; return 0 ;; esac
   return 1
 }
 
@@ -407,6 +427,7 @@ tn_inst_cgroup_remove() { # FILE WHY
 tn_inst_cgroup() {
   _tn_cdir=${TN_K3S_CONFIG_DIR:-/etc/rancher/k3s}/config.yaml.d
   _tn_cfile=$_tn_cdir/$TN_INST_CGROUP_FILE
+  TN_INST_CGROUP_DEFERRED=
   _tn_cst=$(tn_inst_cgroup_state)
   if [ "$_tn_cst" = v2 ]; then
     tn_inst_cgroup_remove "$_tn_cfile" "this host uses cgroup v2"
@@ -429,10 +450,29 @@ tn_inst_cgroup() {
     tn_inst_info "k3s $TN_INST_EFFECTIVE starts on cgroup v1 without help; the kubelet flag is set anyway, so that an upgrade to v1.35 or newer (also one made by hand) does not stop the kubelet"
   fi
   if tn_inst_cgroup_configured_elsewhere; then
-    tn_inst_info "fail-cgroupv1 is set by the device itself ($TN_INST_CGROUP_WHERE): left as it is"
-    tn_inst_cgroup_remove "$_tn_cfile" "the device sets fail-cgroupv1 itself"
+    if [ "$TN_INST_CGROUP_PERSISTENT" = 1 ]; then
+      tn_inst_info "fail-cgroupv1 is set by the device itself ($TN_INST_CGROUP_WHERE): left as it is"
+      tn_inst_cgroup_remove "$_tn_cfile" "the device sets fail-cgroupv1 itself, in a file that k3s reads"
+      return 0
+    fi
+    # only on the command line of the installer: k3s does not read it until the unit is rewritten, so the
+    # drop-in must keep protecting a k3s that restarts before that. The same value twice does no harm.
+    tn_inst_info "fail-cgroupv1 is set by the device itself ($TN_INST_CGROUP_WHERE): left as it is. The drop-in $_tn_cfile stays until the installer has put it in the unit; the same value twice is harmless, and the one on the command line wins"
+  fi
+  # an installed k3s older than v1.31 (about to be upgraded) cannot start with the flag
+  if [ -n "${TN_INST_INSTALLED:-}" ] && tn_inst_cmp "$TN_INST_INSTALLED" v1.31.0 && [ "$TN_INST_CMP" = -1 ]; then
+    TN_INST_CGROUP_DEFERRED=1
+    tn_inst_info "the installed k3s $TN_INST_INSTALLED is older than v1.31: the kubelet flag is set after the installer has upgraded it, not before"
+    tn_inst_cgroup_remove "$_tn_cfile" "the installed k3s is older than v1.31 and cannot take the flag until it is upgraded"
     return 0
   fi
+  tn_inst_cgroup_write
+}
+
+# tn_inst_cgroup_write: the drop-in, written atomically and only when it differs
+tn_inst_cgroup_write() {
+  _tn_cdir=${TN_K3S_CONFIG_DIR:-/etc/rancher/k3s}/config.yaml.d
+  _tn_cfile=$_tn_cdir/$TN_INST_CGROUP_FILE
   _tn_want=$(printf '%s\n' \
     '# Written by the Teknoir bootstrap script. Kubernetes >= 1.35 refuses to start the kubelet on cgroup v1' \
     '# unless this is false. cgroup v1 is deprecated: move the device to cgroup v2 and delete this file.' \
@@ -491,4 +531,15 @@ tn_inst_prepare() {
   tn_inst_info "Checking the k3s release and the cgroup version ($TN_INST_ROLE)"
   tn_inst_plan
   tn_inst_cgroup
+}
+
+# tn_inst_finish: call it right after the k3s installer succeeded. Writes the kubelet flag that
+# tn_inst_prepare held back because the k3s that was installed then could not take it (see "Order of
+# effects"). Nothing to do otherwise.
+tn_inst_finish() {
+  if [ -n "${TN_INST_CGROUP_DEFERRED:-}" ]; then
+    TN_INST_CGROUP_DEFERRED=
+    tn_inst_info "The installer has run: setting the kubelet flag that was held back"
+    tn_inst_cgroup_write
+  fi
 }

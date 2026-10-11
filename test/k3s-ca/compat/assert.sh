@@ -158,6 +158,31 @@ install_lib_check() {
         K3S_BIN="$2" INSTALL_K3S_VERSION=v1.35.9+k3s1 TN_K3S_UPGRADE=true tn_inst_prepare server
         K3S_BIN="$2" INSTALL_K3S_VERSION=v1.35.9+k3s1 TN_K3S_UPGRADE=true tn_inst_prepare server
         grep -q "fail-cgroupv1=false" "$TN_K3S_CONFIG_DIR/config.yaml.d/99-teknoir-cgroupv1.yaml" || { echo "no drop-in"; exit 1; }
+        # the device'"'"'s own fail-cgroupv1: in INSTALL_K3S_EXEC only -> the drop-in stays (a restart before the
+        # installer would read no flag); in a config.yaml.d file k3s reads -> ours goes; none -> written
+        D=config.yaml.d/99-teknoir-cgroupv1.yaml
+        (
+          TN_K3S_CONFIG_DIR="$TN_K3S_CONFIG_DIR/exec"; K3S_BIN="$2"; INSTALL_K3S_VERSION=v1.34.11+k3s1
+          export TN_K3S_CONFIG_DIR K3S_BIN INSTALL_K3S_VERSION
+          tn_inst_prepare server
+          INSTALL_K3S_EXEC="server --kubelet-arg=fail-cgroupv1=false" tn_inst_prepare server
+          [ -s "$TN_K3S_CONFIG_DIR/$D" ] || { echo "drop-in removed although the flag is only in INSTALL_K3S_EXEC"; exit 1; }
+          rm -f "$TN_K3S_CONFIG_DIR/$D"
+          INSTALL_K3S_EXEC="server --kubelet-arg=fail-cgroupv1=false" tn_inst_prepare server
+          [ -s "$TN_K3S_CONFIG_DIR/$D" ] || { echo "drop-in not written for a flag only in INSTALL_K3S_EXEC"; exit 1; }
+          printf "kubelet-arg+:\n  - fail-cgroupv1=false\n" > "$TN_K3S_CONFIG_DIR/config.yaml.d/10-user.yaml"
+          tn_inst_prepare server
+          [ ! -e "$TN_K3S_CONFIG_DIR/$D" ] || { echo "drop-in kept although config.yaml.d/10-user.yaml has the flag"; exit 1; }
+        ) || exit 1
+        # installed v1.30.14 upgraded to v1.31: no flag before the installer, written by tn_inst_finish
+        (
+          K3S_BIN="$3"; TN_K3S_CONFIG_DIR="$TN_K3S_CONFIG_DIR/up"; INSTALL_K3S_VERSION=v1.31.4+k3s1; TN_K3S_UPGRADE=true
+          export K3S_BIN TN_K3S_CONFIG_DIR INSTALL_K3S_VERSION TN_K3S_UPGRADE
+          tn_inst_prepare server
+          [ ! -e "$TN_K3S_CONFIG_DIR/$D" ] || { echo "flag written for an installed k3s 1.30 before the installer"; exit 1; }
+          tn_inst_finish
+          [ -s "$TN_K3S_CONFIG_DIR/$D" ] || { echo "flag not written by tn_inst_finish"; exit 1; }
+        ) || exit 1
         # config.yaml: keys are added once, the owner'"'"'s file is kept
         printf "kubelet-arg: max-pods=77\nnode-name: mine" > "$TN_K3S_CONFIG_DIR/config.yaml"
         tn_inst_config_ensure "$TN_K3S_CONFIG_DIR/config.yaml" node-name "node-name: x"

@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"text/template"
 )
 
 // The server script builds INSTALL_K3S_EXEC BEFORE tn_inst_prepare, because the library reads it
 // (tn_inst_cgroup_configured_elsewhere): a fail-cgroupv1 that the caller put there means "the device
-// sets it itself", and the drop-in is removed. If the script then rebuilt the variable without the
+// sets it itself". A flag that is only in INSTALL_K3S_EXEC reaches the unit when the installer has run,
+// so the drop-in is kept (or written) until then. If the script then rebuilt the variable without the
 // caller's value, the installer would get no flag and a k3s >= v1.35 would not start on cgroup v1.
 
 // serverPrologue is the real text of the rendered server script from "# BEGIN install-k3s-exec" to the
@@ -77,11 +79,37 @@ func TestACallersFailCgroupV1ReachesTheInstaller(t *testing.T) {
 	if !strings.HasPrefix(got, baseExec) {
 		t.Errorf("INSTALL_K3S_EXEC lost the arguments of the script: %q", got)
 	}
-	// the library took the flag as the device's own (it saw it in INSTALL_K3S_EXEC): that is only safe
-	// because the installer gets it, which was asserted above
-	if !strings.Contains(out, "set by the device itself (INSTALL_K3S_EXEC)") {
-		if _, err := os.Stat(i.dropin()); err != nil {
-			t.Errorf("neither the library took the caller's flag nor the drop-in is there:\n%s", out)
+	// the library saw the flag in INSTALL_K3S_EXEC; the installer gets it (asserted above), but until the
+	// unit is rewritten a restart of k3s reads nothing, so the drop-in is written as well
+	if _, err := os.Stat(i.dropin()); err != nil {
+		t.Errorf("no drop-in although the flag reaches the unit only after the installer:\n%s", out)
+	}
+}
+
+// A drop-in from an earlier run survives tn_inst_prepare when the caller's flag is in INSTALL_K3S_EXEC:
+// the CA step restarts k3s next, and the installer has not written the unit yet.
+func TestADropinSurvivesThePrologueWhenTheCallersFlagIsInInstallK3sExec(t *testing.T) {
+	i := newInst(t)
+	i.installed("v1.36.5+k3s1")
+	write(t, i.dropin(), "kubelet-arg+:\n  - \"fail-cgroupv1=false\"\n")
+	out, err := i.runPrologue(t, `echo "EXEC=$INSTALL_K3S_EXEC"`, "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_EXEC=--kubelet-arg=fail-cgroupv1=false")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if _, err := os.Stat(i.dropin()); err != nil {
+		t.Errorf("the drop-in was removed before the CA step and the installer:\n%s", out)
+	}
+}
+
+// tn_inst_finish runs right after the installer in both scripts, and not before.
+func TestFinishFollowsTheInstaller(t *testing.T) {
+	for name, tmpl := range map[string]*template.Template{"server": ServerTemplate, "agent": AgentTemplate} {
+		out := renderK3S(t, tmpl, "")
+		inst := strings.Index(out, "\n$SUDO ./k3s_installer.sh\n")
+		fin := strings.Index(out, "\ntn_inst_finish\n")
+		prep := strings.Index(out, "\ntn_inst_prepare "+name+"\n")
+		if prep < 0 || inst < prep || fin < inst || strings.Count(out, "\ntn_inst_finish\n") != 1 {
+			t.Errorf("%s: prepare %d, installer %d, finish %d (once, after the installer)", name, prep, inst, fin)
 		}
 	}
 }
