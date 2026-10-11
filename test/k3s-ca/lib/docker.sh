@@ -77,6 +77,22 @@ DOCKERFILE
   printf '%s' "$tag"
 }
 
+# helper_curl_image: helper_image debian:bookworm plus curl (the install library asks the server of an
+# agent for its release with curl). Cached like the other helper images.
+helper_curl_image() {
+  local base tag=tn-k3sca-helper:debian-bookworm-curl
+  base=$(helper_image debian:bookworm)
+  if ! docker image inspect "$tag" >/dev/null 2>&1; then
+    log "building helper image $tag" >&2
+    docker build -q --label tn-k3sca-cache=1 -t "$tag" - >&2 <<DOCKERFILE || die "cannot build $tag"
+FROM $base
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update >/dev/null 2>&1; apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+DOCKERFILE
+  fi
+  printf '%s' "$tag"
+}
+
 # d_helper IMAGE [docker run args...] -- COMMAND...: run a short-lived labelled container as root.
 d_helper() {
   local image=$1; shift

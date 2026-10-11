@@ -40,6 +40,10 @@ type TemplateData struct {
 	// K3SVersion is the k3s release to install: an exact release, "stable" or "latest".
 	// Empty means DefaultK3SVersion.
 	K3SVersion string
+	// K3SVersionExplicit is true when K3SVersion was asked for (`tnctl bootstrap --k3s-version`), not
+	// taken from the default. An agent script follows the k3s release of its server, except for a
+	// release that was asked for.
+	K3SVersionExplicit bool
 	// K3SUpgrade makes the generated scripts replace an installed k3s with K3SVersion
 	// (TN_K3S_UPGRADE=true is the default in the script). Without it a re-run keeps the installed version.
 	K3SUpgrade bool

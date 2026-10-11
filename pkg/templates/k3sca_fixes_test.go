@@ -626,7 +626,7 @@ func TestOldK3sFailsSafeBeforeAnythingIsChanged(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s succeeded on k3s v1.24.5:\n%s", script, out)
 		}
-		for _, want := range []string{"v1.24.5", "v1.24.12", "v1.26.3", "one minor version at a time", "Nothing was changed"} {
+		for _, want := range []string{"v1.24.5", "v1.24.12", "v1.26.3", "one minor version at a time", "The CA and k3s were not changed"} {
 			if !strings.Contains(out, want) && script != "tn_k3s_ca_setup" {
 				t.Errorf("%s: advice lacks %q:\n%s", script, want, out)
 			}

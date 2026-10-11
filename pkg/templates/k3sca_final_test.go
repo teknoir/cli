@@ -97,7 +97,7 @@ func TestReadyK3sWithAnUninitialisedDataDirStopsTheSetup(t *testing.T) {
 	if exitCode(err) != 1 {
 		t.Fatalf("rc=%d\n%s", exitCode(err), out)
 	}
-	for _, want := range []string{"active and ready", "never initialised", "another data dir", "DATA_DIR=", "Nothing was changed"} {
+	for _, want := range []string{"active and ready", "never initialised", "another data dir", "DATA_DIR=", "The CA and k3s were not changed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("message lacks %q:\n%s", want, out)
 		}
@@ -229,8 +229,8 @@ func TestPrepareChecksEveryWriteOfTheBundleRebuild(t *testing.T) {
 				if !strings.Contains(out, tc.want) {
 					t.Errorf("%s: lacks %q:\n%s", script, tc.want, out)
 				}
-				if script != "tn_k3s_ca_setup" && !strings.Contains(out, "nothing was changed") {
-					t.Errorf("%s: does not say that nothing was changed:\n%s", script, out)
+				if script != "tn_k3s_ca_setup" && !strings.Contains(out, "were not changed") {
+					t.Errorf("%s: does not say that the CA and k3s were not changed:\n%s", script, out)
 				}
 			}
 			if sum(t, p.tls("root-ca.pem")) != beforeRoot || sum(t, p.tls("server-ca.crt")) != beforeServer {
@@ -371,7 +371,10 @@ func TestARestartThatHangsIsReported(t *testing.T) {
 		name string
 		env  func(t *testing.T) []string
 	}{
-		{"systemctl restart", func(t *testing.T) []string { fakeSystemctl(t, "active", 20); return nil }},
+		{"systemctl restart", func(t *testing.T) []string {
+			fakeSystemctl(t, "activating", 20)
+			return []string{"TN_K3S_READY_GRACE=1", "TN_K3S_READY_POLL=1"}
+		}},
 		{"TN_K3S_RESTART_CMD", func(t *testing.T) []string { return []string{"TN_K3S_RESTART_CMD=sleep 20"} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -389,6 +392,9 @@ func TestARestartThatHangsIsReported(t *testing.T) {
 			}
 			if exitCode(err) != 5 {
 				t.Fatalf("rc=%d\n%s", exitCode(err), out)
+			}
+			if tc.name == "systemctl restart" && !strings.Contains(out, "was not active") {
+				t.Errorf("the message does not say that the unit was watched:\n%s", out)
 			}
 			for _, want := range []string{"did not finish within 1s", "datastore of k3s holds the new CA", "could not be restarted", "Do not roll back"} {
 				if !strings.Contains(out, want) {

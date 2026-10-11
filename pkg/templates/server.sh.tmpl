@@ -48,6 +48,15 @@ TN_K3S_CA_NO_MAIN=1
 {{template "tn-k3s-ca.sh" .}}
 # The k3s release policy (a re-run keeps the installed k3s) and the cgroup v1 kubelet flag.
 {{template "tn-k3s-install.sh" .}}
+
+{{template "k3s_version.sh.tmpl" .}}
+# Order: (1) the k3s release policy and the cgroup v1 kubelet flag, (2) the CA, (3) the k3s installer.
+# (1) comes first: it refuses before anything on the device is changed, and the kubelet flag is in
+# place when the CA step restarts k3s (a k3s that a cgroup v1 host made exit restarts itself in a loop,
+# and has to be up for rotate-ca). The data dir is looked up first, the way the CA step does it,
+# because a k3s datastore there decides whether a k3s whose version cannot be read is installed.
+tn_ca_resolve_datadir
+tn_inst_prepare server
 tn_k3s_ca_setup
 
 info "Install Rancher K3s"
@@ -89,12 +98,14 @@ if [ "${USE_DOCKER}" = true ]; then
     export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
 fi
 
-{{template "k3s_version.sh.tmpl" .}}
-# A re-run keeps the installed k3s (unless TN_K3S_UPGRADE=true) and sets fail-cgroupv1=false on
-# cgroup v1 hosts, which Kubernetes >= 1.35 would refuse (library: pkg/templates/scripts/tn-k3s-install.sh).
-tn_inst_prepare server
+# The release (INSTALL_K3S_VERSION) and the kubelet flag were decided by tn_inst_prepare above.
 export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
+
+# Tell the agents which k3s release this server runs: they install exactly that one (a kubelet must not be
+# newer than its apiserver), and k3s does not answer /version to an anonymous caller. Served by k3s at
+# https://<server>:6443/static/teknoir/k3s-version.
+tn_inst_publish_release
 
 info "Install Teknoir Manifests"
 $SUDO mkdir -p ${DATA_DIR}/server/manifests

@@ -15,10 +15,11 @@ import (
 const installLibPath = "scripts/tn-k3s-install.sh"
 
 type inst struct {
-	t      *testing.T
-	dir    string
-	k3sCfg string // TN_K3S_CONFIG_DIR
-	bin    string // K3S_BIN (a fake k3s)
+	t       *testing.T
+	dir     string
+	k3sCfg  string // TN_K3S_CONFIG_DIR
+	bin     string // K3S_BIN (a fake k3s)
+	curlLog string // the calls of the fake curl
 }
 
 func newInst(t *testing.T) *inst {
@@ -32,9 +33,39 @@ func newInst(t *testing.T) *inst {
 	if err := os.Chmod(filepath.Join(fake, "info"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// the server of an agent: `curl` answers like the supervisor of k3s. /static/teknoir/k3s-version is
+	// the release that the Teknoir server script published (TN_TEST_PUBLISHED, anything is served
+	// as it is); /version is the anonymous answer of a server that allows one (TN_TEST_SERVER_VERSION or
+	// TN_TEST_SERVER_BODY). Everything else is a 404 (curl -f: exit 22). TN_TEST_SERVER_DOWN: nothing
+	// answers (exit 7); TN_TEST_FAIL_N: the first N calls fail like that. Every call is logged.
+	i.curlLog = filepath.Join(i.dir, "curl.log")
+	write(t, filepath.Join(fake, "curl"), `#!/bin/sh
+echo "$*" >> '`+i.curlLog+`'
+for a in "$@"; do url=$a; done
+if [ -n "$TN_TEST_SERVER_DOWN" ]; then exit 7; fi
+n=$(wc -l < '`+i.curlLog+`'); if [ "$n" -le "${TN_TEST_FAIL_N:-0}" ]; then exit 7; fi
+case "$url" in
+  */static/teknoir/k3s-version)
+    if [ -n "$TN_TEST_PUBLISHED" ]; then printf '%s\n' "$TN_TEST_PUBLISHED"; exit 0; fi
+    exit 22 ;;
+  */version)
+    if [ -n "$TN_TEST_SERVER_BODY" ]; then printf '%s' "$TN_TEST_SERVER_BODY"; exit 0; fi
+    if [ -n "$TN_TEST_SERVER_VERSION" ]; then
+      printf '{\n  "major": "1",\n  "minor": "34",\n  "gitVersion": "%s",\n  "gitCommit": "0123abcd",\n  "goVersion": "go1.24.1"\n}' "$TN_TEST_SERVER_VERSION"; exit 0
+    fi
+    exit 22 ;;
+esac
+exit 22
+`)
+	if err := os.Chmod(filepath.Join(fake, "curl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", fake+":"+os.Getenv("PATH"))
 	return i
 }
+
+// curlCalls is what the library asked the (fake) server for
+func (i *inst) curlCalls() string { return readLog(i.curlLog) }
 
 // installed makes `k3s --version` answer like the real one; "" = no k3s.
 func (i *inst) installed(version string) {
@@ -58,12 +89,12 @@ func (i *inst) run(script string, env ...string) (string, error) {
 	full := "set -e; set -o noglob; umask 027; . " + installLibPath + "; " + script
 	cmd := exec.Command("sh", "-c", full)
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "INSTALL_K3S_") || strings.HasPrefix(e, "TN_K3S_") || strings.HasPrefix(e, "TN_CGROUP") || strings.HasPrefix(e, "OS_BUILD") || strings.HasPrefix(e, "K3S_BIN") {
+		if strings.HasPrefix(e, "INSTALL_K3S_") || strings.HasPrefix(e, "TN_K3S_") || strings.HasPrefix(e, "TN_CGROUP") || strings.HasPrefix(e, "OS_BUILD") || strings.HasPrefix(e, "K3S_BIN") || strings.HasPrefix(e, "K3S_URL") || strings.HasPrefix(e, "DATA_DIR") || strings.HasPrefix(e, "TN_TEST_") {
 			continue
 		}
 		cmd.Env = append(cmd.Env, e)
 	}
-	cmd.Env = append(cmd.Env, "TN_K3S_CONFIG_DIR="+i.k3sCfg, "K3S_BIN="+i.bin)
+	cmd.Env = append(cmd.Env, "TN_K3S_CONFIG_DIR="+i.k3sCfg, "K3S_BIN="+i.bin, "DATA_DIR="+filepath.Join(i.dir, "data"), "TN_K3S_SERVER_VERSION_WAIT=0")
 	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
 	if bytes.Contains(out, []byte("GNU-INFO-WAS-CALLED")) {
@@ -285,12 +316,17 @@ func TestCgroupV1WritesTheKubeletFlag(t *testing.T) {
 			msgs: []string{"cgroup v1 is deprecated", "Set the kubelet argument fail-cgroupv1=false"}},
 		{name: "the hybrid layout is v1", version: "v1.36.5+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: true},
 		{name: "exactly v1.35.0", version: "v1.35.0+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: true},
-		{name: "cgroup v1 and k3s v1.34.11 needs nothing", version: "v1.34.11+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: false,
-			msgs: []string{"cgroup v1 is deprecated", "older than v1.35"}},
+		{name: "cgroup v1 and k3s v1.34.11: set for a later upgrade", version: "v1.34.11+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: true,
+			msgs: []string{"cgroup v1 is deprecated", "starts on cgroup v1 without help", "an upgrade to v1.35 or newer"}},
+		{name: "exactly v1.31.0", version: "v1.31.0+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: true},
+		{name: "cgroup v1 and k3s v1.30.14: the kubelet has no such flag", version: "v1.30.14+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: false,
+			msgs: []string{"cgroup v1 is deprecated", "older than v1.31"}},
 		{name: "cgroup v2 needs nothing", version: "v1.36.5+k3s1", env: []string{"TN_CGROUP_FSTYPE=cgroup2fs"}, file: false, notMsgs: []string{"deprecated"}},
 		{name: "cgroup v1 and a channel: k3s is new", version: "", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: true},
-		{name: "an installed k3s that is kept decides", installed: "v1.34.11+k3s1", version: "v1.36.5+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: false,
-			msgs: []string{"older than v1.35"}},
+		{name: "an installed k3s that is kept decides", installed: "v1.34.11+k3s1", version: "v1.36.5+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: true,
+			msgs: []string{"without help"}},
+		{name: "an old installed k3s that is kept gets no flag", installed: "v1.30.14+k3s1", version: "v1.36.5+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs"}, file: false,
+			msgs: []string{"older than v1.31"}},
 		{name: "upgrading to v1.36 needs it", installed: "v1.35.9+k3s1", version: "v1.36.5+k3s1", env: []string{"TN_CGROUP_FSTYPE=tmpfs", "TN_K3S_UPGRADE=true"}, file: true},
 		{name: "an OS build cannot tell: set it", version: "v1.36.5+k3s1", env: []string{"OS_BUILD=true", "TN_CGROUP_FSTYPE=cgroup2fs"}, file: true,
 			msgs: []string{"cannot tell whether the device uses cgroup v1"}},
@@ -419,7 +455,7 @@ func TestCgroupV1RespectsTheDevicesOwnSetting(t *testing.T) {
 func TestAgentRoleUsesTheSameCgroupLogic(t *testing.T) {
 	i := newInst(t)
 	i.installed("")
-	if out, err := i.run("tn_inst_prepare agent", "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1"); err != nil || !strings.Contains(out, "(agent)") {
+	if out, err := i.run("tn_inst_prepare agent", "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1", "TN_K3S_PIN_SOURCE=env", "K3S_URL=https://srv:6443", "TN_TEST_SERVER_VERSION=v1.36.5+k3s1"); err != nil || !strings.Contains(out, "(agent)") {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	if _, err := os.Stat(i.dropin()); err != nil {

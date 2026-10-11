@@ -157,8 +157,37 @@ including resolved URLs and the exact `ssh` invocation used.
     restores "whatever the installer's stable channel is today", and `INSTALL_K3S_VERSION=... sh
     bootstrap_*.sh` overrides it when the script runs) on a device **without** k3s. A device that
     already runs k3s **keeps its version** when the script is run again; upgrading takes
-    `tnctl bootstrap --k3s-upgrade` (or `TN_K3S_UPGRADE=true`). An agent must run the version of its
-    server. See [`tnctl bootstrap`](commands/bootstrap.md#the-k3s-version).
+    `tnctl bootstrap --k3s-upgrade` (or `TN_K3S_UPGRADE=true`). A new **agent** installs the version of
+    its **server** (read from `https://<server>:6443/version`), never a newer one. See
+    [`tnctl bootstrap`](commands/bootstrap.md#the-k3s-version).
+
+??? failure "The agent script stops with `cannot read the k3s release of the server`"
+    The agent asks its server for its k3s release before it installs anything, because a kubelet must
+    not be newer than the apiserver. k3s does not answer `/version` anonymously (401), so the server
+    script publishes the release it runs at `https://<server>:6443/static/teknoir/k3s-version`. The
+    message tells which of two things is wrong. **The server is down, `K3S_URL` is wrong or the device
+    cannot reach it**: fix that and run the script again. **The server answered but publishes nothing**
+    (`curl -k https://<server>:6443/static/teknoir/k3s-version` gives 404): it was bootstrapped by an
+    older script; run its bootstrap script again (it keeps k3s as it is and publishes the release). Or
+    say which release the server runs: `INSTALL_K3S_VERSION=v1.xx.y+k3sN` (`tnctl bootstrap
+    --k3s-version`), or `TN_K3S_FORCE=true` to install the script's default anyway.
+
+??? failure "The agent script stops with `refusing to install k3s ... on this agent`"
+    You asked for a release that is newer than the server's. Drop `--k3s-version` /
+    `INSTALL_K3S_VERSION` (the agent then gets the server's release), upgrade the server first, or set
+    `TN_K3S_FORCE=true`.
+
+??? failure "The script stops with `its k3s version cannot be read`"
+    A k3s binary or `server/db` exists, but `k3s --version` gives no release (a broken or half-copied
+    binary, a data dir without the binary). The script does not install over it blind. Look at
+    `k3s --version`, repair or remove k3s on purpose, or set `TN_K3S_FORCE=true`.
+
+??? failure "The server script stops with `... sets data-dir: ...`"
+    k3s runs from one data dir (`ExecStart --data-dir`, `K3S_DATA_DIR` or `DATA_DIR`), but `config.yaml`
+    or `config.yaml.d` names another. The k3s installer would write a unit without `--data-dir`, and k3s
+    would then start from the config directory. Make them agree (usually: set `data-dir:` in
+    `/etc/rancher/k3s/config.yaml` to where the cluster is) and run the script again. Nothing was
+    changed.
 
 ??? failure "The script says `k3s ... is kept; the requested ... is NOT installed`"
     Intended: the device already has k3s and a re-run does not upgrade it. To upgrade, run the
@@ -166,7 +195,8 @@ including resolved URLs and the exact `ssh` invocation used.
     version at a time and servers before agents.
 
 ??? failure "The script stops with `refusing to downgrade k3s` or `more than one minor version`"
-    Both stop before anything is changed. **Downgrade**: the pin is older than the installed
+    Both stop before the k3s installer runs, and before the CA step, so nothing is changed (should
+    the message ever list changes made earlier in the run, those are exactly the ones that happened). **Downgrade**: the pin is older than the installed
     release, and k3s cannot go back (its datastore has been migrated); pin the installed release or a
     newer one. **More than one minor version** (for example `v1.34.11` to `v1.36.5`): upgrade to
     `v1.35.x` first and run the script again, or set `TN_K3S_FORCE=true` (`tnctl bootstrap --k3s-upgrade
@@ -175,7 +205,7 @@ including resolved URLs and the exact `ssh` invocation used.
 
 ??? failure "k3s does not start on a Jetson / Ubuntu 18.04 / 20.04: `kubelet is configured to not run on a host using cgroup v1`"
     Kubernetes 1.35 and later (k3s v1.35+) refuse cgroup v1 by default. Scripts from a `tnctl` with
-    this fix set the kubelet argument `fail-cgroupv1=false` for you in
+    this fix set the kubelet argument `fail-cgroupv1=false` (for k3s v1.31 and later) for you in
     `/etc/rancher/k3s/config.yaml.d/99-teknoir-cgroupv1.yaml` (check with `stat -fc %T /sys/fs/cgroup`:
     `tmpfs` means cgroup v1 or hybrid, `cgroup2fs` means v2). To fix a device by hand, create that file
     with the content shown in [`tnctl bootstrap`](commands/bootstrap.md#cgroup-v1-devices) and
@@ -189,10 +219,11 @@ including resolved URLs and the exact `ssh` invocation used.
     Find the real directory (`systemctl cat k3s`, `ps aux | grep k3s`) and run the script again with
     `DATA_DIR=/that/dir`.
 
-??? failure "Remediation ends with `the restart of k3s did not finish within 120s`"
+??? failure "Remediation ends with `the restart of k3s did not finish within 600s`"
     The CA **was** changed (the message says so and what to look at), but `systemctl restart k3s`
-    did not return: the k3s unit waits for ever for a k3s that cannot start. The wait is capped
-    (`TN_K3S_SERVICE_TIMEOUT`, seconds, default 120). Look at `journalctl -u k3s -n 50`, fix the cause, and
+    did not return, and the unit was not active a further 120 s later either: the k3s unit waits for
+    ever for a k3s that cannot start. The wait is capped (`TN_K3S_SERVICE_TIMEOUT`, seconds, default
+    600; then `TN_K3S_READY_GRACE`, default 120, for the unit to become active). Look at `journalctl -u k3s -n 50`, fix the cause, and
     restart k3s yourself. Do not restore the backup tar.
 
 ??? failure "Bootstrap fails with `string too long maxsize=64`"

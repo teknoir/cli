@@ -112,19 +112,20 @@ var bootstrapCmd = &cobra.Command{
 		}
 
 		data := templates.TemplateData{
-			Domain:       domain,
-			Namespace:    namespace,
-			DeviceID:     deviceName,
-			RSAPrivate:   rsaPrivate,
-			RSAPublic:    rsaPublic,
-			Username:     username,
-			Password:     password,
-			PublicSSHKey: publicSSHKey,
-			K3SToken:     k3sToken,
-			DockerSecret: dockerSecret,
-			K3SVersion:   k3sVersion,
-			K3SUpgrade:   k3sUpgrade,
-			K3SForce:     force,
+			Domain:             domain,
+			Namespace:          namespace,
+			DeviceID:           deviceName,
+			RSAPrivate:         rsaPrivate,
+			RSAPublic:          rsaPublic,
+			Username:           username,
+			Password:           password,
+			PublicSSHKey:       publicSSHKey,
+			K3SToken:           k3sToken,
+			DockerSecret:       dockerSecret,
+			K3SVersion:         k3sVersion,
+			K3SVersionExplicit: cmd.Flags().Changed("k3s-version"),
+			K3SUpgrade:         k3sUpgrade,
+			K3SForce:           force,
 		}
 
 		generate := func(tmpl *template.Template, filename string) error {
