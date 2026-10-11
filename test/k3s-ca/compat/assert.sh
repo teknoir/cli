@@ -19,6 +19,8 @@ command -v openssl >/dev/null 2>&1 || { echo "RESULT * FAIL openssl missing in i
 echo "# $(uname -m) $(openssl version) sh=$(readlink -f /bin/sh 2>/dev/null || echo sh)"
 
 sum() { sha256sum "$1" | cut -d' ' -f1; }
+# serial of a certificate, as openssl prints it on any version ("serial=..."), lower case
+serial() { openssl x509 -in "$1" -noout -serial | sed 's/^serial=//' | tr 'A-F' 'a-f' | sed 's/^0*//'; }
 
 one() { # GEN
   g=$1
@@ -27,6 +29,7 @@ one() { # GEN
   mkdir -p "$w/etc" "$w/data"
   cp "$src/rsa_public.pem" "$src/rsa_private.pem" "$w/etc/"
   pub0=$(sum "$w/etc/rsa_public.pem"); prv0=$(sum "$w/etc/rsa_private.pem")
+  ser0=$(serial "$w/etc/rsa_public.pem")
   # 1+2: run the setup twice (the second run must be idempotent in its guarantees)
   for run in 1 2; do
     (
@@ -57,6 +60,11 @@ one() { # GEN
     pk1=$(openssl x509 -in "$t/root-ca.pem" -noout -pubkey | sha256sum | cut -d' ' -f1)
     pk2=$(openssl pkey -in "$w/etc/rsa_private.pem" -pubout 2>/dev/null | sha256sum | cut -d' ' -f1)
     [ "$pk1" = "$pk2" ] || { echo "RESULT $g FAIL run $run: root public key != device key"; rm -rf "$w"; return; }
+    # a new serial: issuer + serial of two different certificates must be unique (OpenSSL 1.1.1
+    # silently ignores -set_serial in `x509 -signkey`, which the library works around)
+    ser1=$(serial "$t/root-ca.pem")
+    { [ -n "$ser1" ] && [ "$ser1" != "$ser0" ]; } ||
+      { echo "RESULT $g FAIL run $run: re-issued root has the serial $ser1 of the original certificate"; rm -rf "$w"; return; }
     # the device files must never change
     [ "$(sum "$w/etc/rsa_public.pem")" = "$pub0" ] && [ "$(sum "$w/etc/rsa_private.pem")" = "$prv0" ] ||
       { echo "RESULT $g FAIL run $run: rsa_public.pem/rsa_private.pem were modified"; rm -rf "$w"; return; }
@@ -74,6 +82,7 @@ remed() { # GEN
   w=$(mktemp -d)
   mkdir -p "$w/etc" "$w/data/server/tls"
   cp "$GENDIR/$g/rsa_public.pem" "$GENDIR/$g/rsa_private.pem" "$w/etc/"
+  ser0=$(serial "$w/etc/rsa_public.pem")
   printf '#!/bin/sh\necho "$*" >> "%s/k3s.calls"\n' "$w" > "$w/fake-k3s"
   chmod 755 "$w/fake-k3s"
   if ! out=$( (
@@ -97,6 +106,9 @@ remed() { # GEN
   if ! out=$("$BIN/k3sverify" -orig "$w/etc/rsa_public.pem" -key "$w/etc/rsa_private.pem" -days 7300 "$w/data/server/tls" 2>&1); then
     echo "RESULT $g-remediate FAIL k3sverify after remediation: $(echo "$out" | grep '^FAIL' | head -3 | tr '\n' ' ' | cut -c1-300)"; rm -rf "$w"; return
   fi
+  ser1=$(serial "$w/data/server/tls/root-ca.pem")
+  { [ -n "$ser1" ] && [ "$ser1" != "$ser0" ]; } ||
+    { echo "RESULT $g-remediate FAIL remediated root has the serial $ser1 of the original certificate"; rm -rf "$w"; return; }
   if ls -a "$w/data/server" | grep -q '^\.tn-ca-rotate'; then echo "RESULT $g-remediate FAIL staging dir left behind"; rm -rf "$w"; return; fi
   echo "RESULT $g-remediate PASS check 2 -> remediate -> check 0"
   rm -rf "$w"

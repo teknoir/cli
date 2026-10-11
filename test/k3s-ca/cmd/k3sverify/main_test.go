@@ -231,6 +231,14 @@ func TestCheckRoot(t *testing.T) {
 	if p := CheckRoot(rootEKU, orig.cert, key, now, 7300); !strings.Contains(strings.Join(p, "\n"), "extendedKeyUsage") {
 		t.Fatalf("EKU not reported: %v", p)
 	}
+	// serial of the original reused (what OpenSSL 1.1.1 `x509 -signkey -set_serial` produces)
+	same := *good
+	same.SerialNumber = orig.cert.SerialNumber
+	der, _ = x509.CreateCertificate(rand.Reader, &same, &same, &key.PublicKey, key)
+	rootSame, _ := x509.ParseCertificate(der)
+	if p := CheckRoot(rootSame, orig.cert, key, now, 7300); !strings.Contains(strings.Join(p, "\n"), "serial number equals") {
+		t.Fatalf("reused serial not reported: %v", p)
+	}
 	// subject differs
 	sub := *good
 	sub.Subject = pkix.Name{CommonName: "other"}

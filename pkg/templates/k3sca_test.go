@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -622,5 +623,224 @@ func TestProgramMode(t *testing.T) {
 	cmd = exec.Command("sh", "-c", ". "+libPath+"; echo sourced")
 	if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "sourced" {
 		t.Errorf("sourcing printed: %v %q", err, out)
+	}
+}
+
+// ---------------------------------------------------------------- re-review fixes
+
+// failingOpenssl puts a wrapper first in PATH that runs the real openssl, except that the
+// failN-th call of subcommand sub (counting from 1; the library's own capability probe
+// `ecparam ... -out /dev/null` is not counted) exits 1 without doing anything.
+func failingOpenssl(t *testing.T, sub string, failN int) {
+	t.Helper()
+	real, err := exec.LookPath("openssl")
+	if err != nil {
+		t.Skip("openssl not installed")
+	}
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$*" in *" -out /dev/null"*) exec ` + real + ` "$@" ;; esac
+if [ "$1" = "` + sub + `" ]; then
+  n=$(cat "` + dir + `/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "` + dir + `/n"
+  if [ "$n" -ge ` + strconv.Itoa(failN) + ` ]; then echo "wrapper: failing openssl $1 (call $n)" >&2; exit 1; fi
+fi
+exec ` + real + ` "$@"
+`
+	if err := os.WriteFile(filepath.Join(dir, "openssl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+}
+
+// A failing openssl step must fail the setup (the first bug: the status of the PKI subshell came
+// from its last command, `rm -rf .ca`, because errexit is ignored in an `if`/`||` context), and
+// must not leave a half PKI behind or change an existing one.
+func TestSetupFailsWhenAnOpensslStepFails(t *testing.T) {
+	for _, tc := range []struct {
+		sub string
+		n   int
+	}{{"genrsa", 1}, {"genrsa", 2}, {"req", 1}, {"req", 3}, {"ca", 1}, {"ca", 2}, {"ca", 6}, {"ecparam", 1}, {"ecparam", 5}} {
+		t.Run(tc.sub+"-"+strconv.Itoa(tc.n), func(t *testing.T) {
+			p := newPKI(t)
+			p.legacyCert()
+			failingOpenssl(t, tc.sub, tc.n)
+			out, err := p.sh("tn_k3s_ca_setup")
+			if err == nil {
+				t.Fatalf("setup succeeded although openssl %s failed:\n%s", tc.sub, out)
+			}
+			if !strings.Contains(out, "Cannot generate the k3s CA") && !strings.Contains(out, "PKI generation failed") {
+				t.Errorf("no error message:\n%s", out)
+			}
+			if _, err := os.Stat(p.tls("server-ca.crt")); err == nil {
+				t.Error("a (partial) server/tls was installed")
+			}
+			if m, _ := filepath.Glob(filepath.Join(p.data, "server", ".tn-tls-new.*")); len(m) != 0 {
+				t.Errorf("work dir left behind: %v", m)
+			}
+		})
+	}
+}
+
+// the same failure while replacing the PKI of a hung fresh bootstrap: the old tls dir stays
+func TestRemediateKeepsTheOldPKIWhenGenerationFails(t *testing.T) {
+	p := newPKI(t)
+	p.legacyCert()
+	p.legacyPKI(false)
+	before := sum(t, p.tls("server-ca.crt"))
+	failingOpenssl(t, "ca", 2)
+	if out, err := p.sh("tn_ca_remediate prepare"); err == nil {
+		t.Fatalf("prepare succeeded although openssl ca failed:\n%s", out)
+	}
+	if sum(t, p.tls("server-ca.crt")) != before {
+		t.Error("server/tls was replaced")
+	}
+	if m, _ := filepath.Glob(filepath.Join(p.data, "server", "tls-backup-tn-*.tar")); len(m) != 0 {
+		t.Errorf("backup made although nothing was replaced: %v", m)
+	}
+}
+
+// tn_ca_validate_pki is the second line of defence: it catches what the generator missed
+func TestValidatePKI(t *testing.T) {
+	p := newPKI(t)
+	p.legacyCert()
+	p.mustSh("tn_k3s_ca_setup")
+	p.mustSh("tn_ca_openssl; tn_ca_validate_pki " + filepath.Join(p.data, "server", "tls"))
+	for _, tc := range []struct{ name, cmd string }{
+		{"missing leaf", "rm etcd/peer-ca.pem"},
+		{"empty bundle", ": > server-ca.crt"},
+		{"root only bundle", "cat root-ca.pem > client-ca.crt"},
+		{"foreign key", "cp intermediate-ca.key server-ca.key"},
+		{"foreign leaf", "cp client-ca.pem server-ca.pem"},
+	} {
+		d := t.TempDir()
+		if out, err := exec.Command("cp", "-a", filepath.Join(p.data, "server", "tls")+"/.", d).CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+		if out, err := exec.Command("sh", "-c", "cd "+d+" && "+tc.cmd).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v %s", tc.name, err, out)
+		}
+		if out, err := p.sh("tn_ca_openssl; tn_ca_validate_pki " + d); err == nil {
+			t.Errorf("%s: validation passed:\n%s", tc.name, out)
+		}
+	}
+}
+
+// ---- foreign CAs on an initialised data dir
+
+// foreignPKI: initialised legacy PKI whose root key is gone and whose device key is another one
+func (p *pki) foreignPKI() {
+	p.t.Helper()
+	p.legacyPKI(true)
+	if err := os.Remove(p.tls("root-ca.key")); err != nil {
+		p.t.Fatal(err)
+	}
+	other := newPKI(p.t)
+	other.legacyCert()
+	p.cfg = other.cfg
+}
+
+// A root that k3s refuses and that we cannot repair must stop the bootstrap: the installer
+// that runs next would upgrade k3s and brick the device.
+func TestSetupStopsOnAnUnusableForeignRoot(t *testing.T) {
+	p := newPKI(t)
+	p.legacyCert() // no keyCertSign
+	p.foreignPKI()
+	before := sum(t, p.tls("server-ca.crt"))
+	if rc, o := p.check(); rc != 4 {
+		t.Fatalf("check rc=%d %s", rc, o)
+	}
+	out, err := p.sh("tn_k3s_ca_setup")
+	if err == nil {
+		t.Fatalf("setup returned 0 on a foreign unusable root:\n%s", out)
+	}
+	for _, want := range []string{"not the Teknoir device CA", "must not be upgraded"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("message lacks %q:\n%s", want, out)
+		}
+	}
+	if sum(t, p.tls("server-ca.crt")) != before {
+		t.Error("the foreign CA was changed")
+	}
+	// the whole rendered server script stops before the installer
+	var buf bytes.Buffer
+	if err := ServerTemplate.Execute(&buf, TemplateData{Domain: "test.cloud", DeviceID: "dev-1", K3SToken: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "\ntn_k3s_ca_setup\n") {
+		t.Error("the template does not call tn_k3s_ca_setup as a plain command (set -e must stop on its exit)")
+	}
+}
+
+func TestSetupStopsOnAnExpiredForeignRoot(t *testing.T) {
+	p := newPKI(t)
+	p.legacyCertArgs("-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign", "-not_before", "20240301000000Z", "-not_after", "20250301000000Z")
+	p.foreignPKI()
+	if rc, o := p.check(); rc != 4 {
+		t.Fatalf("check rc=%d %s", rc, o)
+	}
+	out, err := p.sh("tn_k3s_ca_setup")
+	if err == nil || !strings.Contains(out, "must not be upgraded") {
+		t.Errorf("setup on an expired foreign root: %v\n%s", err, out)
+	}
+}
+
+// only "expires soon", with keyCertSign: k3s accepts it today, so the bootstrap goes on
+func TestSetupContinuesOnAForeignRootThatOnlyExpiresSoon(t *testing.T) {
+	p := newPKI(t)
+	p.legacyCertArgs("-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign", "-days", "30")
+	if c := readCerts(t, filepath.Join(p.cfg, "rsa_public.pem"))[0]; time.Until(c.NotAfter) > 40*24*time.Hour {
+		t.Fatalf("test certificate is valid until %v", c.NotAfter)
+	}
+	p.foreignPKI()
+	before := sum(t, p.tls("server-ca.crt"))
+	if rc, o := p.check(); rc != 4 || !strings.Contains(o, "expires within 90 days") {
+		t.Fatalf("check rc=%d %s", rc, o)
+	}
+	out := p.mustSh("tn_k3s_ca_setup")
+	if !strings.Contains(out, "expires within 90 days") {
+		t.Errorf("no warning about the expiry:\n%s", out)
+	}
+	if sum(t, p.tls("server-ca.crt")) != before {
+		t.Error("the foreign CA was changed")
+	}
+}
+
+// ---- serial of the re-issued root
+
+func serialOf(t *testing.T, path string) string {
+	t.Helper()
+	return readCerts(t, path)[0].SerialNumber.Text(16)
+}
+
+// The re-issued root must not share issuer and serial with the original certificate (RFC 5280
+// 4.1.2.2; NSS: SEC_ERROR_REUSED_ISSUER_AND_SERIAL). OpenSSL 1.1.1 ignores -set_serial in
+// `x509 -signkey`, which the library works around; the compat suite runs this on 1.1.1.
+func TestReissuedRootHasANewSerial(t *testing.T) {
+	needTool(t, "sh")
+	needTool(t, "openssl")
+	for _, kind := range []string{"backstage", "device-controller"} {
+		t.Run(kind, func(t *testing.T) {
+			p := newPKI(t)
+			if kind == "backstage" {
+				p.legacyCert()
+			} else {
+				p.legacyCertArgs("-addext", "keyUsage=critical,digitalSignature,keyEncipherment", "-set_serial", "1")
+			}
+			orig := serialOf(t, filepath.Join(p.cfg, "rsa_public.pem"))
+			p.mustSh("tn_k3s_ca_setup")
+			if got := serialOf(t, p.tls("root-ca.pem")); got == orig || got == "1" {
+				t.Errorf("new root serial %s, original %s", got, orig)
+			}
+			// the remediation path re-issues too
+			q := newPKI(t)
+			q.legacyCert()
+			q.legacyPKI(true)
+			bin, _ := fakeK3s(t, t.TempDir(), true)
+			qorig := serialOf(t, filepath.Join(q.cfg, "rsa_public.pem"))
+			q.mustSh("tn_ca_remediate all", "K3S_BIN="+bin, "TN_K3S_RESTART_CMD=true")
+			if got := serialOf(t, q.tls("root-ca.pem")); got == qorig {
+				t.Errorf("remediated root keeps the original serial %s", got)
+			}
+		})
 	}
 }

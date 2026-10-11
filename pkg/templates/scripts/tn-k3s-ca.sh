@@ -44,7 +44,7 @@
 #   2  needs-rotation: initialised data dir, root unusable => `remediate`
 #   3  needs-regeneration: data dir never initialised, PKI unusable => `remediate`
 #      (or re-run the bootstrap script)
-#   4  foreign: the root is unusable but we do not hold its key (not a Teknoir CA)
+#   4  foreign: the root is unusable or expires soon but we do not hold its key (not a Teknoir CA)
 #   1  error
 
 TN_K3S_CA_LIB_VERSION=1
@@ -125,8 +125,9 @@ TN_CA_BUNDLES="server-ca.crt client-ca.crt request-header-ca.crt etcd/peer-ca.cr
 
 # tn_ca_reissue_root SRC_CERT KEY OUT_CERT
 # New self-signed root from the SAME key and subject as SRC_CERT (and the same subject key
-# identifier), with CA:TRUE and keyUsage keyCertSign, valid 7300 days. The extensions of
-# SRC_CERT are cleared first (no duplicates, no extendedKeyUsage).
+# identifier), with CA:TRUE and keyUsage keyCertSign, valid 7300 days and a random 128-bit
+# serial (never the serial of SRC_CERT). The extensions of SRC_CERT are not carried over (no
+# duplicates, no extendedKeyUsage).
 tn_ca_reissue_root() {
   _tn_rw=$(mktemp -d) || return 1
   _tn_rski=$(tn_ca_ski "$1")
@@ -139,12 +140,21 @@ basicConstraints = critical, CA:true
 keyUsage = critical, digitalSignature, keyEncipherment, keyCertSign, cRLSign
 EOF
   _tn_serial=$("$OPENSSL" rand -hex 16) || { rm -rf "$_tn_rw"; return 1; }
-  "$OPENSSL" x509 -in "$1" -signkey "$2" -clrext -extfile "$_tn_rw/root.cnf" -extensions v3_root \
-    -set_serial "0x$_tn_serial" -days 7300 -sha256 -out "$3" >/dev/null 2>&1
+  # Not `x509 -in SRC -signkey KEY -set_serial`: OpenSSL 1.1.1 (Jetson Ubuntu 18.04/20.04,
+  # Raspberry Pi bullseye) silently ignores -set_serial there and the new root would keep the
+  # serial of SRC, so two different certificates would share issuer and serial (RFC 5280
+  # 4.1.2.2; NSS rejects that). `x509 -req` honours it on every version. The request carries
+  # the subject and public key of SRC only; the extensions come from root.cnf.
+  { "$OPENSSL" x509 -x509toreq -in "$1" -signkey "$2" -out "$_tn_rw/root.csr" &&
+    "$OPENSSL" x509 -req -in "$_tn_rw/root.csr" -signkey "$2" -extfile "$_tn_rw/root.cnf" -extensions v3_root \
+      -set_serial "0x$_tn_serial" -days 7300 -sha256 -out "$3"; } >/dev/null 2>&1
   _tn_rc=$?
   rm -rf "$_tn_rw"
   if [ "$_tn_rc" -ne 0 ]; then tn_ca_warn "cannot re-issue the root certificate from $1"; return 1; fi
   tn_ca_has_certsign "$3" || { tn_ca_warn "re-issued root has no keyCertSign"; return 1; }
+  if [ "$("$OPENSSL" x509 -in "$1" -noout -serial 2>/dev/null)" = "$("$OPENSSL" x509 -in "$3" -noout -serial 2>/dev/null)" ]; then
+    tn_ca_warn "re-issued root has the serial of the original certificate (this openssl ignores -set_serial)"
+  fi
 }
 
 # ----------------------------------------------------------------- PKI generation
@@ -155,16 +165,19 @@ EOF
 # Runs in a subshell: the caller's directory and traps are not touched.
 tn_ca_generate_pki() {
   (
+    # `set -e` is only a convenience here: this function is always called in an `if`/`||`
+    # context, where every POSIX shell ignores errexit, even when it is set again in a
+    # subshell. So EVERY step ends in `|| exit 1`, and the caller validates the result.
     set -e
     tls=$1 root=$2 rkey=$3 suffix=$4
     product=${PRODUCT:-k3s}
-    cd "$tls"
-    mkdir -p etcd .ca/certs
-    cp "$root" root-ca.pem
-    cp "$rkey" root-ca.key
-    : > .ca/index
-    "$OPENSSL" rand -hex 8 > .ca/serial
-    cat > .ca/config <<'EOF'
+    cd "$tls" || exit 1
+    mkdir -p etcd .ca/certs || exit 1
+    cp "$root" root-ca.pem || exit 1
+    cp "$rkey" root-ca.key || exit 1
+    : > .ca/index || exit 1
+    "$OPENSSL" rand -hex 8 > .ca/serial || exit 1
+    cat > .ca/config <<'EOF' || exit 1
 [ca]
 default_ca = ca_default
 [ca_default]
@@ -191,34 +204,73 @@ EOF
     cn() { printf '%s' "$1" | cut -c1-64; }
     # quiet openssl, but show what it said when it fails
     quiet() { "$@" > .ca/log 2>&1 || { cat .ca/log >&2; return 1; }; }
+    # tn_issue CSR OUT SIGNER_KEY SIGNER_CERT. Requests go through files, not a pipe: no
+    # /dev/stdin (missing in some chroots), and a failing `req` is not hidden by the pipeline.
+    tn_issue() {
+      quiet "$OPENSSL" ca -batch -notext -days 3700 -in "$1" -out "$2" \
+        -keyfile "$3" -cert "$4" -config .ca/config -extensions v3_ca
+    }
 
     tn_ca_info "Generating Kubernetes service account issuer RSA key"
     # shellcheck disable=SC2086
-    quiet "$OPENSSL" genrsa $GENRSA_FLAGS -out service.key 2048
+    quiet "$OPENSSL" genrsa $GENRSA_FLAGS -out service.key 2048 || exit 1
 
-    cat root-ca.pem > root-ca.crt
+    cat root-ca.pem > root-ca.crt || exit 1
 
     tn_ca_info "Generating intermediate certificate authority RSA key and certificate"
     # shellcheck disable=SC2086
-    quiet "$OPENSSL" genrsa $GENRSA_FLAGS -out intermediate-ca.key 4096
-    "$OPENSSL" req -new -nodes -subj "/CN=$(cn "${product}-intermediate-ca@${suffix}")" \
-      -key intermediate-ca.key 2>/dev/null |
-    quiet "$OPENSSL" ca -batch -notext -days 3700 -in /dev/stdin -out intermediate-ca.pem \
-      -keyfile root-ca.key -cert root-ca.pem -config .ca/config -extensions v3_ca
-    cat intermediate-ca.pem root-ca.pem > intermediate-ca.crt
+    quiet "$OPENSSL" genrsa $GENRSA_FLAGS -out intermediate-ca.key 4096 || exit 1
+    quiet "$OPENSSL" req -new -nodes -subj "/CN=$(cn "${product}-intermediate-ca@${suffix}")" \
+      -key intermediate-ca.key -out .ca/req.csr || exit 1
+    tn_issue .ca/req.csr intermediate-ca.pem root-ca.key root-ca.pem || exit 1
+    cat intermediate-ca.pem root-ca.pem > intermediate-ca.crt || exit 1
 
     # a new leaf CA for every control-plane and etcd component
     for TYPE in client server request-header etcd/peer etcd/server; do
       name="${product}-$(echo "$TYPE" | tr / -)-ca"
       tn_ca_info "Generating ${name} leaf certificate authority EC key and certificate"
-      quiet "$OPENSSL" ecparam -name prime256v1 -genkey -noout -out "${TYPE}-ca.key"
-      "$OPENSSL" req -new -nodes -subj "/CN=$(cn "${name}@${suffix}")" -key "${TYPE}-ca.key" 2>/dev/null |
-      quiet "$OPENSSL" ca -batch -notext -days 3700 -in /dev/stdin -out "${TYPE}-ca.pem" \
-        -keyfile intermediate-ca.key -cert intermediate-ca.pem -config .ca/config -extensions v3_ca
-      cat "${TYPE}-ca.pem" intermediate-ca.pem root-ca.pem > "${TYPE}-ca.crt"
+      quiet "$OPENSSL" ecparam -name prime256v1 -genkey -noout -out "${TYPE}-ca.key" || exit 1
+      quiet "$OPENSSL" req -new -nodes -subj "/CN=$(cn "${name}@${suffix}")" -key "${TYPE}-ca.key" \
+        -out .ca/req.csr || exit 1
+      tn_issue .ca/req.csr "${TYPE}-ca.pem" intermediate-ca.key intermediate-ca.pem || exit 1
+      cat "${TYPE}-ca.pem" intermediate-ca.pem root-ca.pem > "${TYPE}-ca.crt" || exit 1
     done
-    rm -rf .ca
+    rm -rf .ca || exit 1
   )
+}
+
+# tn_ca_validate_pki TLS_DIR: 0 only if TLS_DIR holds a complete PKI: every file k3s reads is
+# there and not empty, the bundles have the expected number of certificates, every key matches
+# its certificate, and the intermediate and all leaf CAs chain to root-ca.pem. Warns about the
+# first problem. Run on a freshly generated directory BEFORE it replaces the live one.
+tn_ca_validate_pki() {
+  _tn_vd=$1
+  for _tn_f in root-ca.pem root-ca.key root-ca.crt service.key intermediate-ca.pem intermediate-ca.key intermediate-ca.crt \
+    client-ca.pem client-ca.key client-ca.crt server-ca.pem server-ca.key server-ca.crt \
+    request-header-ca.pem request-header-ca.key request-header-ca.crt \
+    etcd/peer-ca.pem etcd/peer-ca.key etcd/peer-ca.crt etcd/server-ca.pem etcd/server-ca.key etcd/server-ca.crt; do
+    [ -s "$_tn_vd/$_tn_f" ] || { tn_ca_warn "generated PKI is incomplete: $_tn_f is missing or empty"; return 1; }
+  done
+  _tn_vw=$(mktemp -d) || return 1
+  _tn_vok=1
+  for _tn_t in intermediate client server request-header etcd/peer etcd/server; do
+    _tn_c=$_tn_vd/${_tn_t}-ca.pem
+    "$OPENSSL" verify -CAfile "$_tn_vd/root-ca.pem" -untrusted "$_tn_vd/intermediate-ca.pem" "$_tn_c" >/dev/null 2>&1 ||
+      { tn_ca_warn "generated PKI: ${_tn_t}-ca.pem does not chain to root-ca.pem"; _tn_vok=0; break; }
+    [ "$(tn_ca_pubhash_cert "$_tn_c")" = "$(tn_ca_pubhash_key "$_tn_vd/${_tn_t}-ca.key")" ] ||
+      { tn_ca_warn "generated PKI: ${_tn_t}-ca.key does not belong to ${_tn_t}-ca.pem"; _tn_vok=0; break; }
+    case $_tn_t in intermediate) _tn_want=2 ;; *) _tn_want=3 ;; esac
+    rm -rf "$_tn_vw/b"
+    _tn_n=$(tn_ca_split "$_tn_vd/${_tn_t}-ca.crt" "$_tn_vw/b")
+    [ "${_tn_n:-0}" -eq "$_tn_want" ] ||
+      { tn_ca_warn "generated PKI: ${_tn_t}-ca.crt holds ${_tn_n:-0} certificates, expected $_tn_want"; _tn_vok=0; break; }
+  done
+  if [ "$_tn_vok" = 1 ]; then
+    [ "$(tn_ca_pubhash_cert "$_tn_vd/root-ca.pem")" = "$(tn_ca_pubhash_key "$_tn_vd/root-ca.key")" ] ||
+      { tn_ca_warn "generated PKI: root-ca.key does not belong to root-ca.pem"; _tn_vok=0; }
+  fi
+  rm -rf "$_tn_vw"
+  [ "$_tn_vok" = 1 ]
 }
 
 # ----------------------------------------------------------------- state of a data dir
@@ -244,8 +296,10 @@ tn_ca_find_key() {
 #   needs-rotation      initialised, root unusable, we hold the key
 #   needs-regeneration  never initialised, PKI unusable, we hold the key
 #   foreign             root unusable and we do not hold its key
+# Also sets TN_CA_ROOT_USABLE: 0 when k3s refuses the root as it is (a multi-certificate bundle
+# whose root has no keyCertSign, or an expired root), 1 otherwise (including "expires soon").
 tn_ca_state() {
-  TN_CA_STATE=; TN_CA_MSG=
+  TN_CA_STATE=; TN_CA_MSG=; TN_CA_ROOT_USABLE=1
   _tn_tls=$1/server/tls
   if [ ! -f "$_tn_tls/server-ca.crt" ]; then
     TN_CA_STATE=not-a-server; TN_CA_MSG="no $_tn_tls/server-ca.crt: nothing to check"; return 0
@@ -256,11 +310,15 @@ tn_ca_state() {
   fi
   _tn_ncert=$(tn_ca_split "$_tn_tls/server-ca.crt" "$_tn_sw/b")
   _tn_why=
-  if [ "$_tn_ncert" -gt 1 ]; then
-    tn_ca_has_certsign "$_tn_sw/root.pem" || _tn_why="the root certificate has no keyCertSign"
+  TN_CA_ROOT_USABLE=1   # 0: k3s refuses this root now (no keyCertSign in a bundle, or expired)
+  if [ "$_tn_ncert" -gt 1 ] && ! tn_ca_has_certsign "$_tn_sw/root.pem"; then
+    _tn_why="the root certificate has no keyCertSign"; TN_CA_ROOT_USABLE=0
   fi
-  if [ -z "$_tn_why" ] && ! "$OPENSSL" x509 -in "$_tn_sw/root.pem" -noout -checkend 7776000 >/dev/null 2>&1; then
-    _tn_why="the root certificate is expired or expires within 90 days"
+  if ! "$OPENSSL" x509 -in "$_tn_sw/root.pem" -noout -checkend 0 >/dev/null 2>&1; then
+    TN_CA_ROOT_USABLE=0
+    [ -n "$_tn_why" ] || _tn_why="the root certificate is expired"
+  elif [ -z "$_tn_why" ] && ! "$OPENSSL" x509 -in "$_tn_sw/root.pem" -noout -checkend 7776000 >/dev/null 2>&1; then
+    _tn_why="the root certificate expires within 90 days"
   fi
   if [ -z "$_tn_why" ]; then
     rm -rf "$_tn_sw"; TN_CA_STATE=ok; TN_CA_MSG="the root certificate is acceptable to k3s"; return 0
@@ -341,6 +399,10 @@ tn_ca_install_pki() {
     tn_ca_warn "PKI generation failed"
     rm -rf "$_tn_new" "$_tn_rt"; return 1
   fi
+  if ! tn_ca_validate_pki "$_tn_new"; then
+    tn_ca_warn "the generated PKI is not usable: $_tn_dd/server/tls was not changed"
+    rm -rf "$_tn_new" "$_tn_rt"; return 1
+  fi
   rm -rf "$_tn_rt"
   if [ -d "$_tn_dd/server/tls" ]; then
     tn_ca_backup_tls "$_tn_dd" || { rm -rf "$_tn_new"; return 1; }
@@ -358,6 +420,9 @@ tn_ca_install_pki() {
 #   never started   -> create the PKI below the re-issued root
 #   started, ok     -> leave everything alone (re-running a bootstrap script is safe)
 #   started, old    -> repair it first (TN_K3S_CA_AUTO_REMEDIATE=false: stop with advice)
+#   started, foreign (not the Teknoir device CA, we hold no key): left alone while k3s still
+#                      accepts its root; otherwise STOP (exit 1): the k3s installer that follows
+#                      would upgrade k3s and the device would no longer start
 tn_k3s_ca_setup() {
   tn_ca_info "Prepare K3s CA Certs"
   export PRODUCT="${PRODUCT:-k3s}"
@@ -371,8 +436,17 @@ tn_k3s_ca_setup() {
   if tn_ca_initialised "$DATA_DIR"; then
     tn_ca_state "$DATA_DIR" || true
     case $TN_CA_STATE in
-      ok|not-a-server|foreign)
+      ok|not-a-server)
         tn_ca_info "k3s has already started on this device: the existing CA is left alone ($TN_CA_STATE: $TN_CA_MSG)"
+        return 0 ;;
+      foreign)
+        # not the Teknoir device CA: we cannot repair it. A root k3s refuses must stop the
+        # bootstrap, or the installer below would upgrade k3s and brick the device.
+        if [ "$TN_CA_ROOT_USABLE" != 1 ]; then
+          tn_ca_fatal "$TN_CA_MSG. The k3s CA of this device cannot be repaired here, and a k3s upgrade would stop it from starting: k3s must not be upgraded. Nothing was changed. Restore the matching CA key, or contact Teknoir support"
+        fi
+        tn_ca_warn "$TN_CA_MSG"
+        tn_ca_info "k3s has already started on this device: the existing CA is left alone (its root still has keyCertSign; it only expires soon, so replace this CA before it does)"
         return 0 ;;
       needs-rotation)
         tn_ca_warn "$TN_CA_MSG"
