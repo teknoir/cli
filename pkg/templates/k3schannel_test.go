@@ -28,7 +28,7 @@ func TestChannelAsVersionBecomesInstallK3sChannel(t *testing.T) {
 		{"exact without revision stays exact", "", []string{"INSTALL_K3S_VERSION=v1.34.11"}, 0, "version=v1.34.11 channel=unset action=install effective=v1.34.11"},
 		{"a channel in INSTALL_K3S_CHANNEL is left alone", "", []string{"INSTALL_K3S_CHANNEL=stable"}, 0, "version=unset channel=stable action=install effective="},
 		{"installed k3s is kept by default", "v1.35.9+k3s1", []string{"INSTALL_K3S_VERSION=stable"}, 0, "version=v1.35.9+k3s1 channel=unset action=keep effective=v1.35.9+k3s1"},
-		{"upgrade with a channel is allowed, with a warning", "v1.35.9+k3s1", []string{"INSTALL_K3S_VERSION=stable", "TN_K3S_UPGRADE=true"}, 0, "version=unset channel=stable action=upgrade effective="},
+		{"upgrade with a channel is resolved and pinned", "v1.35.9+k3s1", []string{"INSTALL_K3S_VERSION=stable", "TN_K3S_UPGRADE=true", "TN_TEST_CHANNEL_RELEASE=v1.36.5%2Bk3s1"}, 0, "version=v1.36.5+k3s1 channel=unset action=upgrade effective=v1.36.5+k3s1"},
 		{"v1.34 channel, upgrade", "v1.33.2+k3s1", []string{"INSTALL_K3S_VERSION=v1.34", "TN_K3S_UPGRADE=true"}, 0, "version=unset channel=v1.34 action=upgrade effective="},
 		{"exact downgrade is still refused", "v1.36.5+k3s1", []string{"INSTALL_K3S_VERSION=v1.34.11+k3s1", "TN_K3S_UPGRADE=true"}, 1, ""},
 		{"exact multi-minor is still refused", "v1.33.2+k3s1", []string{"INSTALL_K3S_VERSION=v1.36.5+k3s1", "TN_K3S_UPGRADE=true"}, 1, ""},
@@ -77,7 +77,7 @@ func TestInstallerReceivesChannelOrVersionNeverBoth(t *testing.T) {
 	}{
 		{[]string{"INSTALL_K3S_VERSION=stable"}, "", "stable"},
 		{[]string{"INSTALL_K3S_VERSION=v1.34"}, "", "v1.34"},
-		{[]string{"INSTALL_K3S_VERSION=latest", "INSTALL_K3S_CHANNEL=stable"}, "", "latest"},
+		{[]string{"INSTALL_K3S_VERSION=latest", "INSTALL_K3S_CHANNEL=latest"}, "", "latest"},
 		{[]string{"INSTALL_K3S_VERSION=v1.36.5+k3s1"}, "v1.36.5+k3s1", ""},
 	} {
 		i := newInst(t)
@@ -104,6 +104,15 @@ func TestInstallerReceivesChannelOrVersionNeverBoth(t *testing.T) {
 		if want := "version=" + v + " channel=" + c; got != want {
 			t.Errorf("%v: installer got %q, want %q", tc.env, got, want)
 		}
+	}
+}
+
+func TestChannelInVersionMustNotOverwriteAnotherChannel(t *testing.T) {
+	i := newInst(t)
+	i.installed("")
+	out, err := i.run("tn_inst_prepare server", "TN_CGROUP_FSTYPE=cgroup2fs", "INSTALL_K3S_VERSION=latest", "INSTALL_K3S_CHANNEL=stable")
+	if err == nil || !strings.Contains(out, "conflicting k3s requests") {
+		t.Fatalf("want a refusal: %v\n%s", err, out)
 	}
 }
 
