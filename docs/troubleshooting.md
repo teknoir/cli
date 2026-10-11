@@ -158,7 +158,7 @@ including resolved URLs and the exact `ssh` invocation used.
     bootstrap_*.sh` overrides it when the script runs) on a device **without** k3s. A device that
     already runs k3s **keeps its version** when the script is run again; upgrading takes
     `tnctl bootstrap --k3s-upgrade` (or `TN_K3S_UPGRADE=true`). A new **agent** installs the version of
-    its **server** (read from `https://<server>:6443/version`), never a newer one. See
+    its **server** (read from `https://<server>:6443/static/teknoir/k3s-version`, which the server script publishes; `/version` is only tried second, k3s does not answer it anonymously), never a newer one. See
     [`tnctl bootstrap`](commands/bootstrap.md#the-k3s-version).
 
 ??? failure "The agent script stops with `cannot read the k3s release of the server`"
@@ -171,6 +171,15 @@ including resolved URLs and the exact `ssh` invocation used.
     older script; run its bootstrap script again (it keeps k3s as it is and publishes the release). Or
     say which release the server runs: `INSTALL_K3S_VERSION=v1.xx.y+k3sN` (`tnctl bootstrap
     --k3s-version`), or `TN_K3S_FORCE=true` to install the script's default anyway.
+
+    **This is a change for a fleet.** Servers bootstrapped by older scripts publish no release, so a
+    **new** agent (a node that has no k3s yet) stops until the server's script has been run again, or
+    until `INSTALL_K3S_VERSION` says what the server runs. Running the server's script again is the
+    right fix anyway: it publishes the release and, on a server that still has the old root CA
+    (the device certificate without `keyCertSign`), it also repairs it first (`k3s certificate
+    rotate-ca`, then a restart of k3s), which a k3s upgrade to v1.34.12 / v1.35.9 / v1.36.5 / v1.37.1 or
+    later would otherwise turn into a device that no longer starts. Agents that already run k3s are not
+    affected: a re-run keeps the installed k3s and does not ask the server.
 
 ??? failure "The agent script stops with `refusing to install k3s ... on this agent`"
     You asked for a release that is newer than the server's. Drop `--k3s-version` /

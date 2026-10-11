@@ -17,7 +17,7 @@
 #   TN_K3S_UPGRADE=true (default: false; a re-run KEEPS the installed k3s version. true lets the pin
 #                          below replace it: never a downgrade, never more than one minor version)
 #   TN_K3S_FORCE=true (default: false; allows an upgrade over more than one minor version)
-#   TN_K3S_CGROUPV1=true|false (default: detected; on cgroup v1 with k3s >= v1.35 the kubelet gets
+#   TN_K3S_CGROUPV1=true|false (default: detected; on cgroup v1 with k3s >= v1.31 the kubelet gets
 #                          fail-cgroupv1=false, see /etc/rancher/k3s/config.yaml.d/99-teknoir-cgroupv1.yaml)
 
 
@@ -50,12 +50,25 @@ TN_K3S_CA_NO_MAIN=1
 {{template "tn-k3s-install.sh" .}}
 
 {{template "k3s_version.sh.tmpl" .}}
-# Order: (1) the k3s release policy and the cgroup v1 kubelet flag, (2) the CA, (3) the k3s installer.
-# (1) comes first: it refuses before anything on the device is changed, and the kubelet flag is in
-# place when the CA step restarts k3s (a k3s that a cgroup v1 host made exit restarts itself in a loop,
-# and has to be up for rotate-ca). The data dir is looked up first, the way the CA step does it,
-# because a k3s datastore there decides whether a k3s whose version cannot be read is installed.
+# Order: (0) the arguments of the k3s installer, (1) the k3s release policy and the cgroup v1 kubelet
+# flag, (2) the CA, (3) the k3s installer.
+# (0) comes first because (1) reads INSTALL_K3S_EXEC: it must see what the installer will get, or a
+# fail-cgroupv1 that the caller put there would be taken as "set by the device" (the drop-in removed)
+# and then lost when the variable is rebuilt. A value the caller gave is kept, after ours.
+# (1) comes before the CA step: it refuses before anything on the device is changed, and the kubelet
+# flag is in place when the CA step restarts k3s (a k3s that a cgroup v1 host made exit restarts itself
+# in a loop, and has to be up for rotate-ca). The data dir is looked up first, the way the CA step does
+# it, because a k3s datastore there decides whether a k3s whose version cannot be read is installed; a
+# data dir that disagrees with config.yaml is refused here, before (1) changes anything.
+# BEGIN install-k3s-exec
+export INSTALL_K3S_EXEC="server --token ${_K3S_TOKEN} --tls-san ${_DEVICE_ID}.${_DOMAIN} --tls-san 10.0.0.10${INSTALL_K3S_EXEC:+ ${INSTALL_K3S_EXEC}}"
+if [ "${USE_DOCKER}" = true ]; then
+    info "Use docker container-runtime for K3s"
+    export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
+fi
+# END install-k3s-exec
 tn_ca_resolve_datadir
+tn_ca_require_consistent_datadir
 tn_inst_prepare server
 tn_k3s_ca_setup
 
@@ -90,12 +103,6 @@ if [ ${OS_BUILD} ]; then
     info "OS Build specifics"
     export INSTALL_K3S_SKIP_START=true
     $SUDO sed -i "s#-d /run/systemd#true#g" k3s_installer.sh
-fi
-
-export INSTALL_K3S_EXEC="server --token ${_K3S_TOKEN} --tls-san ${_DEVICE_ID}.${_DOMAIN} --tls-san 10.0.0.10 ${INSTALL_K3S_EXEC}"
-if [ "${USE_DOCKER}" = true ]; then
-    info "Use docker container-runtime for K3s"
-    export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
 fi
 
 # The release (INSTALL_K3S_VERSION) and the kubelet flag were decided by tn_inst_prepare above.

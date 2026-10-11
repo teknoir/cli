@@ -92,9 +92,10 @@ installer, the server and agent scripts read `k3s --version` and decide:
 Upgrade servers before their agents, and one minor version at a time. The environment of the
 script overrides what `tnctl bootstrap` baked in (`TN_K3S_UPGRADE=false sh bootstrap_*.sh`).
 
-**Order in the server script**: (1) this release decision and the cgroup flag below, (2) the CA
-repair, (3) the k3s installer. A refusal in (1) happens before anything is changed ("Nothing was
-changed"). The CA is still repaired before the installer, so an upgrade never meets a root that the
+**Order in the server script**: (0) the arguments of the installer (`INSTALL_K3S_EXEC`, including a
+value you gave: the cgroup step reads it), the data dir and its check against `config.yaml`, (1) this
+release decision and the cgroup flag below, (2) the CA repair, (3) the k3s installer. A refusal in (0)
+or (1) happens before anything is changed ("Nothing was changed"). The CA is still repaired before the installer, so an upgrade never meets a root that the
 new k3s would reject. Should a later step ever refuse after the CA step has changed the device (the CA
 rotated, files replaced, k3s restarted), the message lists exactly that, instead of "Nothing was
 changed".

@@ -558,18 +558,24 @@ func TestServerScriptOrder(t *testing.T) {
 	out := renderK3S(t, ServerTemplate, "")
 	idx := func(s string) int { return strings.Index(out, s) }
 	pin := idx("\nexport INSTALL_K3S_VERSION=")
+	execArgs := idx("\n# BEGIN install-k3s-exec\n")
 	resolve := idx("\ntn_ca_resolve_datadir\n")
+	guard := idx("\ntn_ca_require_consistent_datadir\n")
 	prep := idx("\ntn_inst_prepare server\n")
 	ca := idx("\ntn_k3s_ca_setup\n")
 	inst := idx("\n$SUDO ./k3s_installer.sh")
-	if !(pin > 0 && pin < resolve && resolve < prep && prep < ca && ca < inst) {
-		t.Errorf("order: pin %d, resolve datadir %d, tn_inst_prepare %d, tn_k3s_ca_setup %d, installer %d", pin, resolve, prep, ca, inst)
+	if !(pin > 0 && pin < execArgs && execArgs < resolve && resolve < guard && guard < prep && prep < ca && ca < inst) {
+		t.Errorf("order: pin %d, INSTALL_K3S_EXEC %d, resolve datadir %d, data dir guard %d, tn_inst_prepare %d, tn_k3s_ca_setup %d, installer %d", pin, execArgs, resolve, guard, prep, ca, inst)
+	}
+	// INSTALL_K3S_EXEC is final before tn_inst_prepare reads it, and is not rebuilt after it
+	if strings.Count(out, "export INSTALL_K3S_EXEC=\"server") != 1 || idx("export INSTALL_K3S_EXEC=\"server") > prep {
+		t.Error("INSTALL_K3S_EXEC must be built once, before tn_inst_prepare server")
 	}
 	if strings.Count(out, "\ntn_inst_prepare server\n") != 1 {
 		t.Error("tn_inst_prepare is called more than once")
 	}
 	// the library functions are defined before they are called
-	for _, fn := range []string{"tn_ca_resolve_datadir()", "tn_inst_prepare()", "tn_k3s_ca_setup()"} {
+	for _, fn := range []string{"tn_ca_resolve_datadir()", "tn_ca_require_consistent_datadir()", "tn_inst_prepare()", "tn_k3s_ca_setup()"} {
 		if idx(fn) < 0 || idx(fn) > resolve {
 			t.Errorf("%s is not defined before its first call", fn)
 		}

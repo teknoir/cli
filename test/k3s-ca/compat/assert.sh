@@ -127,6 +127,7 @@ install_lib_check() {
   [ -f "$IL" ] || return 0
   w=$(mktemp -d)
   printf '#!/bin/sh\necho "k3s version v1.34.11+k3s1 (0123abcd)"\necho "go version go1.24.1"\n' > "$w/k3s"; chmod +x "$w/k3s"
+  printf '#!/bin/sh\necho "k3s version v1.30.14+k3s1 (0123abcd)"\necho "go version go1.22.12"\n' > "$w/k3s130"; chmod +x "$w/k3s130"
   if ! out=$(
       cd "$w" &&
       env -u INSTALL_K3S_VERSION "K3S_BIN=$w/k3s" "TN_K3S_CONFIG_DIR=$w/cfg" TN_CGROUP_FSTYPE=tmpfs INSTALL_K3S_VERSION=v1.36.5+k3s1 sh -c '
@@ -137,10 +138,20 @@ install_lib_check() {
         tn_inst_cmp v1.9.0+k3s1 v1.10.0+k3s1; [ "$TN_INST_CMP" = -1 ] || { echo "cmp minor $TN_INST_CMP"; exit 1; }
         tn_inst_cmp v1.36.5+k3s2 v1.36.5+k3s1; [ "$TN_INST_CMP" = 1 ] || { echo "cmp revision $TN_INST_CMP"; exit 1; }
         if tn_inst_cmp stable v1.36.5+k3s1; then echo "stable parsed"; exit 1; fi
-        # installed v1.34.11, pin v1.36.5: kept; drop-in not needed on 1.34
+        # installed v1.34.11, pin v1.36.5: kept; the drop-in is written from v1.31 (a later upgrade to
+        # v1.35 would otherwise stop the kubelet), so it is there for 1.34
         tn_inst_prepare server
         [ "$INSTALL_K3S_VERSION" = v1.34.11+k3s1 ] || { echo "pin not kept: $INSTALL_K3S_VERSION"; exit 1; }
-        [ ! -e "$TN_K3S_CONFIG_DIR/config.yaml.d/99-teknoir-cgroupv1.yaml" ] || { echo "drop-in for k3s 1.34"; exit 1; }
+        [ -s "$TN_K3S_CONFIG_DIR/config.yaml.d/99-teknoir-cgroupv1.yaml" ] || { echo "no drop-in for k3s 1.34 (flag is set from v1.31)"; exit 1; }
+        # installed v1.30.14: its kubelet does not know the flag (an unknown argument would stop it): no
+        # drop-in, and the installed release is kept (in a subshell: tn_inst_prepare exports the release)
+        (
+          K3S_BIN="$3"; TN_K3S_CONFIG_DIR="$TN_K3S_CONFIG_DIR/v130"; INSTALL_K3S_VERSION=v1.36.5+k3s1
+          export K3S_BIN TN_K3S_CONFIG_DIR INSTALL_K3S_VERSION
+          tn_inst_prepare server
+          [ "$INSTALL_K3S_VERSION" = v1.30.14+k3s1 ] || { echo "pin not kept for 1.30: $INSTALL_K3S_VERSION"; exit 1; }
+          [ ! -e "$TN_K3S_CONFIG_DIR/config.yaml.d/99-teknoir-cgroupv1.yaml" ] || { echo "drop-in for k3s 1.30"; exit 1; }
+        ) || exit 1
         # upgrade over two minors is refused (in a subshell: tn_inst_fatal exits)
         if ( INSTALL_K3S_VERSION=v1.36.5+k3s1 TN_K3S_UPGRADE=true tn_inst_plan ) >/dev/null 2>&1; then echo "two-minor upgrade allowed"; exit 1; fi
         # one minor, cgroup v1: the drop-in appears, twice is the same
@@ -158,10 +169,10 @@ install_lib_check() {
 node-name: mine
 disable:
   - traefik" ] || { echo "config.yaml:"; cat "$TN_K3S_CONFIG_DIR/config.yaml"; exit 1; }
-      ' sh "$IL" "$w/k3s" 2>&1 ); then
+      ' sh "$IL" "$w/k3s" "$w/k3s130" 2>&1 ); then
     echo "RESULT install-lib FAIL $(echo "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)"; rm -rf "$w"; return
   fi
-  echo "RESULT install-lib PASS versions, keep/refuse, cgroup v1 drop-in, config.yaml"
+  echo "RESULT install-lib PASS versions, keep/refuse, cgroup v1 drop-in (from v1.31), config.yaml"
   rm -rf "$w"
 }
 install_lib_check

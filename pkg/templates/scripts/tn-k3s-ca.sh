@@ -297,6 +297,14 @@ tn_ca_datadir_consistent() {
   [ "$_tn_a" = "$_tn_b" ]
 }
 
+# tn_ca_require_consistent_datadir: tn_ca_datadir_consistent, or stop with advice. Needs DATA_DIR (call
+# tn_ca_resolve_datadir first). A server script calls it right after tn_ca_resolve_datadir, before the
+# k3s release step changes anything; tn_k3s_ca_setup calls it again (cheap, and the library stays safe on its own).
+tn_ca_require_consistent_datadir() {
+  tn_ca_datadir_consistent ||
+    tn_ca_fatal "k3s runs from ${DATA_DIR} (${TN_CA_DATADIR_SRC}), but ${TN_CA_CFG_DATADIR_SRC} sets data-dir: ${TN_CA_CFG_DATADIR}. The k3s installer that follows writes a new unit without --data-dir, after which k3s would start from ${TN_CA_CFG_DATADIR}: an empty directory, with its own new CA, and the cluster in ${DATA_DIR} left behind. Make them agree first: either set data-dir in ${TN_CA_CFG_DATADIR_SRC} to ${DATA_DIR} (if that is where the cluster is), or remove that line and run this script again. The CA and k3s were not changed"
+}
+
 # ----------------------------------------------------------------- the root certificate
 
 # tn_ca_reissue_root SRC_CERT KEY OUT_CERT
@@ -712,8 +720,7 @@ tn_k3s_ca_setup() {
   tn_ca_info "Using ${OPENSSL}: $("$OPENSSL" version)"
   tn_ca_resolve_datadir
   tn_ca_info "k3s data dir: ${DATA_DIR} (${TN_CA_DATADIR_SRC})"
-  tn_ca_datadir_consistent ||
-    tn_ca_fatal "k3s runs from ${DATA_DIR} (${TN_CA_DATADIR_SRC}), but ${TN_CA_CFG_DATADIR_SRC} sets data-dir: ${TN_CA_CFG_DATADIR}. The k3s installer that follows writes a new unit without --data-dir, after which k3s would start from ${TN_CA_CFG_DATADIR}: an empty directory, with its own new CA, and the cluster in ${DATA_DIR} left behind. Make them agree first: either set data-dir in ${TN_CA_CFG_DATADIR_SRC} to ${DATA_DIR} (if that is where the cluster is), or remove that line and run this script again. The CA and k3s were not changed"
+  tn_ca_require_consistent_datadir
   _tn_cfg=${CONFIG_PATH:-/etc/teknoir}
   [ -s "$_tn_cfg/rsa_public.pem" ] && [ -s "$_tn_cfg/rsa_private.pem" ] ||
     tn_ca_fatal "device certificate or key missing in $_tn_cfg"
