@@ -74,6 +74,22 @@
 #     upgrade): its kubelet would fail on the flag if it restarted before the installer replaced it.
 #     That write waits for tn_inst_finish, after the installer. An existing drop-in is removed at once in
 #     that case, because the old kubelet cannot take it.
+#   - but the installer starts the NEW release as soon as it has rewritten the unit, and a release >= v1.35
+#     refuses to start on cgroup v1 without the flag (install.sh's `systemctl restart` fails, and under
+#     `set -e` the script stops before tn_inst_finish: a k3s that crash-loops). So when the write is held
+#     back and the release the installer will start is not KNOWN to be older than v1.35 (a channel such as
+#     stable or latest, or an exact v1.35 or newer, also with TN_K3S_FORCE=true), the flag is appended to
+#     INSTALL_K3S_EXEC (--kubelet-arg=fail-cgroupv1=false, once, and exported): it is then in the NEW unit
+#     from its first start and the old, running kubelet never sees it. An exact v1.31 - v1.34 does not need
+#     it on its first start (it accepts it, it only ignores it on cgroup v1), so it gets none. tn_inst_finish
+#     still writes the drop-in afterwards, which is what keeps later runs and upgrades safe.
+#
+# What counts as "the device sets fail-cgroupv1 itself": an uncommented line that sets it to false in
+# config.yaml, config.yaml.d/*.yaml or *.yml (not our own file), or in INSTALL_K3S_EXEC. A comment does
+# not count, and neither does fail-cgroupv1=true: then the drop-in is written (and kept) as usual, and
+# it wins, because kubelet-arg+ comes after. A device that sets fail-cgroupv1=true on a cgroup v1 host
+# on purpose is not supported (the kubelet of v1.35 and newer cannot start there anyway); delete the
+# drop-in and set cgroup v2 instead.
 #
 # Environment (all optional):
 #   INSTALL_K3S_VERSION, INSTALL_K3S_CHANNEL   the pin of the script (read, and set to what the installer must get)
@@ -398,19 +414,27 @@ tn_inst_cgroup_state() {
   esac
 }
 
-# tn_inst_cgroup_configured_elsewhere: 0 if the device sets fail-cgroupv1 itself (not in our file).
+# tn_inst_cgroup_flag_in_text: reads TEXT on stdin; 0 if an uncommented part of it sets fail-cgroupv1 to
+# false (kubelet-arg: ["fail-cgroupv1=false"], - fail-cgroupv1=false, --kubelet-arg=fail-cgroupv1=false).
+# A whole-line or trailing YAML comment is dropped first; fail-cgroupv1=true does not match.
+tn_inst_cgroup_flag_in_text() {
+  sed 's/^[[:space:]]*#.*$//; s/[[:space:]]#.*$//' | grep -Eiq 'fail-cgroupv1[[:space:]]*=[[:space:]]*false([^A-Za-z0-9_]|$)'
+}
+
+# tn_inst_cgroup_configured_elsewhere: 0 if the device sets fail-cgroupv1=false itself (not in our file).
 # Sets TN_INST_CGROUP_WHERE to where, and TN_INST_CGROUP_PERSISTENT to 1 when that is a config file that
-# the running k3s reads (config.yaml, config.yaml.d/*.yaml), and to 0 when it is only INSTALL_K3S_EXEC
-# (which reaches the unit when the installer has run). Files win over INSTALL_K3S_EXEC.
+# the running k3s reads (config.yaml, config.yaml.d/*.yaml and *.yml), and to 0 when it is only INSTALL_K3S_EXEC
+# (which reaches the unit when the installer has run). Files win over INSTALL_K3S_EXEC. A comment, and
+# fail-cgroupv1=true, do not count.
 tn_inst_cgroup_configured_elsewhere() {
   _tn_cd=${TN_K3S_CONFIG_DIR:-/etc/rancher/k3s}
   TN_INST_CGROUP_WHERE=; TN_INST_CGROUP_PERSISTENT=0
-  for _tn_cf in "$_tn_cd/config.yaml" $(find "$_tn_cd/config.yaml.d" -maxdepth 1 -type f -name '*.yaml' 2>/dev/null | LC_ALL=C sort); do
+  for _tn_cf in "$_tn_cd/config.yaml" $(find "$_tn_cd/config.yaml.d" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null | LC_ALL=C sort); do
     [ -r "$_tn_cf" ] || continue
     [ "$_tn_cf" != "$_tn_cd/config.yaml.d/$TN_INST_CGROUP_FILE" ] || continue
-    if grep -q 'fail-cgroupv1' "$_tn_cf" 2>/dev/null; then TN_INST_CGROUP_WHERE=$_tn_cf; TN_INST_CGROUP_PERSISTENT=1; return 0; fi
+    if tn_inst_cgroup_flag_in_text < "$_tn_cf"; then TN_INST_CGROUP_WHERE=$_tn_cf; TN_INST_CGROUP_PERSISTENT=1; return 0; fi
   done
-  case ${INSTALL_K3S_EXEC:-} in *fail-cgroupv1*) TN_INST_CGROUP_WHERE=INSTALL_K3S_EXEC; return 0 ;; esac
+  if printf '%s\n' "${INSTALL_K3S_EXEC:-}" | tn_inst_cgroup_flag_in_text; then TN_INST_CGROUP_WHERE=INSTALL_K3S_EXEC; return 0; fi
   return 1
 }
 
@@ -421,9 +445,9 @@ tn_inst_cgroup_remove() { # FILE WHY
 }
 
 # tn_inst_cgroup: writes or removes the drop-in, see the top. Uses TN_INST_EFFECTIVE (the release
-# that will run; nothing = a channel, taken as new enough: stable and latest are >= v1.35). The flag
-# goes in from v1.31, where the kubelet learned it (an older kubelet would not start with an
-# unknown argument).
+# that will run; nothing = a channel, taken as new enough: stable and latest are >= v1.35; a channel
+# named vMAJ.MIN is read as that minor). The flag goes in from v1.31, where the kubelet learned it (an
+# older kubelet would not start with an unknown argument).
 tn_inst_cgroup() {
   _tn_cdir=${TN_K3S_CONFIG_DIR:-/etc/rancher/k3s}/config.yaml.d
   _tn_cfile=$_tn_cdir/$TN_INST_CGROUP_FILE
@@ -433,37 +457,54 @@ tn_inst_cgroup() {
     tn_inst_cgroup_remove "$_tn_cfile" "this host uses cgroup v2"
     return 0
   fi
+  _tn_eff=${TN_INST_EFFECTIVE:-}
+  if [ -z "$_tn_eff" ]; then
+    case ${INSTALL_K3S_CHANNEL:-} in v[0-9]*.[0-9]*) tn_inst_parse "${INSTALL_K3S_CHANNEL}.0" && _tn_eff=${INSTALL_K3S_CHANNEL}.0 ;; esac
+  fi
   _tn_flagok=1 _tn_must=1
-  if [ -n "${TN_INST_EFFECTIVE:-}" ] && tn_inst_cmp "$TN_INST_EFFECTIVE" v1.31.0 && [ "$TN_INST_CMP" = -1 ]; then _tn_flagok=0; fi
-  if [ -n "${TN_INST_EFFECTIVE:-}" ] && tn_inst_cmp "$TN_INST_EFFECTIVE" v1.35.0 && [ "$TN_INST_CMP" = -1 ]; then _tn_must=0; fi
+  if [ -n "$_tn_eff" ] && tn_inst_cmp "$_tn_eff" v1.31.0 && [ "$TN_INST_CMP" = -1 ]; then _tn_flagok=0; fi
+  if [ -n "$_tn_eff" ] && tn_inst_cmp "$_tn_eff" v1.35.0 && [ "$TN_INST_CMP" = -1 ]; then _tn_must=0; fi
   if [ "$_tn_cst" = v1 ]; then
     tn_inst_warn "this host uses cgroup v1 (or the hybrid layout). cgroup v1 is deprecated: Kubernetes >= 1.35 refuses to start the kubelet on it. Move the device to cgroup v2 (kernel command line systemd.unified_cgroup_hierarchy=1, or a newer OS release)"
   else
     tn_inst_info "cannot tell whether the device uses cgroup v1 (OS build, or no /sys/fs/cgroup): the kubelet flag is set to be safe, it is harmless on cgroup v2"
   fi
   if [ "$_tn_flagok" = 0 ]; then
-    tn_inst_info "k3s $TN_INST_EFFECTIVE is older than v1.31 (its kubelet has no fail-cgroupv1 flag) and starts on cgroup v1 without help"
+    tn_inst_info "k3s $_tn_eff is older than v1.31 (its kubelet has no fail-cgroupv1 flag) and starts on cgroup v1 without help"
     tn_inst_cgroup_remove "$_tn_cfile" "k3s is older than v1.31"
     return 0
   fi
   if [ "$_tn_must" = 0 ]; then
-    tn_inst_info "k3s $TN_INST_EFFECTIVE starts on cgroup v1 without help; the kubelet flag is set anyway, so that an upgrade to v1.35 or newer (also one made by hand) does not stop the kubelet"
+    tn_inst_info "k3s $_tn_eff starts on cgroup v1 without help; the kubelet flag is set anyway, so that an upgrade to v1.35 or newer (also one made by hand) does not stop the kubelet"
   fi
   if tn_inst_cgroup_configured_elsewhere; then
     if [ "$TN_INST_CGROUP_PERSISTENT" = 1 ]; then
-      tn_inst_info "fail-cgroupv1 is set by the device itself ($TN_INST_CGROUP_WHERE): left as it is"
-      tn_inst_cgroup_remove "$_tn_cfile" "the device sets fail-cgroupv1 itself, in a file that k3s reads"
+      tn_inst_info "fail-cgroupv1=false is set by the device itself ($TN_INST_CGROUP_WHERE): left as it is"
+      tn_inst_cgroup_remove "$_tn_cfile" "the device sets fail-cgroupv1=false itself, in a file that k3s reads"
       return 0
     fi
     # only on the command line of the installer: k3s does not read it until the unit is rewritten, so the
     # drop-in must keep protecting a k3s that restarts before that. The same value twice does no harm.
-    tn_inst_info "fail-cgroupv1 is set by the device itself ($TN_INST_CGROUP_WHERE): left as it is. The drop-in $_tn_cfile stays until the installer has put it in the unit; the same value twice is harmless, and the one on the command line wins"
+    tn_inst_info "fail-cgroupv1=false is set by the device itself ($TN_INST_CGROUP_WHERE): left as it is. The drop-in $_tn_cfile stays until the installer has put it in the unit; the same value twice is harmless, and the one on the command line wins"
   fi
   # an installed k3s older than v1.31 (about to be upgraded) cannot start with the flag
   if [ -n "${TN_INST_INSTALLED:-}" ] && tn_inst_cmp "$TN_INST_INSTALLED" v1.31.0 && [ "$TN_INST_CMP" = -1 ]; then
     TN_INST_CGROUP_DEFERRED=1
     tn_inst_info "the installed k3s $TN_INST_INSTALLED is older than v1.31: the kubelet flag is set after the installer has upgraded it, not before"
     tn_inst_cgroup_remove "$_tn_cfile" "the installed k3s is older than v1.31 and cannot take the flag until it is upgraded"
+    # The installer starts the new release as soon as it has written the unit. From v1.35 that kubelet
+    # does not start on cgroup v1 without the flag, and tn_inst_finish would never run (the installer's
+    # restart fails under set -e). So the unit gets the flag from its first start, through INSTALL_K3S_EXEC:
+    # the old kubelet, which is running now, never reads it. Not needed for an exact v1.31 - v1.34.
+    if [ "$_tn_must" = 1 ]; then
+      if printf '%s\n' "${INSTALL_K3S_EXEC:-}" | tn_inst_cgroup_flag_in_text; then
+        tn_inst_info "INSTALL_K3S_EXEC already has fail-cgroupv1=false: the new unit carries it from its first start"
+      else
+        INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC:+$INSTALL_K3S_EXEC }--kubelet-arg=fail-cgroupv1=false"
+        export INSTALL_K3S_EXEC
+        tn_inst_info "k3s ${_tn_eff:-from a channel} may need the flag on its first start: --kubelet-arg=fail-cgroupv1=false is added to INSTALL_K3S_EXEC, so that the new unit has it. The old kubelet does not read it"
+      fi
+    fi
     return 0
   fi
   tn_inst_cgroup_write

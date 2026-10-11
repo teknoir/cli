@@ -183,6 +183,37 @@ install_lib_check() {
           tn_inst_finish
           [ -s "$TN_K3S_CONFIG_DIR/$D" ] || { echo "flag not written by tn_inst_finish"; exit 1; }
         ) || exit 1
+        # installed v1.30.14 upgraded to a channel (or to v1.36 with TN_K3S_FORCE): the installer starts a release
+        # that needs the flag on its first start, so INSTALL_K3S_EXEC carries it (once), the drop-in comes after
+        (
+          K3S_BIN="$3"; TN_K3S_CONFIG_DIR="$TN_K3S_CONFIG_DIR/ch"; TN_K3S_UPGRADE=true; INSTALL_K3S_EXEC="server --tls-san a"
+          export K3S_BIN TN_K3S_CONFIG_DIR TN_K3S_UPGRADE INSTALL_K3S_EXEC
+          unset INSTALL_K3S_VERSION; INSTALL_K3S_CHANNEL=stable; export INSTALL_K3S_CHANNEL
+          tn_inst_prepare server; tn_inst_prepare server
+          [ "$INSTALL_K3S_EXEC" = "server --tls-san a --kubelet-arg=fail-cgroupv1=false" ] || { echo "channel upgrade: INSTALL_K3S_EXEC=$INSTALL_K3S_EXEC"; exit 1; }
+          [ ! -e "$TN_K3S_CONFIG_DIR/$D" ] || { echo "channel upgrade: drop-in before the installer"; exit 1; }
+          tn_inst_finish
+          [ -s "$TN_K3S_CONFIG_DIR/$D" ] || { echo "channel upgrade: no drop-in after the installer"; exit 1; }
+        ) || exit 1
+        (
+          K3S_BIN="$3"; TN_K3S_CONFIG_DIR="$TN_K3S_CONFIG_DIR/ex131"; TN_K3S_UPGRADE=true; INSTALL_K3S_EXEC=server; INSTALL_K3S_VERSION=v1.31.14+k3s1
+          export K3S_BIN TN_K3S_CONFIG_DIR TN_K3S_UPGRADE INSTALL_K3S_EXEC INSTALL_K3S_VERSION
+          tn_inst_prepare server
+          [ "$INSTALL_K3S_EXEC" = server ] || { echo "v1.31.14 got a flag on the command: $INSTALL_K3S_EXEC"; exit 1; }
+        ) || exit 1
+        # a comment and fail-cgroupv1=true are not the device setting it itself: the drop-in is written
+        (
+          TN_K3S_CONFIG_DIR="$TN_K3S_CONFIG_DIR/nocount"; K3S_BIN="$2"; INSTALL_K3S_VERSION=v1.34.11+k3s1
+          export TN_K3S_CONFIG_DIR K3S_BIN INSTALL_K3S_VERSION
+          mkdir -p "$TN_K3S_CONFIG_DIR/config.yaml.d"
+          printf "kubelet-arg+:\n  # - fail-cgroupv1=false\n  - fail-cgroupv1=true\n" > "$TN_K3S_CONFIG_DIR/config.yaml.d/10-user.yaml"
+          printf "# fail-cgroupv1=false\n" > "$TN_K3S_CONFIG_DIR/config.yaml"
+          tn_inst_prepare server
+          [ -s "$TN_K3S_CONFIG_DIR/$D" ] || { echo "drop-in missing: a comment or =true counted as the device setting"; exit 1; }
+          printf "kubelet-arg+: [\"fail-cgroupv1=false\"]\n" > "$TN_K3S_CONFIG_DIR/config.yaml.d/20-user.yml"
+          tn_inst_prepare server
+          [ ! -e "$TN_K3S_CONFIG_DIR/$D" ] || { echo "drop-in kept although a .yml has the flag"; exit 1; }
+        ) || exit 1
         # config.yaml: keys are added once, the owner'"'"'s file is kept
         printf "kubelet-arg: max-pods=77\nnode-name: mine" > "$TN_K3S_CONFIG_DIR/config.yaml"
         tn_inst_config_ensure "$TN_K3S_CONFIG_DIR/config.yaml" node-name "node-name: x"
@@ -197,7 +228,7 @@ disable:
       ' sh "$IL" "$w/k3s" "$w/k3s130" 2>&1 ); then
     echo "RESULT install-lib FAIL $(echo "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)"; rm -rf "$w"; return
   fi
-  echo "RESULT install-lib PASS versions, keep/refuse, cgroup v1 drop-in (from v1.31), config.yaml"
+  echo "RESULT install-lib PASS versions, keep/refuse, cgroup v1 drop-in (from v1.31, flag on the installer command), config.yaml"
   rm -rf "$w"
 }
 install_lib_check

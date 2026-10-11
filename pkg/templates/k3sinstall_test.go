@@ -422,8 +422,10 @@ func TestCgroupV1DropinGoesWhenNotNeeded(t *testing.T) {
 func TestCgroupV1RespectsTheDevicesOwnSetting(t *testing.T) {
 	// the device sets the flag in a file that the running k3s reads: our drop-in goes, theirs wins
 	for name, tc := range map[string]struct{ file, content string }{
-		"config.yaml":   {"config.yaml", "kubelet-arg:\n  - fail-cgroupv1=true\n"},
-		"config.yaml.d": {"config.yaml.d/10-user.yaml", "kubelet-arg+:\n  - fail-cgroupv1=true\n"},
+		"config.yaml":       {"config.yaml", "kubelet-arg:\n  - fail-cgroupv1=false\n"},
+		"config.yaml.d":     {"config.yaml.d/10-user.yaml", "kubelet-arg+:\n  - fail-cgroupv1=false\n"},
+		"config.yaml.d yml": {"config.yaml.d/10-user.yml", "kubelet-arg+: [\"fail-cgroupv1=false\"]\n"},
+		"trailing comment":  {"config.yaml", "kubelet-arg:\n  - 'fail-cgroupv1=false' # on purpose\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			i := newInst(t)
@@ -438,6 +440,47 @@ func TestCgroupV1RespectsTheDevicesOwnSetting(t *testing.T) {
 				t.Error("our drop-in overrides the device's own setting")
 			}
 		})
+	}
+}
+
+// A comment, and fail-cgroupv1=true, are not "the device sets it itself": our drop-in is written, and an
+// existing one stays. (A device that sets fail-cgroupv1=true on cgroup v1 on purpose is not supported.)
+func TestCgroupV1DeviceSettingThatDoesNotCount(t *testing.T) {
+	for name, tc := range map[string]struct{ file, content string }{
+		"commented in config.yaml":         {"config.yaml", "kubelet-arg:\n  # - fail-cgroupv1=false\n  - v=2\n"},
+		"commented in config.yaml.d":       {"config.yaml.d/10-user.yaml", "#kubelet-arg+: [fail-cgroupv1=false]\n"},
+		"commented in a yml":               {"config.yaml.d/10-user.yml", "    # fail-cgroupv1=false\n"},
+		"true in config.yaml":              {"config.yaml", "kubelet-arg:\n  - fail-cgroupv1=true\n"},
+		"true in config.yaml.d":            {"config.yaml.d/10-user.yaml", "kubelet-arg+:\n  - fail-cgroupv1=true\n"},
+		"false only in a trailing comment": {"config.yaml", "kubelet-arg:\n  - v=2 # fail-cgroupv1=false\n"},
+		"a longer name":                    {"config.yaml", "kubelet-arg:\n  - fail-cgroupv1=falsey\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, withDropin := range []bool{false, true} {
+				i := newInst(t)
+				i.installed("")
+				write(t, filepath.Join(i.k3sCfg, tc.file), tc.content)
+				if withDropin {
+					write(t, i.dropin(), "kubelet-arg+:\n  - \"fail-cgroupv1=false\"\n")
+				}
+				out, err := i.run("tn_inst_prepare server", "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1")
+				if err != nil || strings.Contains(out, "set by the device itself") || strings.Contains(out, "Removed") {
+					t.Fatalf("withDropin=%v: %v\n%s", withDropin, err, out)
+				}
+				if !strings.Contains(string(mustRead(t, i.dropin())), "fail-cgroupv1=false") {
+					t.Errorf("withDropin=%v: no drop-in\n%s", withDropin, out)
+				}
+			}
+		})
+	}
+	// the same in INSTALL_K3S_EXEC
+	for _, exec := range []string{"server --kubelet-arg=fail-cgroupv1=true", "server --kubelet-arg=fail-cgroupv1=falsey"} {
+		i := newInst(t)
+		i.installed("")
+		out, err := i.run("tn_inst_prepare server", "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1", "INSTALL_K3S_EXEC="+exec)
+		if err != nil || strings.Contains(out, "set by the device itself") || !strings.Contains(string(mustRead(t, i.dropin())), "fail-cgroupv1=false") {
+			t.Errorf("%q: %v\n%s", exec, err, out)
+		}
 	}
 }
 
@@ -521,6 +564,89 @@ func TestCgroupV1FlagWaitsForTheInstallerWhenTheInstalledK3sIsTooOld(t *testing.
 		if out, err = i2.run("tn_inst_prepare server; tn_inst_finish", "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_VERSION=v1.36.5+k3s1"); err != nil || strings.Contains(out, "held back") {
 			t.Errorf("%v\n%s", err, out)
 		}
+	}
+}
+
+// The installer starts the NEW release as soon as it has rewritten the unit, and v1.35 and newer do not
+// start on cgroup v1 without the flag. So when the drop-in has to wait (the installed k3s is older than
+// v1.31) and the release is not known to be older than v1.35, the flag is on INSTALL_K3S_EXEC from the first
+// start; tn_inst_finish writes the drop-in after the installer.
+func TestCgroupV1FlagIsOnTheInstallerCommandWhenTheDropinHasToWait(t *testing.T) {
+	const flag = "--kubelet-arg=fail-cgroupv1=false"
+	show := `; echo "EXEC=[${INSTALL_K3S_EXEC-unset}]"; if [ -e "$TN_K3S_CONFIG_DIR/config.yaml.d/99-teknoir-cgroupv1.yaml" ]; then echo DROPIN=yes; else echo DROPIN=no; fi`
+	for _, tc := range []struct {
+		name     string
+		env      []string
+		wantExec string // the whole INSTALL_K3S_EXEC after tn_inst_prepare
+		msg      string
+	}{
+		{name: "channel upgrade", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server --tls-san a"},
+			wantExec: "server --tls-san a " + flag, msg: "may need the flag on its first start"},
+		{name: "channel upgrade, no exec at all", env: []string{"INSTALL_K3S_CHANNEL=latest", "TN_K3S_UPGRADE=true"},
+			wantExec: flag},
+		{name: "a forced jump to v1.36.5", env: []string{"INSTALL_K3S_VERSION=v1.36.5+k3s1", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_EXEC=agent"},
+			wantExec: "agent " + flag},
+		{name: "exact v1.35.0 (a jump too, forced)", env: []string{"INSTALL_K3S_VERSION=v1.35.0+k3s1", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_EXEC=server"},
+			wantExec: "server " + flag},
+		{name: "exact v1.31.14 does not need it on its first start", env: []string{"INSTALL_K3S_VERSION=v1.31.14+k3s1", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server"},
+			wantExec: "server"},
+		{name: "a channel named v1.31 does not need it either", env: []string{"INSTALL_K3S_CHANNEL=v1.31", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server"},
+			wantExec: "server"},
+		{name: "already on the command of the caller: not twice", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server " + flag},
+			wantExec: "server " + flag, msg: "already has fail-cgroupv1=false"},
+		{name: "already on the command of the caller, spelled with a space", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server --kubelet-arg fail-cgroupv1=false"},
+			wantExec: "server --kubelet-arg fail-cgroupv1=false"},
+		{name: "true on the command of the caller is not the flag", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server --kubelet-arg=fail-cgroupv1=true"},
+			wantExec: "server --kubelet-arg=fail-cgroupv1=true " + flag},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			i := newInst(t)
+			i.installed("v1.30.14+k3s1")
+			env := append([]string{"TN_CGROUP_FSTYPE=tmpfs", "TN_K3S_PIN_SOURCE=flag"}, tc.env...)
+			out, err := i.run("tn_inst_prepare server"+show, env...)
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			if !strings.Contains(out, "EXEC=["+tc.wantExec+"]\n") {
+				t.Errorf("want INSTALL_K3S_EXEC %q:\n%s", tc.wantExec, out)
+			}
+			if strings.Count(out, "fail-cgroupv1=false") > 0 && strings.Count(strings.SplitN(strings.SplitN(out, "EXEC=[", 2)[1], "]", 2)[0], "fail-cgroupv1=false") > 1 {
+				t.Errorf("the flag is on the command twice:\n%s", out)
+			}
+			if !strings.Contains(out, "DROPIN=no") {
+				t.Errorf("the drop-in must wait for the installer:\n%s", out)
+			}
+			if tc.msg != "" && !strings.Contains(out, tc.msg) {
+				t.Errorf("output lacks %q:\n%s", tc.msg, out)
+			}
+			// after the installer: the drop-in
+			out, err = i.run("tn_inst_prepare server; tn_inst_finish"+show, env...)
+			if err != nil || !strings.Contains(out, "DROPIN=yes") || !strings.Contains(string(mustRead(t, i.dropin())), "fail-cgroupv1=false") {
+				t.Errorf("not written after the installer: %v\n%s", err, out)
+			}
+		})
+	}
+	// the exec of a re-run, when the installed k3s is new enough, is left alone
+	i := newInst(t)
+	i.installed("v1.34.11+k3s1")
+	out, err := i.run("tn_inst_prepare server"+show, "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_EXEC=server")
+	if err != nil || !strings.Contains(out, "EXEC=[server]\n") {
+		t.Errorf("%v\n%s", err, out)
+	}
+	// cgroup v2: nothing at all
+	i = newInst(t)
+	i.installed("v1.30.14+k3s1")
+	out, err = i.run("tn_inst_prepare server"+show, "TN_CGROUP_FSTYPE=cgroup2fs", "INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server")
+	if err != nil || !strings.Contains(out, "EXEC=[server]\n") || !strings.Contains(out, "DROPIN=no") {
+		t.Errorf("%v\n%s", err, out)
+	}
+	// the device already has the flag in a file k3s reads: no command line flag either
+	i = newInst(t)
+	i.installed("v1.30.14+k3s1")
+	write(t, filepath.Join(i.k3sCfg, "config.yaml.d", "10-user.yaml"), "kubelet-arg+:\n  - fail-cgroupv1=false\n")
+	out, err = i.run("tn_inst_prepare server"+show, "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server")
+	if err != nil || !strings.Contains(out, "EXEC=[server]\n") {
+		t.Errorf("%v\n%s", err, out)
 	}
 }
 

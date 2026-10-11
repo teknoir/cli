@@ -121,11 +121,18 @@ that a later upgrade (also one made by hand, outside the scripts) does not stop 
 is written atomically (temporary file, then `mv`). `kubelet-arg+` **appends** to the `kubelet-arg` of
 `config.yaml` and the other drop-ins, so the arguments of the device owner are kept; the file is
 rewritten only when it differs, so a re-run changes nothing. A `fail-cgroupv1` that the device sets
-itself in a file that k3s reads (`config.yaml` or another drop-in) is respected and our file is removed.
+itself in a file that k3s reads (`config.yaml` or another `config.yaml.d/*.yaml` or `*.yml`) is respected
+and our file is removed. Only an uncommented line that sets `fail-cgroupv1=false` counts: a comment, or
+`fail-cgroupv1=true`, does not, and our file is written as usual (setting `true` on a cgroup v1 host on
+purpose is not supported).
 A flag only in `INSTALL_K3S_EXEC` reaches the unit when the installer has run, so our file stays (or is
 written) until then: the same value twice is harmless, and the command line wins. For an installed k3s
 older than v1.31 that is being upgraded, the flag is written after the installer (`tn_inst_finish`), as the
-old kubelet cannot take it. On cgroup v2 the file is removed. An OS image build (`OS_BUILD=true`) runs on another machine than the
+old kubelet cannot take it. The installer starts the new release as soon as it has rewritten the unit, and
+v1.35 or later does not start on cgroup v1 without the flag, so when the release is a channel (`stable`,
+`latest`) or an exact v1.35 or later, `--kubelet-arg=fail-cgroupv1=false` is also appended to
+`INSTALL_K3S_EXEC` (once): the new unit has it from its first start, and the old kubelet never reads it.
+An exact v1.31 to v1.34 does not need it. On cgroup v2 the file is removed. An OS image build (`OS_BUILD=true`) runs on another machine than the
 device and cannot tell: the flag is set there, it is harmless on cgroup v2. `TN_K3S_CGROUPV1=true|false`
 forces the answer. The way out is cgroup v2 (kernel command line `systemd.unified_cgroup_hierarchy=1`,
 or a newer OS release); then delete the file.
