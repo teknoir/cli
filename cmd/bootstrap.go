@@ -105,6 +105,11 @@ var bootstrapCmd = &cobra.Command{
 		}
 
 		dockerSecret, _ := cmd.Flags().GetString("docker-secret")
+		k3sUpgrade, _ := cmd.Flags().GetBool("k3s-upgrade")
+		force, _ := cmd.Flags().GetBool("force")
+		if force && !k3sUpgrade {
+			return fmt.Errorf("--force only applies together with --k3s-upgrade")
+		}
 
 		data := templates.TemplateData{
 			Domain:       domain,
@@ -118,6 +123,8 @@ var bootstrapCmd = &cobra.Command{
 			K3SToken:     k3sToken,
 			DockerSecret: dockerSecret,
 			K3SVersion:   k3sVersion,
+			K3SUpgrade:   k3sUpgrade,
+			K3SForce:     force,
 		}
 
 		generate := func(tmpl *template.Template, filename string) error {
@@ -169,6 +176,10 @@ func init() {
 	bootstrapCmd.Flags().Bool("skip-upload", false, "Skip uploading the generated scripts")
 	bootstrapCmd.Flags().String("k3s-version", templates.DefaultK3SVersion,
 		"k3s release the scripts install (INSTALL_K3S_VERSION): an exact release like v1.36.5+k3s1, or stable / latest for the installer's channels. Server and agent scripts use the same value")
+	bootstrapCmd.Flags().Bool("k3s-upgrade", false,
+		"let the scripts replace an installed k3s with --k3s-version (TN_K3S_UPGRADE=true is the default in the scripts). Without it a re-run keeps the installed k3s; a downgrade is always refused")
+	bootstrapCmd.Flags().Bool("force", false,
+		"with --k3s-upgrade: allow an upgrade over more than one minor version (TN_K3S_FORCE=true is the default in the scripts)")
 	bootstrapCmd.Flags().String("docker-secret", "", "The contents of the .dockerconfigjson")
 	rootCmd.AddCommand(bootstrapCmd)
 }

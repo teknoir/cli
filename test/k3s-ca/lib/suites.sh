@@ -382,7 +382,7 @@ run_compat() { # SPEC (platform/image or image)
   tag=$(helper_image "$image" "$platform") || { result_write openssl-compat "$name" - - lib PASS ERROR 0 "cannot build helper image"; return 0; }
   out="$OUT/logs/$name.out"
   docker run --rm --label "$LABEL" --name "$PREFIX-$name" ${platform:+--platform "$platform"} \
-    -v "$OUT/gen:/gens:ro" -v "$HERE/compat:/c:ro" -v "$HERE:/h:ro" -v "$(compat_bin_dir "$platform"):/tnbin:ro" -v "$CA_LIB:/tn/tn-k3s-ca.sh:ro" \
+    -v "$OUT/gen:/gens:ro" -v "$HERE/compat:/c:ro" -v "$HERE:/h:ro" -v "$(compat_bin_dir "$platform"):/tnbin:ro" -v "$CA_LIB:/tn/tn-k3s-ca.sh:ro" ${INSTALL_LIB:+-v "$INSTALL_LIB:/tn/tn-k3s-install.sh:ro"} \
     -e "GENS=$COMPAT_GENS" "$tag" sh /c/assert.sh > "$out" 2>&1 || true
   local seen=""
   while IFS= read -r line; do
@@ -407,5 +407,120 @@ suite_openssl_compat() {
   local spec
   for spec in ${COMPAT_IMAGES_OPT:-$COMPAT_IMAGES_DEFAULT}; do
     pool_run "$(compat_name "$spec")" run_compat "$spec"
+  done
+}
+
+# ------------------------------------------------------------ install: release policy and cgroup v1 flag
+# The library tn-k3s-install.sh ($TN_K3S_INSTALL_LIB) against real k3s.
+
+need_install_lib() { # SUITE
+  if [ -z "$INSTALL_LIB" ] || [ ! -f "$INSTALL_LIB" ]; then
+    log "suite $1 needs the install library: set TN_K3S_INSTALL_LIB=/path/to/tn-k3s-install.sh (skipped)"
+    result_write "$1" "$1:needs-install-lib" - - lib READY SKIP 0 "TN_K3S_INSTALL_LIB not set"
+    return 1
+  fi
+  return 0
+}
+
+# S11 cgroup: the kubelet flag of a cgroup v1 host, on a real k3s. The helper container runs
+# tn_inst_prepare with TN_K3S_CGROUPV1=true (this host is cgroup v2, so the detection is overridden)
+# against an /etc/rancher/k3s that already has a user kubelet-arg; then k3s starts from that
+# directory. k3s >= v1.35 must get fail-cgroupv1=false and keep the user's argument; older k3s gets nothing.
+scenario_install_cgroup() { # SCEN TAG
+  local scen=$1 tag t0 ver args want
+  tag=$(ver_tag "$2")
+  case_init "$scen"; t0=$(now)
+  ver=${tag/-k3s/+k3s}
+  d_pull "$K3S_IMAGE:$tag" || true
+  mkdir -p "$WORK/etc-rancher/k3s"
+  printf 'kubelet-arg: max-pods=77\n' > "$WORK/etc-rancher/k3s/config.yaml"
+  h_mounts "$WORK" "$(gens_for bs-o111 | cut -d' ' -f1)"
+  d_helper "$(helper_image debian:bookworm)" "${HM[@]}" -v "$WORK/etc-rancher:/etc/rancher" \
+    -e "INSTALL_K3S_VERSION=$ver" -e TN_K3S_CGROUPV1=true -- \
+    sh -c ". /h/shim.sh; . /tn/tn-k3s-install.sh; tn_inst_prepare server; tn_inst_prepare server" >"$OUT/logs/$CASE.prepare.log" 2>&1 ||
+    { step "$scen" 1-prepare "$tag" - lib READY ERROR $(( $(now) - t0 )) "tn_inst_prepare failed (see log)"; case_end; return 0; }
+  if [ "$(ver_minor "$tag")" -ge 35 ]; then want=yes; else want=no; fi
+  # (root-owned, mode 750: look from inside a container)
+  local dropin=/etc/rancher/k3s/config.yaml.d/99-teknoir-cgroupv1.yaml have=no
+  if d_helper "$(helper_image debian:bookworm)" -v "$WORK/etc-rancher:/etc/rancher" -- test -s "$dropin"; then have=yes; fi
+  if [ "$want" = yes ] && [ "$have" = no ]; then
+    step "$scen" 1-prepare "$tag" - lib READY ERROR $(( $(now) - t0 )) "no drop-in written for k3s $tag"; case_end; return 0
+  fi
+  if [ "$want" = no ] && [ "$have" = yes ]; then
+    step "$scen" 1-prepare "$tag" - lib READY ERROR $(( $(now) - t0 )) "a drop-in was written for k3s $tag (< v1.35)"; case_end; return 0
+  fi
+  srv_up "$tag"; wait_k3s server "$SRV" "$T_SERVER" "$SINCE"
+  if [ "$W_STATE" != READY ]; then step "$scen" 2-k3s-starts "$tag" - lib READY "$W_STATE" $(( $(now) - t0 )) "$W_NOTE"; save_logs "$SRV" server; case_end; return 0; fi
+  args=$(kc "$SRV" get nodes -o 'jsonpath={.items[0].metadata.annotations.k3s\.io/node-args}' 2>/dev/null)
+  if ! printf '%s' "$args" | grep -q 'max-pods=77'; then
+    step "$scen" 2-k3s-starts "$tag" - lib READY ERROR $(( $(now) - t0 )) "the user's kubelet-arg max-pods=77 was lost: $args"
+  elif [ "$want" = yes ] && ! printf '%s' "$args" | grep -q 'fail-cgroupv1=false'; then
+    step "$scen" 2-k3s-starts "$tag" - lib READY ERROR $(( $(now) - t0 )) "fail-cgroupv1=false is not in the k3s arguments: $args"
+  elif [ "$want" = no ] && printf '%s' "$args" | grep -q 'fail-cgroupv1'; then
+    step "$scen" 2-k3s-starts "$tag" - lib READY ERROR $(( $(now) - t0 )) "fail-cgroupv1 was passed to k3s $tag: $args"
+  else
+    step "$scen" 2-k3s-starts "$tag" - lib READY READY $(( $(now) - t0 )) "kubelet-arg max-pods=77 kept$([ "$want" = yes ] && echo ', fail-cgroupv1=false passed')"
+  fi
+  save_logs "$SRV" server
+  case_end
+}
+
+# S12 policy: the version of the installed k3s is read from the real `k3s --version` output
+# (K3S_BIN='docker run --rm rancher/k3s:<tag>'), and the policy decides on it.
+scenario_install_policy() { # SCEN TAG
+  local scen=$1 tag t0 ver out other
+  tag=$(ver_tag "$2")
+  case_init "$scen"; t0=$(now)
+  ver=${tag/-k3s/+k3s}
+  d_pull "$K3S_IMAGE:$tag" || true
+  mkdir -p "$WORK/cfg"
+  # run_policy PIN [ENV...]: prints the output and a last line RC=<exit code> (it runs in a command substitution)
+  run_policy() {
+    local pin=$1 rc=0; shift
+    env "K3S_BIN=docker run --rm $K3S_IMAGE:$tag" "INSTALL_K3S_VERSION=$pin" "TN_K3S_CONFIG_DIR=$WORK/cfg" TN_CGROUP_FSTYPE=cgroup2fs "$@" \
+      sh -c '. "$1"; . "$2"; tn_inst_plan; echo "RESULT version=$INSTALL_K3S_VERSION action=$TN_INST_ACTION"' sh "$HERE/shim.sh" "$INSTALL_LIB" 2>&1 || rc=$?
+    echo "RC=$rc"
+  }
+  P_RC=0
+  # 1. the installed release is recognised: asking for the same one is "same"
+  out=$(run_policy "$ver"); P_RC=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$P_RC" = 0 ] && printf '%s' "$out" | grep -q "RESULT version=$ver action=same"; then
+    step "$scen" 1-recognised "$tag" - lib READY READY $(( $(now) - t0 )) "installed $ver read from k3s --version"
+  else
+    step "$scen" 1-recognised "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$P_RC: $(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+  # 2. another pin is ignored: the installed release is kept
+  t0=$(now); other=v1.99.0+k3s1
+  out=$(run_policy "$other"); P_RC=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$P_RC" = 0 ] && printf '%s' "$out" | grep -q "RESULT version=$ver action=keep"; then
+    step "$scen" 2-keeps "$tag" - lib READY READY $(( $(now) - t0 )) "pin $other ignored, $ver kept"
+  else
+    step "$scen" 2-keeps "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$P_RC: $(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+  # 3. an upgrade over several minors, and any downgrade, are refused
+  t0=$(now)
+  out=$(run_policy "v1.99.0+k3s1" TN_K3S_UPGRADE=true); P_RC=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$P_RC" = 1 ] && printf '%s' "$out" | grep -q 'more than one minor version'; then
+    step "$scen" 3-refuses-jump "$tag" - lib READY READY $(( $(now) - t0 )) "upgrade to $other refused"
+  else
+    step "$scen" 3-refuses-jump "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$P_RC: $(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+  t0=$(now)
+  out=$(run_policy "v1.20.0+k3s1" TN_K3S_UPGRADE=true TN_K3S_FORCE=true); P_RC=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$P_RC" = 1 ] && printf '%s' "$out" | grep -q 'refusing to downgrade'; then
+    step "$scen" 4-refuses-downgrade "$tag" - lib READY READY $(( $(now) - t0 )) "downgrade refused even with TN_K3S_FORCE=true"
+  else
+    step "$scen" 4-refuses-downgrade "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$P_RC: $(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+  case_end
+}
+
+suite_install() {
+  SUITE=install
+  need_install_lib install || return 0
+  local v
+  for v in $(versions_for "v1.34.11 v1.36.5"); do
+    pool_run "inst-cgroup-$(ver_slug "$v")" scenario_install_cgroup "inst-cgroup-$(ver_slug "$v")" "$v"
+    pool_run "inst-policy-$(ver_slug "$v")" scenario_install_policy "inst-policy-$(ver_slug "$v")" "$v"
   done
 }

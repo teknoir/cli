@@ -40,6 +40,11 @@ type TemplateData struct {
 	// K3SVersion is the k3s release to install: an exact release, "stable" or "latest".
 	// Empty means DefaultK3SVersion.
 	K3SVersion string
+	// K3SUpgrade makes the generated scripts replace an installed k3s with K3SVersion
+	// (TN_K3S_UPGRADE=true is the default in the script). Without it a re-run keeps the installed version.
+	K3SUpgrade bool
+	// K3SForce allows that upgrade to skip minor versions (TN_K3S_FORCE=true is the default in the script).
+	K3SForce bool
 }
 
 func (d TemplateData) k3sVersion() string {
@@ -84,6 +89,12 @@ var partialsFS embed.FS
 //go:embed scripts/tn-k3s-ca.sh
 var TnK3sCAScript string
 
+// TnK3sInstallScript is the k3s release policy and cgroup v1 handling (tn_inst_prepare), embedded
+// in the server and the agent bootstrap script as the template "tn-k3s-install.sh".
+//
+//go:embed scripts/tn-k3s-install.sh
+var TnK3sInstallScript string
+
 //go:embed scripts/*.sh
 var scriptsFS embed.FS
 
@@ -96,6 +107,7 @@ var (
 func init() {
 	AgentTemplate = template.Must(template.New("agent").Parse(AgentTemplateStr))
 	template.Must(AgentTemplate.ParseFS(partialsFS, "partials/*.tmpl"))
+	template.Must(AgentTemplate.ParseFS(scriptsFS, "scripts/tn-k3s-install.sh"))
 
 	ServerTemplate = template.Must(template.New("server").Parse(ServerTemplateStr))
 	template.Must(ServerTemplate.ParseFS(partialsFS, "partials/*.tmpl"))

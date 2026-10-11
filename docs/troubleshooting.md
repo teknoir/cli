@@ -155,8 +155,45 @@ including resolved URLs and the exact `ssh` invocation used.
 ??? question "Which k3s version do the bootstrap scripts install?"
     A pinned one, `v1.36.5+k3s1` by default (`tnctl bootstrap --k3s-version` changes it, `stable`
     restores "whatever the installer's stable channel is today", and `INSTALL_K3S_VERSION=... sh
-    bootstrap_*.sh` overrides it when the script runs). An agent must run the version of its server.
-    See [`tnctl bootstrap`](commands/bootstrap.md#the-k3s-version).
+    bootstrap_*.sh` overrides it when the script runs) on a device **without** k3s. A device that
+    already runs k3s **keeps its version** when the script is run again; upgrading takes
+    `tnctl bootstrap --k3s-upgrade` (or `TN_K3S_UPGRADE=true`). An agent must run the version of its
+    server. See [`tnctl bootstrap`](commands/bootstrap.md#the-k3s-version).
+
+??? failure "The script says `k3s ... is kept; the requested ... is NOT installed`"
+    Intended: the device already has k3s and a re-run does not upgrade it. To upgrade, run the
+    script with `TN_K3S_UPGRADE=true` (or generate it with `tnctl bootstrap --k3s-upgrade`), one minor
+    version at a time and servers before agents.
+
+??? failure "The script stops with `refusing to downgrade k3s` or `more than one minor version`"
+    Both stop before anything is changed. **Downgrade**: the pin is older than the installed
+    release, and k3s cannot go back (its datastore has been migrated); pin the installed release or a
+    newer one. **More than one minor version** (for example `v1.34.11` to `v1.36.5`): upgrade to
+    `v1.35.x` first and run the script again, or set `TN_K3S_FORCE=true` (`tnctl bootstrap --k3s-upgrade
+    --force`) if you have a backup of `/var/lib/rancher/k3s/server/db` and accept the risk. See
+    [Re-running a script](commands/bootstrap.md#re-running-a-script-the-installed-k3s-is-kept).
+
+??? failure "k3s does not start on a Jetson / Ubuntu 18.04 / 20.04: `kubelet is configured to not run on a host using cgroup v1`"
+    Kubernetes 1.35 and later (k3s v1.35+) refuse cgroup v1 by default. Scripts from a `tnctl` with
+    this fix set the kubelet argument `fail-cgroupv1=false` for you in
+    `/etc/rancher/k3s/config.yaml.d/99-teknoir-cgroupv1.yaml` (check with `stat -fc %T /sys/fs/cgroup`:
+    `tmpfs` means cgroup v1 or hybrid, `cgroup2fs` means v2). To fix a device by hand, create that file
+    with the content shown in [`tnctl bootstrap`](commands/bootstrap.md#cgroup-v1-devices) and
+    `systemctl restart k3s`. cgroup v1 is deprecated upstream: the lasting fix is cgroup v2 (kernel
+    command line `systemd.unified_cgroup_hierarchy=1`, or a newer OS release).
+
+??? failure "The script stops with `k3s ... is active and ready, but the data dir ... was never initialised`"
+    The data dir the script found (it tells where it came from) has no `server/token`, but the k3s unit
+    is running: k3s uses another data dir (a `--config` file, a drop-in the tool does not read). A CA
+    generated in the wrong directory would not change the CA that k3s uses, so nothing was changed.
+    Find the real directory (`systemctl cat k3s`, `ps aux | grep k3s`) and run the script again with
+    `DATA_DIR=/that/dir`.
+
+??? failure "Remediation ends with `the restart of k3s did not finish within 120s`"
+    The CA **was** changed (the message says so and what to look at), but `systemctl restart k3s`
+    did not return: the k3s unit waits for ever for a k3s that cannot start. The wait is capped
+    (`TN_K3S_SERVICE_TIMEOUT`, seconds, default 120). Look at `journalctl -u k3s -n 50`, fix the cause, and
+    restart k3s yourself. Do not restore the backup tar.
 
 ??? failure "Bootstrap fails with `string too long maxsize=64`"
     The generated CA certificates carry the device ID and the domain in their common name, which is

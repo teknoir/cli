@@ -8,8 +8,16 @@
 #   K3S_TOKEN="32 char string" (default: generated at master node creation time)
 #   CREATE_USER=false (default: ask, create a user for the device without asking)
 #   INSTALL_K3S_VERSION=v1.xx.y+k3sN (default: the version tnctl pinned; must be the version of the server)
+#   TN_K3S_UPGRADE=true (default: false; a re-run KEEPS the installed k3s version. true lets the pin replace
+#                          it: never a downgrade, never more than one minor version. Upgrade the server first)
+#   TN_K3S_FORCE=true (default: false; allows an upgrade over more than one minor version)
+#   TN_K3S_CGROUPV1=true|false (default: detected; on cgroup v1 with k3s >= v1.35 the kubelet gets
+#                          fail-cgroupv1=false, see /etc/rancher/k3s/config.yaml.d/99-teknoir-cgroupv1.yaml)
 
 {{template "variables.sh.tmpl" .}}
+
+# The k3s release policy (a re-run keeps the installed k3s) and the cgroup v1 kubelet flag.
+{{template "tn-k3s-install.sh" .}}
 
 {{template "keys.sh.tmpl" .}}
 
@@ -53,6 +61,9 @@ if [ "${USE_DOCKER}" = true ]; then
 fi
 
 {{template "k3s_version.sh.tmpl" .}}
+# A re-run keeps the installed k3s (unless TN_K3S_UPGRADE=true) and sets fail-cgroupv1=false on
+# cgroup v1 hosts, which Kubernetes >= 1.35 would refuse.
+tn_inst_prepare agent
 export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
 

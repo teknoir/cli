@@ -174,7 +174,7 @@ func TestRenderedScriptsParseWithEveryPin(t *testing.T) {
 // afterwards must use the same one.
 func TestServerScriptUsesTheResolvedDataDir(t *testing.T) {
 	out := renderK3S(t, ServerTemplate, "")
-	for _, want := range []string{"${DATA_DIR}/server/manifests", `echo "data-dir: ${DATA_DIR}"`} {
+	for _, want := range []string{"${DATA_DIR}/server/manifests", `tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml data-dir "data-dir: ${DATA_DIR}"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("server script lacks %q", want)
 		}

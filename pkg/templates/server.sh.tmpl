@@ -14,6 +14,11 @@
 #   CREATE_USER=false (default: ask, create a user for the device without asking)
 #   TN_K3S_CA_AUTO_REMEDIATE=false (default: true; a re-run on a device bootstrapped with the old
 #                          root CA repairs it before k3s is touched. false stops with advice instead)
+#   TN_K3S_UPGRADE=true (default: false; a re-run KEEPS the installed k3s version. true lets the pin
+#                          below replace it: never a downgrade, never more than one minor version)
+#   TN_K3S_FORCE=true (default: false; allows an upgrade over more than one minor version)
+#   TN_K3S_CGROUPV1=true|false (default: detected; on cgroup v1 with k3s >= v1.35 the kubelet gets
+#                          fail-cgroupv1=false, see /etc/rancher/k3s/config.yaml.d/99-teknoir-cgroupv1.yaml)
 
 
 TMP=$(mktemp -dt)
@@ -41,20 +46,22 @@ info "Teknoir bootstrapping...${TMP}"
 # available stand-alone as pkg/templates/scripts/tn-k3s-ca.sh (check / remediate).
 TN_K3S_CA_NO_MAIN=1
 {{template "tn-k3s-ca.sh" .}}
+# The k3s release policy (a re-run keeps the installed k3s) and the cgroup v1 kubelet flag.
+{{template "tn-k3s-install.sh" .}}
 tn_k3s_ca_setup
 
 info "Install Rancher K3s"
 export K3S_CONFIG_PATH=/etc/rancher/k3s
 $SUDO mkdir -p ${K3S_CONFIG_PATH}
-$SUDO tee ${K3S_CONFIG_PATH}/config.yaml > /dev/null << EOL
-disable:
-  - traefik
-node-name: teknoir-master
-EOL
+# A re-run must not replace a config.yaml that already exists (it may hold keys of the device owner,
+# like a kubelet-arg): the Teknoir keys are added when they are missing.
+tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml disable "disable:
+  - traefik"
+tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml node-name "node-name: teknoir-master"
 # The CA above was made in ${DATA_DIR}, the data dir that k3s uses on this device. The file just
 # written and the unit that the installer writes (it has no --data-dir) must keep it there.
 if [ "${DATA_DIR}" != "/var/lib/rancher/k3s" ]; then
-    echo "data-dir: ${DATA_DIR}" | $SUDO tee -a ${K3S_CONFIG_PATH}/config.yaml > /dev/null
+    tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml data-dir "data-dir: ${DATA_DIR}"
 fi
 cat >/etc/sysctl.d/teknoir-k3s.conf << EOF
 fs.inotify.max_user_instances=1024
@@ -83,6 +90,9 @@ if [ "${USE_DOCKER}" = true ]; then
 fi
 
 {{template "k3s_version.sh.tmpl" .}}
+# A re-run keeps the installed k3s (unless TN_K3S_UPGRADE=true) and sets fail-cgroupv1=false on
+# cgroup v1 hosts, which Kubernetes >= 1.35 would refuse (library: pkg/templates/scripts/tn-k3s-install.sh).
+tn_inst_prepare server
 export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
 

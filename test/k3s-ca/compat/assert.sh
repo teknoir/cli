@@ -119,3 +119,49 @@ for g in $GENS; do
   one "$g"
   if openssl x509 -in "$GENDIR/$g/rsa_public.pem" -noout -text | grep -q 'Certificate Sign'; then :; else remed "$g"; fi
 done
+
+# The k3s install library (release policy, cgroup v1 flag, config.yaml) under the same /bin/sh and
+# the same awk/sed/stat of this image (mawk on Debian/Ubuntu, 32-bit arm, ...). No k3s needed.
+install_lib_check() {
+  IL=/tn/tn-k3s-install.sh
+  [ -f "$IL" ] || return 0
+  w=$(mktemp -d)
+  printf '#!/bin/sh\necho "k3s version v1.34.11+k3s1 (0123abcd)"\necho "go version go1.24.1"\n' > "$w/k3s"; chmod +x "$w/k3s"
+  if ! out=$(
+      cd "$w" &&
+      env -u INSTALL_K3S_VERSION "K3S_BIN=$w/k3s" "TN_K3S_CONFIG_DIR=$w/cfg" TN_CGROUP_FSTYPE=tmpfs INSTALL_K3S_VERSION=v1.36.5+k3s1 sh -c '
+        set -e; set -o noglob; umask 027
+        . "$1"
+        # versions: numeric compare, k3s revision, garbage
+        tn_inst_cmp v1.36.10+k3s1 v1.36.9+k3s3; [ "$TN_INST_CMP" = 1 ] || { echo "cmp patch $TN_INST_CMP"; exit 1; }
+        tn_inst_cmp v1.9.0+k3s1 v1.10.0+k3s1; [ "$TN_INST_CMP" = -1 ] || { echo "cmp minor $TN_INST_CMP"; exit 1; }
+        tn_inst_cmp v1.36.5+k3s2 v1.36.5+k3s1; [ "$TN_INST_CMP" = 1 ] || { echo "cmp revision $TN_INST_CMP"; exit 1; }
+        if tn_inst_cmp stable v1.36.5+k3s1; then echo "stable parsed"; exit 1; fi
+        # installed v1.34.11, pin v1.36.5: kept; drop-in not needed on 1.34
+        tn_inst_prepare server
+        [ "$INSTALL_K3S_VERSION" = v1.34.11+k3s1 ] || { echo "pin not kept: $INSTALL_K3S_VERSION"; exit 1; }
+        [ ! -e "$TN_K3S_CONFIG_DIR/config.yaml.d/99-teknoir-cgroupv1.yaml" ] || { echo "drop-in for k3s 1.34"; exit 1; }
+        # upgrade over two minors is refused (in a subshell: tn_inst_fatal exits)
+        if ( INSTALL_K3S_VERSION=v1.36.5+k3s1 TN_K3S_UPGRADE=true tn_inst_plan ) >/dev/null 2>&1; then echo "two-minor upgrade allowed"; exit 1; fi
+        # one minor, cgroup v1: the drop-in appears, twice is the same
+        K3S_BIN="$2" INSTALL_K3S_VERSION=v1.35.9+k3s1 TN_K3S_UPGRADE=true tn_inst_prepare server
+        K3S_BIN="$2" INSTALL_K3S_VERSION=v1.35.9+k3s1 TN_K3S_UPGRADE=true tn_inst_prepare server
+        grep -q "fail-cgroupv1=false" "$TN_K3S_CONFIG_DIR/config.yaml.d/99-teknoir-cgroupv1.yaml" || { echo "no drop-in"; exit 1; }
+        # config.yaml: keys are added once, the owner'"'"'s file is kept
+        printf "kubelet-arg: max-pods=77\nnode-name: mine" > "$TN_K3S_CONFIG_DIR/config.yaml"
+        tn_inst_config_ensure "$TN_K3S_CONFIG_DIR/config.yaml" node-name "node-name: x"
+        tn_inst_config_ensure "$TN_K3S_CONFIG_DIR/config.yaml" disable "disable:
+  - traefik"
+        tn_inst_config_ensure "$TN_K3S_CONFIG_DIR/config.yaml" disable "disable:
+  - traefik"
+        [ "$(cat "$TN_K3S_CONFIG_DIR/config.yaml")" = "kubelet-arg: max-pods=77
+node-name: mine
+disable:
+  - traefik" ] || { echo "config.yaml:"; cat "$TN_K3S_CONFIG_DIR/config.yaml"; exit 1; }
+      ' sh "$IL" "$w/k3s" 2>&1 ); then
+    echo "RESULT install-lib FAIL $(echo "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)"; rm -rf "$w"; return
+  fi
+  echo "RESULT install-lib PASS versions, keep/refuse, cgroup v1 drop-in, config.yaml"
+  rm -rf "$w"
+}
+install_lib_check

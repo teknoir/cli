@@ -1,11 +1,17 @@
 {{- /* The k3s release of the installer. Used by the server and the agent script with the same data. */ -}}
 {{if .K3SPin}}# k3s is pinned to {{.K3SPin}} (tnctl bootstrap --k3s-version). Override when running the script:
 #   INSTALL_K3S_VERSION=v1.xx.y+k3sN sh bootstrap_*.sh      (an agent must run the version of its server)
-# k3s cannot be downgraded: do not pin below what is installed on the device.
+# This is the release for a NEW device: a re-run on a device with k3s installed keeps the installed version
+# (TN_K3S_UPGRADE=true, tnctl bootstrap --k3s-upgrade, replaces it; never a downgrade).
 export INSTALL_K3S_VERSION="${INSTALL_K3S_VERSION:-{{.K3SPin}}}"
 {{else if .K3SChannel}}# k3s follows the {{.K3SChannel}} channel (tnctl bootstrap --k3s-version {{.K3SChannel}}). Pin a release with:
 #   INSTALL_K3S_VERSION=v1.xx.y+k3sN sh bootstrap_*.sh
 export INSTALL_K3S_CHANNEL="${INSTALL_K3S_CHANNEL:-{{.K3SChannel}}}"
 {{else}}# k3s follows the installer's default channel, stable (tnctl bootstrap --k3s-version stable). Pin a release with:
 #   INSTALL_K3S_VERSION=v1.xx.y+k3sN sh bootstrap_*.sh
+{{end -}}
+{{if .K3SUpgrade}}# tnctl bootstrap --k3s-upgrade: the release above replaces an installed k3s (never a downgrade). TN_K3S_UPGRADE=false overrides.
+export TN_K3S_UPGRADE="${TN_K3S_UPGRADE:-true}"
+{{end}}{{if .K3SForce}}# tnctl bootstrap --force: an upgrade over several minor versions is allowed. TN_K3S_FORCE=false overrides.
+export TN_K3S_FORCE="${TN_K3S_FORCE:-true}"
 {{end -}}

@@ -14,7 +14,7 @@ usage() {
   cat <<'USAGE'
 usage: run.sh [options]
 
-  --suite S[,S...]        control | fresh | legacy-with-cert | agent | remediation | rerun | host | openssl-compat | all
+  --suite S[,S...]        control | fresh | legacy-with-cert | agent | remediation | rerun | host | install | openssl-compat | all
                           (default: control)
   --versions "V ..."      k3s versions (v1.34.11, 1.36.5, v1.36.5+k3s1, stable, latest, v1.33 = newest of a channel);
                           space or comma separated; default depends on the suite
@@ -36,7 +36,7 @@ usage: run.sh [options]
   --list                  print the cases and exit
   -h, --help
 
-Hooks (environment): TN_K3S_CA_LIB, TN_REMEDIATE_PREPARE, TN_REMEDIATE_FINALIZE, TN_REMEDIATE_CHECK (see README).
+Hooks (environment): TN_K3S_CA_LIB, TN_K3S_INSTALL_LIB, TN_REMEDIATE_PREPARE, TN_REMEDIATE_FINALIZE, TN_REMEDIATE_CHECK (see README).
 USAGE
 }
 
@@ -75,7 +75,7 @@ done
 . "$HERE/lib/cases.sh"
 . "$HERE/lib/suites.sh"
 
-[ "$SUITES" = all ] && SUITES="control fresh legacy-with-cert agent remediation rerun host openssl-compat"
+[ "$SUITES" = all ] && SUITES="control fresh legacy-with-cert agent remediation rerun host install openssl-compat"
 case $EXPECT_OVERRIDE in ""|READY|FAIL) ;; *) die "--expect must be READY or FAIL" ;; esac
 export EXPECT_OVERRIDE
 if [ -n "$DEVICE_CERT$DEVICE_KEY" ]; then
@@ -148,6 +148,7 @@ needed_gens() {
       agent) g=$(gens_for "bs-o111 go-sha1") ;;
       remediation) g=$(gens_for "bs-o111 go-sha1 expired") ;;
       openssl-compat) g=$(gens_for "$GEN_LEGACY $GEN_FIXED") ;;
+      install) g=$(gens_for "bs-o111") ;;
       *) die "unknown suite '$s'" ;;
     esac
     list="$list $g"
@@ -193,6 +194,7 @@ for s in $SUITES; do
     remediation) suite_remediation ;;
     rerun) suite_rerun ;;
     host) suite_host ;;
+    install) suite_install ;;
     openssl-compat) suite_openssl_compat ;;
   esac
 done

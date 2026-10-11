@@ -40,6 +40,8 @@
 #                  existing CAs when not set)
 #   K3S_BIN        k3s command used by `rotate-ca` (k3s)
 #   TN_K3S_RESTART_CMD    restarts k3s after a remediation (systemctl restart k3s)
+#   TN_K3S_SERVICE_TIMEOUT  seconds that a stop, start or restart of k3s may take (120); then it is
+#                  reported as failed instead of hanging (the k3s unit waits forever for a k3s that cannot start)
 #   TN_K3S_STOP_CMD, TN_K3S_START_CMD   stop/start k3s around the replacement of server/tls when the
 #                  PKI is regenerated (systemctl stop|start k3s). Without TN_K3S_STOP_CMD k3s is only
 #                  stopped if the systemd unit is active, and then started again
@@ -524,17 +526,51 @@ tn_ca_backup_tls() {
   tn_ca_info "Previous CA files saved to $_tn_bk"
 }
 
-# k3s around the replacement of server/tls. Stopped only if the unit is active (a bootstrap of a
-# new device has no k3s yet), and started again only if we stopped it.
+# tn_ca_run_bounded SECONDS CMD...: run CMD, give up (return 124) after SECONDS. The k3s unit has
+# TimeoutStartSec=0, so `systemctl start|restart` of a k3s that cannot start (the very case this tool
+# repairs) never returns. Without `timeout` (very old coreutils) the command runs unbounded.
+tn_ca_run_bounded() {
+  _tn_rb=$1; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$_tn_rb" "$@"; else "$@"; fi
+}
+tn_ca_svc_timeout() { echo "${TN_K3S_SERVICE_TIMEOUT:-120}"; }
+
+# tn_ca_unit_state: the ActiveState of the k3s unit (active, activating, ...), or nothing
+tn_ca_unit_state() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl is-active "$(tn_ca_unit_name)" 2>/dev/null || true
+}
+
+# k3s around the replacement of server/tls. Stopped if the unit runs OR is starting (activating: a
+# k3s that hangs in its first start, or restarts in a loop, is exactly the device that is repaired
+# here, and it would rewrite files under us), never when there is no unit (a bootstrap of a new
+# device has no k3s yet), and started again only if we stopped it.
 tn_ca_k3s_active() {
   if [ -n "${TN_K3S_STOP_CMD:-}" ]; then return 0; fi
-  command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$(tn_ca_unit_name)" 2>/dev/null
+  case $(tn_ca_unit_state) in active|activating|reloading) return 0 ;; esac
+  return 1
 }
+# tn_ca_k3s_ready: the unit is up and READY (Type=notify: k3s said so). Only that state.
+tn_ca_k3s_ready() { [ "$(tn_ca_unit_state)" = active ]; }
 tn_ca_k3s_stop() {
-  if [ -n "${TN_K3S_STOP_CMD:-}" ]; then sh -c "$TN_K3S_STOP_CMD"; else systemctl stop "$(tn_ca_unit_name)"; fi
+  if [ -n "${TN_K3S_STOP_CMD:-}" ]; then tn_ca_run_bounded "$(tn_ca_svc_timeout)" sh -c "$TN_K3S_STOP_CMD"
+  else tn_ca_run_bounded "$(tn_ca_svc_timeout)" systemctl stop "$(tn_ca_unit_name)"; fi
 }
 tn_ca_k3s_start() {
-  if [ -n "${TN_K3S_START_CMD:-}" ]; then sh -c "$TN_K3S_START_CMD"; else systemctl start "$(tn_ca_unit_name)"; fi
+  if [ -n "${TN_K3S_START_CMD:-}" ]; then tn_ca_run_bounded "$(tn_ca_svc_timeout)" sh -c "$TN_K3S_START_CMD"
+  else tn_ca_run_bounded "$(tn_ca_svc_timeout)" systemctl start "$(tn_ca_unit_name)"; fi
+}
+
+# tn_ca_guard_unknown_datadir DATA_DIR: 0 if it is fine to go on. A data dir that k3s never
+# initialised (no server/token) while the k3s unit is up and READY means that k3s runs from a
+# DIFFERENT data dir than the one we resolved (a --config file, a drop-in we do not read ...):
+# generating a CA here would not touch the CA that k3s uses, and the installer that follows would
+# upgrade a k3s whose CA was never checked.
+tn_ca_guard_unknown_datadir() {
+  tn_ca_initialised "$1" && return 0
+  tn_ca_k3s_ready || return 0
+  tn_ca_warn "the k3s unit $(tn_ca_unit_name) is active and ready, but the data dir $1 (taken from ${TN_CA_DATADIR_SRC:-the caller}) was never initialised by k3s (no server/token): k3s runs from another data dir, so the CA that k3s uses was not looked at. Find it ('systemctl cat $(tn_ca_unit_name)', ${TN_K3S_CONFIG_DIR:-/etc/rancher/${PRODUCT:-k3s}}/config.yaml*, k3s server --config) and run again with DATA_DIR=/that/dir (or --data-dir). Nothing was changed"
+  return 1
 }
 
 # tn_ca_install_pki DATA_DIR SUFFIX: build a complete new PKI from the device certificate and
@@ -667,7 +703,10 @@ tn_k3s_ca_setup() {
     esac
   fi
 
+  # not initialised here. If k3s is nevertheless up and ready, it runs from another data dir.
+  tn_ca_guard_unknown_datadir "$DATA_DIR" || tn_ca_fatal "cannot tell which data dir k3s uses (see above)"
   if tn_ca_pki_current "$DATA_DIR"; then
+    tn_ca_clean_stages "$DATA_DIR"
     tn_ca_info "A valid CA already exists in ${DATA_DIR}/server/tls (k3s has not started yet): keeping it"
     return 0
   fi
@@ -687,12 +726,15 @@ tn_ca_newest_stage() { # DATA_DIR -> prints the newest staging dir, or nothing
   find "$1/server" -maxdepth 1 -type d -name '.tn-ca-rotate-*' 2>/dev/null | LC_ALL=C sort | tail -n 1
 }
 
-# tn_ca_clean_stages DATA_DIR: remove every staging dir. Only when the CA is fine: a leftover of a
-# finished rotation holds copies of the CA keys.
+# tn_ca_clean_stages DATA_DIR: remove every staging dir of a rotation (.tn-ca-rotate-*) and every work
+# dir of a regeneration that was interrupted (.tn-tls-old.* and .tn-tls-new.*: the previous server/tls
+# that was moved aside, and the new one before it was moved in). Only when the CA is fine: they all
+# hold copies of the CA keys, and a crashed run leaves them behind.
 tn_ca_clean_stages() {
-  find "$1/server" -maxdepth 1 -type d -name '.tn-ca-rotate-*' 2>/dev/null | while read -r _tn_cs; do
-    rm -rf "$_tn_cs" && tn_ca_info "Removed the leftover staging dir $_tn_cs (it held copies of the CA keys)"
-  done
+  find "$1/server" -maxdepth 1 -type d \( -name '.tn-ca-rotate-*' -o -name '.tn-tls-old.*' -o -name '.tn-tls-new.*' \) 2>/dev/null |
+    while read -r _tn_cs; do
+      rm -rf "$_tn_cs" && tn_ca_info "Removed the leftover staging dir $_tn_cs (it held copies of the CA keys)"
+    done
   return 0
 }
 
@@ -734,6 +776,7 @@ tn_ca_prepare() {
     foreign|no-server-data) tn_ca_warn "$TN_CA_MSG"; return 4 ;;
     needs-regeneration)
       tn_ca_warn "$TN_CA_MSG"
+      tn_ca_guard_unknown_datadir "$_tn_dd" || return 4
       tn_ca_info "Regenerating the PKI in $_tn_dd/server/tls (k3s never finished a start on this device)"
       tn_ca_install_pki "$_tn_dd" "$(tn_ca_suffix "$_tn_dd")" || return 1
       tn_ca_info "Done. k3s starts from the new CA. Nothing to rotate."
@@ -762,24 +805,44 @@ tn_ca_prepare() {
   # a copy of everything k3s keeps there (keys, service.key, bundles)
   ( cd "$_tn_tls" && tar -cf - . ) | ( cd "$_tn_s/server/tls" && tar -xf - ) || { rm -rf "$_tn_s"; return 1; }
   rm -rf "$_tn_s/server/tls/.ca"
-  # every bundle: the old root replaced by the new one, all other certificates kept
+  # every bundle: the old root replaced by the new one, all other certificates kept. This function
+  # runs in an `||` context, where `set -e` does not exist: EVERY write is checked, and each rebuilt
+  # bundle is verified before anything is handed to rotate-ca.
+  _tn_newfp=$(tn_ca_fp "$_tn_s/newroot.pem") || { rm -rf "$_tn_s"; return 1; }
+  _tn_rbok=1
   for _tn_b in $TN_CA_BUNDLES; do
     [ -f "$_tn_tls/$_tn_b" ] || continue
-    rm -rf "$_tn_s/b"; mkdir -p "$_tn_s/b"
-    _tn_n=$(tn_ca_split "$_tn_tls/$_tn_b" "$_tn_s/b")
-    : > "$_tn_s/server/tls/$_tn_b"
+    rm -rf "$_tn_s/b" "$_tn_s/v"
+    mkdir -p "$_tn_s/b" "$_tn_s/v" || { _tn_rbok=0; break; }
+    _tn_n=$(tn_ca_split "$_tn_tls/$_tn_b" "$_tn_s/b") || { _tn_rbok=0; break; }
+    if [ "${_tn_n:-0}" -lt 1 ]; then tn_ca_warn "$_tn_b holds no certificate"; _tn_rbok=0; break; fi
+    : > "$_tn_s/server/tls/$_tn_b" || { _tn_rbok=0; break; }
     _tn_i=0
     while [ "$_tn_i" -lt "$_tn_n" ]; do
       if [ "$(tn_ca_fp "$_tn_s/b/c$_tn_i.pem")" = "$_tn_oldfp" ]; then
-        cat "$_tn_s/newroot.pem" >> "$_tn_s/server/tls/$_tn_b"
+        cat "$_tn_s/newroot.pem" >> "$_tn_s/server/tls/$_tn_b" || { _tn_rbok=0; break; }
       else
-        cat "$_tn_s/b/c$_tn_i.pem" >> "$_tn_s/server/tls/$_tn_b"
+        cat "$_tn_s/b/c$_tn_i.pem" >> "$_tn_s/server/tls/$_tn_b" || { _tn_rbok=0; break; }
       fi
       _tn_i=$((_tn_i + 1))
     done
+    [ "$_tn_rbok" = 1 ] || break
+    # the rebuilt bundle: as many certificates as before, and the new root last
+    _tn_m=$(tn_ca_split "$_tn_s/server/tls/$_tn_b" "$_tn_s/v") || _tn_m=
+    if [ "${_tn_m:-x}" != "$_tn_n" ]; then
+      tn_ca_warn "the rebuilt $_tn_b holds ${_tn_m:-no} certificates, the original $_tn_n"; _tn_rbok=0; break
+    fi
+    if [ "$(tn_ca_fp "$_tn_s/v/c$((_tn_n - 1)).pem")" != "$_tn_newfp" ]; then
+      tn_ca_warn "the last certificate of the rebuilt $_tn_b is not the new root (unexpected layout of the original bundle)"
+      _tn_rbok=0; break
+    fi
   done
-  rm -rf "$_tn_s/b"
-  cp "$_tn_s/newroot.pem" "$_tn_s/server/tls/root-ca.pem"
+  if [ "$_tn_rbok" != 1 ]; then
+    tn_ca_warn "cannot rebuild the CA bundles (disk full? unexpected layout?): nothing was changed"
+    rm -rf "$_tn_s"; return 1
+  fi
+  rm -rf "$_tn_s/b" "$_tn_s/v"
+  cp "$_tn_s/newroot.pem" "$_tn_s/server/tls/root-ca.pem" || { rm -rf "$_tn_s"; return 1; }
 
   # every leaf CA must verify through the new root
   for _tn_b in server-ca.crt client-ca.crt request-header-ca.crt etcd/peer-ca.crt etcd/server-ca.crt; do
@@ -862,16 +925,26 @@ tn_ca_finalize() {
   tn_ca_info "CA files updated in $_tn_dd/server/tls"
 }
 
+# tn_ca_restart: restart k3s, but not forever (TN_K3S_SERVICE_TIMEOUT, 120 s): the unit waits for a
+# k3s that may never become ready. A timeout is a failure (return 124): the caller reports that the
+# CA WAS changed and k3s did not come back in time.
 tn_ca_restart() {
+  _tn_rt=$(tn_ca_svc_timeout)
+  _tn_rrc=0
   if [ -n "${TN_K3S_RESTART_CMD:-}" ]; then
     tn_ca_info "Restarting k3s: $TN_K3S_RESTART_CMD"
-    sh -c "$TN_K3S_RESTART_CMD"
+    tn_ca_run_bounded "$_tn_rt" sh -c "$TN_K3S_RESTART_CMD" || _tn_rrc=$?
   elif command -v systemctl >/dev/null 2>&1 && systemctl cat "$(tn_ca_unit_name)" >/dev/null 2>&1; then
     tn_ca_info "Restarting k3s"
-    systemctl restart "$(tn_ca_unit_name)"
+    tn_ca_run_bounded "$_tn_rt" systemctl restart "$(tn_ca_unit_name)" || _tn_rrc=$?
   else
     tn_ca_warn "restart k3s yourself now (no systemd unit found and TN_K3S_RESTART_CMD is not set)"
+    return 0
   fi
+  if [ "$_tn_rrc" -eq 124 ]; then
+    tn_ca_warn "the restart of k3s did not finish within ${_tn_rt}s (TN_K3S_SERVICE_TIMEOUT): it is still starting, or it cannot start"
+  fi
+  return "$_tn_rrc"
 }
 
 # After this point the CA has been changed (rotated in the datastore, or the PKI regenerated):
@@ -950,7 +1023,7 @@ remediate   Re-issue the root with keyCertSign (same key and subject) and put it
             the running server), finalize (copy the files), all (those three plus a k3s restart).
             A device whose k3s never finished its first start gets its PKI regenerated instead.
 Run as root on the device. Environment: K3S_BIN, TN_K3S_RESTART_CMD, TN_K3S_STOP_CMD,
-TN_K3S_START_CMD, CONFIG_PATH, DATA_DIR.
+TN_K3S_START_CMD, TN_K3S_SERVICE_TIMEOUT (seconds for a stop/start/restart of k3s, 120), CONFIG_PATH, DATA_DIR.
 EOF
 }
 
