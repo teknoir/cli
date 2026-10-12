@@ -35,7 +35,9 @@ jobs:
         run: |
           shellcheck -s sh -S warning pkg/templates/scripts/tn-k3s-ca.sh
       - name: go test
-        run: go test ./pkg/templates/... ./test/k3s-ca/...
+        run: |
+          go test ./test/k3s-ca/... ./cmd/...
+          (cd pkg/templates && go test ./...)
 
   docker-matrix:
     if: github.event_name == 'workflow_dispatch'
