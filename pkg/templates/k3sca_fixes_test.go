@@ -395,7 +395,7 @@ func (p *pki) stagedRotateCmd() string {
 
 func TestRotateCmdForcesWhenTheOldRootCannotVouch(t *testing.T) {
 	noBC := filepath.Join(t.TempDir(), "no-ext.cnf")
-	write(t, noBC, "[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=teknoir.ai\n")
+	write(t, noBC, "[req]\ndistinguished_name=dn\nprompt=no\nx509_extensions=ext\n[dn]\nCN=teknoir.ai\n[ext]\nsubjectKeyIdentifier=hash\n")
 	future := time.Now().Add(48 * time.Hour).UTC().Format("20060102150405Z")
 	for _, tc := range []struct {
 		name string

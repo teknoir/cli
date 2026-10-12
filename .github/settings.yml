@@ -38,17 +38,28 @@ teams:
   - name: mlops # Replace with the relevant team name
     permission: push # Set appropriate permission level
 
+# Branch protection: only production is review-protected (teknoir-online, prod IaC).
+# Staging/dev branches have no required reviews so Claude Code can roll out continuously;
+# force pushes and deletions stay disabled. See ~/git/ai/plans/github-branch-protection.md
 branches:
-  - name: main
-    protection:
-      required_pull_request_reviews:
-        required_approving_review_count: 1
-        dismiss_stale_reviews: true
-        require_code_owner_reviews: false
-        dismissal_restrictions:
-          users: []
-          teams: []
-      required_status_checks: null
-      enforce_admins: false
-      required_linear_history: false
-      restrictions: null
+- name: main
+  protection:
+    required_pull_request_reviews: null
+    required_status_checks: null
+    enforce_admins: false
+    required_linear_history: false
+    restrictions: null
+    allow_force_pushes: false
+    allow_deletions: false
+- name: teknoir-online
+  protection:
+    required_pull_request_reviews:
+      required_approving_review_count: 1
+      dismiss_stale_reviews: true
+      require_code_owner_reviews: false
+    required_status_checks: null
+    enforce_admins: false
+    required_linear_history: false
+    restrictions: null
+    allow_force_pushes: false
+    allow_deletions: false
