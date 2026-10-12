@@ -3,6 +3,7 @@ package templates
 import (
 	"bytes"
 	"crypto"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -133,14 +134,78 @@ func newPKI(t *testing.T) *pki {
 func (p *pki) legacyCert() { p.legacyCertArgs() }
 
 // legacyCertArgs adds openssl req arguments, e.g. -addext keyUsage=... for the device-controller kind.
+//
+// -not_before/-not_after need OpenSSL >= 3.4, so they are stripped and applied by re-signing with Go.
 func (p *pki) legacyCertArgs(extra ...string) {
 	p.t.Helper()
+	var nb, na string
+	var kept []string
+	for i := 0; i < len(extra); i++ {
+		switch {
+		case extra[i] == "-not_before" && i+1 < len(extra):
+			nb = extra[i+1]
+			i++
+		case extra[i] == "-not_after" && i+1 < len(extra):
+			na = extra[i+1]
+			i++
+		default:
+			kept = append(kept, extra[i])
+		}
+	}
+	extra = kept
 	args := []string{"req", "-x509", "-nodes", "-newkey", "rsa:2048",
 		"-keyout", filepath.Join(p.cfg, "rsa_private.pem"), "-out", filepath.Join(p.cfg, "rsa_public.pem"),
 		"-days", "365", "-subj", "/C=US/ST=Texas/L=SHouston/O=Teknoir LLC/CN=teknoir.ai", "-sha256", "-batch"}
 	cmd := exec.Command("openssl", append(args, extra...)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		p.t.Fatalf("openssl req: %v\n%s", err, out)
+	}
+	if nb != "" || na != "" {
+		p.resignWithDates(nb, na)
+	}
+}
+
+// resignWithDates re-issues rsa_public.pem (self-signed) with another validity window, same key and subject.
+func (p *pki) resignWithDates(nb, na string) {
+	p.t.Helper()
+	certPath := filepath.Join(p.cfg, "rsa_public.pem")
+	c := readCerts(p.t, certPath)[0]
+	kb, err := os.ReadFile(filepath.Join(p.cfg, "rsa_private.pem"))
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	blk, _ := pem.Decode(kb)
+	var key crypto.Signer
+	if k, err := x509.ParsePKCS8PrivateKey(blk.Bytes); err == nil {
+		key = k.(crypto.Signer)
+	} else if k, err := x509.ParsePKCS1PrivateKey(blk.Bytes); err == nil {
+		key = k
+	} else {
+		p.t.Fatal("cannot parse the test private key")
+	}
+	parse := func(v string, def time.Time) time.Time {
+		if v == "" {
+			return def
+		}
+		tm, err := time.Parse("20060102150405Z", v)
+		if err != nil {
+			p.t.Fatal(err)
+		}
+		return tm
+	}
+	tpl := &x509.Certificate{
+		SerialNumber: c.SerialNumber, Subject: c.Subject,
+		NotBefore: parse(nb, c.NotBefore), NotAfter: parse(na, c.NotAfter),
+		KeyUsage: c.KeyUsage, BasicConstraintsValid: c.BasicConstraintsValid, IsCA: c.IsCA,
+		MaxPathLen: c.MaxPathLen, MaxPathLenZero: c.MaxPathLenZero,
+		SubjectKeyId: c.SubjectKeyId,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, key.Public(), key)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		p.t.Fatal(err)
 	}
 }
 
