@@ -1,6 +1,6 @@
 package main
 
-import "teknoir/cli/cmd"
+import "github.com/teknoir/cli/cmd"
 
 func main() {
 	cmd.Execute()

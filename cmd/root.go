@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/config"
 )
 
 var (

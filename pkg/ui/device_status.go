@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/pterm/pterm"
-	"teknoir/cli/pkg/api"
+	"github.com/teknoir/cli/pkg/api"
 )
 
 func formatPercent(val float64) string {

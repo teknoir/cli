@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
-	"teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/config"
 )
 
 var (

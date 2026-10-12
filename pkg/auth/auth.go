@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
-	"teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/config"
 )
 
 // GetValidToken returns a valid access token, refreshing it if necessary.

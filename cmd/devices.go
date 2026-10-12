@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"teknoir/cli/pkg/api"
-	"teknoir/cli/pkg/config"
-	"teknoir/cli/pkg/ui"
+	"github.com/teknoir/cli/pkg/api"
+	"github.com/teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/ui"
 )
 
 var devicesCmd = &cobra.Command{

@@ -6,8 +6,8 @@ import (
 	"os"
 	"os/exec"
 
-	"teknoir/cli/pkg/api"
-	"teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/api"
+	"github.com/teknoir/cli/pkg/config"
 
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"

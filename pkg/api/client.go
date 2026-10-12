@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/config"
 )
 
 // Request performs an authenticated API request and handles non-JSON responses gracefully.
