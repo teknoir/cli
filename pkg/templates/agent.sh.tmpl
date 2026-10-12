@@ -7,8 +7,22 @@
 #   K3S_URL=https://<IP or mDNS name>:6443 (default: generated at master node creation time)
 #   K3S_TOKEN="32 char string" (default: generated at master node creation time)
 #   CREATE_USER=false (default: ask, create a user for the device without asking)
+#   INSTALL_K3S_VERSION=v1.xx.y+k3sN (default: the release of the SERVER, read from https://<K3S_URL>/static/teknoir/k3s-version: an
+#                          agent never installs a k3s newer than its server. A release you ask for (here, or
+#                          tnctl bootstrap --k3s-version) is installed if it is not newer than the server's, and
+#                          refused if it is. If the server cannot be reached the script stops, unless the
+#                          release was asked for or TN_K3S_FORCE=true)
+#   TN_K3S_UPGRADE=true (default: false; a re-run KEEPS the installed k3s version. true lets the pin replace
+#                          it: never a downgrade, never more than one minor version. Upgrade the server first)
+#   TN_K3S_FORCE=true (default: false; allows an upgrade over more than one minor version, an agent that is
+#                          newer than its server, and an install when the release of the server is unknown)
+#   TN_K3S_CGROUPV1=true|false (default: detected; on cgroup v1 with k3s >= v1.31 the kubelet gets
+#                          fail-cgroupv1=false, see /etc/rancher/k3s/config.yaml.d/99-teknoir-cgroupv1.yaml)
 
 {{template "variables.sh.tmpl" .}}
+
+# The k3s release policy (a re-run keeps the installed k3s) and the cgroup v1 kubelet flag.
+{{template "tn-k3s-install.sh" .}}
 
 {{template "keys.sh.tmpl" .}}
 
@@ -51,8 +65,16 @@ if [ "${USE_DOCKER}" = true ]; then
     export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
 fi
 
+{{template "k3s_version.sh.tmpl" .}}
+# A new agent gets the k3s release of its server; a re-run keeps the installed k3s (unless
+# TN_K3S_UPGRADE=true) and sets fail-cgroupv1=false on cgroup v1 hosts, which Kubernetes >= 1.35 would refuse
+# (the flag goes in from k3s v1.31, where the kubelet learned it). INSTALL_K3S_EXEC is final above, before
+# tn_inst_prepare reads it.
+tn_inst_prepare agent
 export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
+# The kubelet flag that had to wait for the installer (an installed k3s older than v1.31 that was upgraded)
+tn_inst_finish
 
 info "K3s agent node joined successfully!"
 

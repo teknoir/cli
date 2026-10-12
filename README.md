@@ -88,6 +88,22 @@ Securely connect to your edge devices via Teknoir's proxy infrastructure.
   tnctl socks-proxy [device] 1080
   ```
 
+### 4. Bootstrap a device
+
+```bash
+tnctl bootstrap my-device                      # writes bootstrap_{agent,server,docker_server}_my-device.sh
+tnctl bootstrap my-device --k3s-version v1.34.11+k3s1   # install another k3s release
+```
+
+The scripts install a **pinned k3s release** (`v1.36.5+k3s1` by default, the `stable` channel when this
+was written and the release the CA tests run against) instead of whatever the `stable` channel happens
+to be on the day the script runs. `--k3s-version` takes an exact release, or `stable` / `latest` for the
+installer's own channels; at run time `INSTALL_K3S_VERSION=... sh bootstrap_server_my-device.sh` wins.
+An agent must run the version of its server: generate both scripts with the same `--k3s-version`.
+k3s cannot be downgraded, so do not pin below what a device already runs. The server script also
+repairs the k3s CA of devices that were bootstrapped with an older script, see
+[`docs/commands/bootstrap.md`](docs/commands/bootstrap.md) and [`docs/troubleshooting.md`](docs/troubleshooting.md).
+
 ## Global Flags
 
 These flags are available to all subcommands:
