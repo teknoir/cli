@@ -26,8 +26,11 @@
 #                             downgrade: the datastore has been migrated), and so is a jump of more
 #                             than one minor version (v1.34 -> v1.36) unless TN_K3S_FORCE=true
 #                             (tnctl bootstrap --force): Kubernetes supports one minor at a time.
-#                             A channel (stable, latest) cannot be compared before the installer
-#                             resolves it: that is only a warning, pin an exact release to get the checks.
+#                             A channel is checked too: a minor (v1.35) by its major.minor against the
+#                             installed one (lower or other major: refused; more than +1: needs force);
+#                             stable/latest/testing is resolved at update.k3s.io like the installer does
+#                             and then checked as an exact release. A channel that cannot be resolved
+#                             is refused unless TN_K3S_FORCE=true (then it goes on unchecked).
 #
 # An AGENT follows its server. A kubelet must never be newer than the apiserver it joins, so a new
 # agent (and an agent that TN_K3S_UPGRADE=true replaces) does not install the pin of the script: it
@@ -325,11 +328,32 @@ tn_inst_agent_target() {
   tn_inst_fatal "cannot read the k3s release of the server at ${K3S_URL:-(K3S_URL is not set)} (${K3S_URL:-https://<server>:6443}/static/teknoir/k3s-version): an agent must not run a newer k3s than its server, so this script does not guess. $_tn_why Or say which release the server runs: INSTALL_K3S_VERSION=v1.xx.y+k3sN (tnctl bootstrap --k3s-version), or set TN_K3S_FORCE=true to install ${_tn_pin:-the release the installer picks} anyway. $(tn_inst_state_note)"
 }
 
+# tn_inst_normalize_pin: the k3s installer takes INSTALL_K3S_VERSION as an EXACT release (it downloads that
+# tag, so "stable" would be a 404) and INSTALL_K3S_CHANNEL as a channel. A channel name given as the version
+# (stable, latest, testing, or a minor such as v1.34) is moved to INSTALL_K3S_CHANNEL and the version is
+# unset, so that every later check sees what the installer will see. An exact release is not touched.
+tn_inst_normalize_pin() {
+  [ -n "${INSTALL_K3S_VERSION:-}" ] || return 0
+  case $INSTALL_K3S_VERSION in
+    stable|latest|testing) ;;
+    v[0-9]*) printf '%s\n' "$INSTALL_K3S_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+$' || return 0 ;;
+    *) return 0 ;;
+  esac
+  if [ -n "${INSTALL_K3S_CHANNEL:-}" ] && [ "$INSTALL_K3S_CHANNEL" != "$INSTALL_K3S_VERSION" ]; then
+    tn_inst_fatal "conflicting k3s requests: INSTALL_K3S_VERSION=$INSTALL_K3S_VERSION is a channel and INSTALL_K3S_CHANNEL=$INSTALL_K3S_CHANNEL is another. Set only one of them. $(tn_inst_state_note)"
+  fi
+  INSTALL_K3S_CHANNEL=$INSTALL_K3S_VERSION
+  export INSTALL_K3S_CHANNEL
+  unset INSTALL_K3S_VERSION
+  tn_inst_info "$INSTALL_K3S_CHANNEL is a k3s channel, not a release: the installer gets INSTALL_K3S_CHANNEL=$INSTALL_K3S_CHANNEL"
+}
+
 # tn_inst_plan: applies the policy at the top. Reads INSTALL_K3S_VERSION / INSTALL_K3S_CHANNEL,
 # sets and exports them for the installer. Sets TN_INST_INSTALLED, TN_INST_ACTION
 # (install|same|keep|upgrade) and TN_INST_EFFECTIVE (the exact release that will run, or nothing
 # when only a channel is known). Exits through tn_inst_fatal when it refuses.
 tn_inst_plan() {
+  tn_inst_normalize_pin
   tn_inst_installed_version
   if [ -z "$TN_INST_INSTALLED" ] && tn_inst_k3s_present; then
     if [ "${TN_K3S_FORCE:-}" = true ]; then
@@ -373,10 +397,44 @@ tn_inst_plan() {
   fi
 
   # TN_K3S_UPGRADE=true
+  if [ -z "$_tn_t" ]; then
+    # a channel: the installer picks the release, so find out which, or compare the minor
+    _tn_ch=${INSTALL_K3S_CHANNEL:-stable}
+    if printf '%s\n' "$_tn_ch" | grep -Eq '^v[0-9]+\.[0-9]+$'; then
+      tn_inst_parse "${_tn_ch}.0"; _tn_cmaj=$TN_INST_MAJ; _tn_cmin=$TN_INST_MIN
+      tn_inst_parse "$TN_INST_INSTALLED"; _tn_imaj=$TN_INST_MAJ; _tn_imin=$TN_INST_MIN
+      if [ "$_tn_cmaj" != "$_tn_imaj" ] || [ "$_tn_cmin" -lt "$_tn_imin" ]; then
+        tn_inst_fatal "refusing to downgrade k3s from $TN_INST_INSTALLED to the channel $_tn_ch (v$_tn_cmaj.$_tn_cmin is not v$_tn_imaj.$_tn_imin or a later minor of the same major): k3s cannot go back (the datastore has been migrated by the newer release). $(tn_inst_state_note). Use a channel of v$_tn_imaj.$_tn_imin or $_tn_imaj.$((_tn_imin + 1)), or restore the device from a backup"
+      fi
+      if [ $((_tn_cmin - _tn_imin)) -gt 1 ]; then
+        if [ "${TN_K3S_FORCE:-}" = true ]; then
+          tn_inst_warn "upgrading k3s from $TN_INST_INSTALLED to the channel $_tn_ch skips minor versions (TN_K3S_FORCE=true). Kubernetes supports one minor version at a time: this can leave the cluster in a state that does not start. Have a backup of the datastore"
+        else
+          tn_inst_fatal "refusing to upgrade k3s from $TN_INST_INSTALLED to the channel $_tn_ch: that is more than one minor version (v$_tn_imaj.$_tn_imin -> v$_tn_cmaj.$_tn_cmin). Upgrade one minor at a time (channel v$_tn_imaj.$((_tn_imin + 1)) first), or set TN_K3S_FORCE=true (tnctl bootstrap --force) if you know what you are doing. $(tn_inst_state_note)"
+        fi
+      fi
+      TN_INST_ACTION=upgrade
+      tn_inst_info "upgrading k3s from $TN_INST_INSTALLED to the latest release of the channel $_tn_ch (TN_K3S_UPGRADE=true). A server must be upgraded before its agents"
+      return 0
+    fi
+    # stable, latest, testing: resolve like the installer does (the last path segment of the redirect)
+    TN_INST_RESOLVED=$(curl -w '%{url_effective}' -L -s -S -o /dev/null "https://update.k3s.io/v1-release/channels/$_tn_ch" 2>/dev/null | sed 's|^.*/||; s|%2[Bb]|+|') || TN_INST_RESOLVED=
+    if tn_inst_parse "$TN_INST_RESOLVED" 2>/dev/null; then
+      _tn_t=$TN_INST_RESOLVED
+      tn_inst_info "the k3s channel $_tn_ch resolves to $_tn_t: it is pinned, so that the installer gets what was checked"
+      INSTALL_K3S_VERSION=$_tn_t
+      export INSTALL_K3S_VERSION
+      unset INSTALL_K3S_CHANNEL
+    elif [ "${TN_K3S_FORCE:-}" = true ]; then
+      TN_INST_ACTION=upgrade
+      tn_inst_warn "TN_K3S_UPGRADE=true with the channel $_tn_ch, which cannot be resolved from here (update.k3s.io): the k3s installer picks the release, so a downgrade or a jump over several minor versions cannot be checked. TN_K3S_FORCE=true: going on without those checks. Pin an exact release (INSTALL_K3S_VERSION=v1.xx.y+k3sN) to get them"
+      return 0
+    else
+      tn_inst_fatal "refusing to upgrade k3s from $TN_INST_INSTALLED to the channel $_tn_ch: the channel cannot be resolved to a release from here (update.k3s.io is not reachable), so a downgrade or a jump over several minor versions cannot be checked. Pin an exact release (INSTALL_K3S_VERSION=v1.xx.y+k3sN, tnctl bootstrap --k3s-version), or set TN_K3S_FORCE=true to go on without the checks. $(tn_inst_state_note)"
+    fi
+  fi
   if ! tn_inst_cmp "$_tn_t" "$TN_INST_INSTALLED"; then
-    TN_INST_ACTION=upgrade
-    tn_inst_warn "TN_K3S_UPGRADE=true with $_tn_want, which is not an exact release: the k3s installer picks the release, so a downgrade or a jump over several minor versions cannot be checked. Pin an exact release (INSTALL_K3S_VERSION=v1.xx.y+k3sN) to get those checks"
-    return 0
+    tn_inst_fatal "cannot compare the requested k3s release '$_tn_t' with the installed $TN_INST_INSTALLED. Pin an exact release (INSTALL_K3S_VERSION=v1.xx.y+k3sN). $(tn_inst_state_note)"
   fi
   TN_INST_EFFECTIVE=$_tn_t
   case $TN_INST_CMP in
@@ -429,7 +487,7 @@ tn_inst_cgroup_flag_in_text() {
 tn_inst_cgroup_configured_elsewhere() {
   _tn_cd=${TN_K3S_CONFIG_DIR:-/etc/rancher/k3s}
   TN_INST_CGROUP_WHERE=; TN_INST_CGROUP_PERSISTENT=0
-  for _tn_cf in "$_tn_cd/config.yaml" $(find "$_tn_cd/config.yaml.d" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null | LC_ALL=C sort); do
+  for _tn_cf in "$_tn_cd/config.yaml" $(find "$_tn_cd/config.yaml.d" -maxdepth 1 -type f \( -iname '*.yaml' -o -iname '*.yml' \) 2>/dev/null | LC_ALL=C sort); do
     [ -r "$_tn_cf" ] || continue
     [ "$_tn_cf" != "$_tn_cd/config.yaml.d/$TN_INST_CGROUP_FILE" ] || continue
     if tn_inst_cgroup_flag_in_text < "$_tn_cf"; then TN_INST_CGROUP_WHERE=$_tn_cf; TN_INST_CGROUP_PERSISTENT=1; return 0; fi

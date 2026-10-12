@@ -45,6 +45,10 @@ for a in "$@"; do url=$a; done
 if [ -n "$TN_TEST_SERVER_DOWN" ]; then exit 7; fi
 n=$(wc -l < '`+i.curlLog+`'); if [ "$n" -le "${TN_TEST_FAIL_N:-0}" ]; then exit 7; fi
 case "$url" in
+  https://update.k3s.io/v1-release/channels/*)
+    # TN_TEST_CHANNEL_RELEASE: where the channel redirects to (curl -w '%{url_effective}'); otherwise unreachable
+    if [ -n "$TN_TEST_CHANNEL_RELEASE" ]; then printf 'https://github.com/k3s-io/k3s/releases/tag/%s' "$TN_TEST_CHANNEL_RELEASE"; exit 0; fi
+    exit 6 ;;
   */static/teknoir/k3s-version)
     if [ -n "$TN_TEST_PUBLISHED" ]; then printf '%s\n' "$TN_TEST_PUBLISHED"; exit 0; fi
     exit 22 ;;
@@ -252,8 +256,29 @@ func TestReleasePolicy(t *testing.T) {
 			msgs: []string{"refusing to downgrade"}},
 		{name: "a lower patch is a downgrade", installed: "v1.36.6+k3s1", env: []string{"TN_K3S_UPGRADE=true"}, wantRC: 1, msgs: []string{"refusing to downgrade"}},
 		{name: "a lower k3s revision is a downgrade", installed: "v1.36.5+k3s2", env: []string{"TN_K3S_UPGRADE=true"}, wantRC: 1, msgs: []string{"refusing to downgrade"}},
-		{name: "upgrade to a channel cannot be checked", installed: "v1.34.11+k3s1", pin: "-", env: []string{"TN_K3S_UPGRADE=true"},
-			want: "version=unset channel=unset action=upgrade effective=", msgs: []string{"not an exact release", "cannot be checked"}},
+		{name: "upgrade to the default channel resolving to the pin", installed: "v1.35.9+k3s1", pin: "-", env: []string{"TN_K3S_UPGRADE=true", "TN_TEST_CHANNEL_RELEASE=" + pin},
+			want: "version=" + pin + " channel=unset action=upgrade effective=" + pin, msgs: []string{"resolves to " + pin}},
+		{name: "channel stable resolving two minors up is refused", installed: "v1.34.11+k3s1", pin: "-", env: []string{"TN_K3S_UPGRADE=true", "INSTALL_K3S_CHANNEL=stable", "TN_TEST_CHANNEL_RELEASE=v1.36.5%2Bk3s1"}, wantRC: 1,
+			msgs: []string{"more than one minor version", "TN_K3S_FORCE=true"}},
+		{name: "channel stable resolving two minors up, with force", installed: "v1.34.11+k3s1", pin: "-", env: []string{"TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_CHANNEL=stable", "TN_TEST_CHANNEL_RELEASE=v1.36.5%2Bk3s1"},
+			want: "version=" + pin + " channel=unset action=upgrade effective=" + pin, msgs: []string{"skips minor versions"}},
+		{name: "channel latest resolving below the installed release is refused, also with force", installed: "v1.37.1+k3s1", pin: "-", env: []string{"TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_CHANNEL=latest", "TN_TEST_CHANNEL_RELEASE=" + pin}, wantRC: 1,
+			msgs: []string{"refusing to downgrade"}},
+		{name: "unresolvable channel is refused", installed: "v1.34.11+k3s1", pin: "-", env: []string{"TN_K3S_UPGRADE=true", "INSTALL_K3S_CHANNEL=stable"}, wantRC: 1,
+			msgs: []string{"cannot be resolved", "TN_K3S_FORCE=true", "Nothing was changed"}},
+		{name: "unresolvable channel with force goes on unchecked", installed: "v1.34.11+k3s1", pin: "-", env: []string{"TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_CHANNEL=stable"},
+			want: "version=unset channel=stable action=upgrade effective=", msgs: []string{"cannot be resolved", "without those checks"}},
+		{name: "minor channel one lower is refused", installed: "v1.34.11+k3s1", pin: "v1.33", env: []string{"TN_K3S_UPGRADE=true"}, wantRC: 1, msgs: []string{"refusing to downgrade", "channel v1.33"}},
+		{name: "minor channel one lower is refused, also with force", installed: "v1.34.11+k3s1", pin: "v1.33", env: []string{"TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true"}, wantRC: 1, msgs: []string{"refusing to downgrade"}},
+		{name: "minor channel of another major is refused", installed: "v1.34.11+k3s1", pin: "v2.0", env: []string{"TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true"}, wantRC: 1, msgs: []string{"refusing to downgrade"}},
+		{name: "minor channel two up is refused without force", installed: "v1.34.11+k3s1", pin: "v1.36", env: []string{"TN_K3S_UPGRADE=true"}, wantRC: 1, msgs: []string{"more than one minor version", "v1.34 -> v1.36"}},
+		{name: "minor channel two up with force warns", installed: "v1.34.11+k3s1", pin: "v1.36", env: []string{"TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true"},
+			want: "version=unset channel=v1.36 action=upgrade effective=", msgs: []string{"skips minor versions"}},
+		{name: "minor channel one up is allowed", installed: "v1.34.11+k3s1", pin: "v1.35", env: []string{"TN_K3S_UPGRADE=true"},
+			want: "version=unset channel=v1.35 action=upgrade effective="},
+		{name: "minor channel of the same minor is allowed", installed: "v1.34.11+k3s1", pin: "v1.34", env: []string{"TN_K3S_UPGRADE=true"},
+			want: "version=unset channel=v1.34 action=upgrade effective="},
+		{name: "a channel in the version conflicts with another channel", installed: "v1.34.11+k3s1", pin: "v1.35", env: []string{"TN_K3S_UPGRADE=true", "INSTALL_K3S_CHANNEL=stable"}, wantRC: 1, msgs: []string{"conflicting k3s requests"}},
 		{name: "upgrade of a fresh device is just an install", installed: "", env: []string{"TN_K3S_UPGRADE=true"},
 			want: "version=" + pin + " channel=unset action=install effective=" + pin},
 		{name: "TN_K3S_UPGRADE=false is a keep", installed: "v1.34.11+k3s1", env: []string{"TN_K3S_UPGRADE=false"},
@@ -580,9 +605,9 @@ func TestCgroupV1FlagIsOnTheInstallerCommandWhenTheDropinHasToWait(t *testing.T)
 		wantExec string // the whole INSTALL_K3S_EXEC after tn_inst_prepare
 		msg      string
 	}{
-		{name: "channel upgrade", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server --tls-san a"},
+		{name: "channel upgrade", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_EXEC=server --tls-san a"},
 			wantExec: "server --tls-san a " + flag, msg: "may need the flag on its first start"},
-		{name: "channel upgrade, no exec at all", env: []string{"INSTALL_K3S_CHANNEL=latest", "TN_K3S_UPGRADE=true"},
+		{name: "channel upgrade, no exec at all", env: []string{"INSTALL_K3S_CHANNEL=latest", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true"},
 			wantExec: flag},
 		{name: "a forced jump to v1.36.5", env: []string{"INSTALL_K3S_VERSION=v1.36.5+k3s1", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_EXEC=agent"},
 			wantExec: "agent " + flag},
@@ -592,11 +617,11 @@ func TestCgroupV1FlagIsOnTheInstallerCommandWhenTheDropinHasToWait(t *testing.T)
 			wantExec: "server"},
 		{name: "a channel named v1.31 does not need it either", env: []string{"INSTALL_K3S_CHANNEL=v1.31", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server"},
 			wantExec: "server"},
-		{name: "already on the command of the caller: not twice", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server " + flag},
+		{name: "already on the command of the caller: not twice", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_EXEC=server " + flag},
 			wantExec: "server " + flag, msg: "already has fail-cgroupv1=false"},
-		{name: "already on the command of the caller, spelled with a space", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server --kubelet-arg fail-cgroupv1=false"},
+		{name: "already on the command of the caller, spelled with a space", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_EXEC=server --kubelet-arg fail-cgroupv1=false"},
 			wantExec: "server --kubelet-arg fail-cgroupv1=false"},
-		{name: "true on the command of the caller is not the flag", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server --kubelet-arg=fail-cgroupv1=true"},
+		{name: "true on the command of the caller is not the flag", env: []string{"INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_EXEC=server --kubelet-arg=fail-cgroupv1=true"},
 			wantExec: "server --kubelet-arg=fail-cgroupv1=true " + flag},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -636,7 +661,7 @@ func TestCgroupV1FlagIsOnTheInstallerCommandWhenTheDropinHasToWait(t *testing.T)
 	// cgroup v2: nothing at all
 	i = newInst(t)
 	i.installed("v1.30.14+k3s1")
-	out, err = i.run("tn_inst_prepare server"+show, "TN_CGROUP_FSTYPE=cgroup2fs", "INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server")
+	out, err = i.run("tn_inst_prepare server"+show, "TN_CGROUP_FSTYPE=cgroup2fs", "INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_EXEC=server")
 	if err != nil || !strings.Contains(out, "EXEC=[server]\n") || !strings.Contains(out, "DROPIN=no") {
 		t.Errorf("%v\n%s", err, out)
 	}
@@ -644,7 +669,7 @@ func TestCgroupV1FlagIsOnTheInstallerCommandWhenTheDropinHasToWait(t *testing.T)
 	i = newInst(t)
 	i.installed("v1.30.14+k3s1")
 	write(t, filepath.Join(i.k3sCfg, "config.yaml.d", "10-user.yaml"), "kubelet-arg+:\n  - fail-cgroupv1=false\n")
-	out, err = i.run("tn_inst_prepare server"+show, "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "INSTALL_K3S_EXEC=server")
+	out, err = i.run("tn_inst_prepare server"+show, "TN_CGROUP_FSTYPE=tmpfs", "INSTALL_K3S_CHANNEL=stable", "TN_K3S_UPGRADE=true", "TN_K3S_FORCE=true", "INSTALL_K3S_EXEC=server")
 	if err != nil || !strings.Contains(out, "EXEC=[server]\n") {
 		t.Errorf("%v\n%s", err, out)
 	}
@@ -856,7 +881,10 @@ func TestRenderedPinThroughThePolicy(t *testing.T) {
 		{"env opts in", TemplateData{}, "v1.35.9+k3s1", []string{"TN_K3S_UPGRADE=true"}, 0, "version=v1.36.5+k3s1 channel=unset action=upgrade"},
 		{"env pin beats the template pin on a new device", TemplateData{}, "", []string{"INSTALL_K3S_VERSION=v1.34.11+k3s1"}, 0, "version=v1.34.11+k3s1 channel=unset action=install"},
 		{"latest channel, installed", TemplateData{K3SVersion: "latest"}, "v1.35.9+k3s1", nil, 0, "version=v1.35.9+k3s1 channel=unset action=keep"},
-		{"stable, fresh", TemplateData{K3SVersion: "stable"}, "", nil, 0, "version=unset channel=unset action=install"},
+		{"stable, fresh", TemplateData{K3SVersion: "stable"}, "", nil, 0, "version=unset channel=stable action=install"},
+		{"v1.34 channel, fresh", TemplateData{K3SVersion: "v1.34"}, "", nil, 0, "version=unset channel=v1.34 action=install"},
+		{"stable, installed, kept", TemplateData{K3SVersion: "stable"}, "v1.35.9+k3s1", nil, 0, "version=v1.35.9+k3s1 channel=unset action=keep"},
+		{"channel in INSTALL_K3S_VERSION at run time", TemplateData{}, "", []string{"INSTALL_K3S_VERSION=stable"}, 0, "version=unset channel=stable action=install"},
 		{"latest, fresh", TemplateData{K3SVersion: "latest"}, "", nil, 0, "version=unset channel=latest action=install"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

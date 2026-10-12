@@ -113,13 +113,12 @@ func TestK3SPinOverridesAndChannels(t *testing.T) {
 		if got := exportsOf(out, "INSTALL_K3S_VERSION"); len(got) != 1 || !strings.Contains(got[0], "v1.34.11+k3s1") || strings.Contains(strings.Join(exportsOf(out, "INSTALL_K3S_VERSION"), ""), "v1.36.5") {
 			t.Errorf("%s override: %q", name, got)
 		}
-		// stable keeps the old behaviour: nothing is exported
-		out = renderK3S(t, tpl, "stable")
-		if len(exportsOf(out, "INSTALL_K3S_VERSION"))+len(exportsOf(out, "INSTALL_K3S_CHANNEL")) != 0 {
-			t.Errorf("%s stable exports a version or channel", name)
-		}
-		if !strings.Contains(out, "stable") {
-			t.Errorf("%s stable: no note", name)
+		// channels are exported as INSTALL_K3S_CHANNEL, never as INSTALL_K3S_VERSION
+		for _, ch := range []string{"stable", "testing", "v1.34"} {
+			out = renderK3S(t, tpl, ch)
+			if got := exportsOf(out, "INSTALL_K3S_CHANNEL"); len(got) != 1 || !strings.Contains(got[0], ch) || len(exportsOf(out, "INSTALL_K3S_VERSION")) != 0 {
+				t.Errorf("%s %s: %q", name, ch, got)
+			}
 		}
 		out = renderK3S(t, tpl, "latest")
 		if got := exportsOf(out, "INSTALL_K3S_CHANNEL"); len(got) != 1 || !strings.Contains(got[0], "latest") || len(exportsOf(out, "INSTALL_K3S_VERSION")) != 0 {
@@ -140,12 +139,12 @@ func TestK3SPinIsTheSameForServerAndAgent(t *testing.T) {
 }
 
 func TestValidateK3SVersion(t *testing.T) {
-	for _, ok := range []string{"", "stable", "latest", "v1.36.5+k3s1", "v1.34.11+k3s2", "v1.27.0+k3s10"} {
+	for _, ok := range []string{"", "stable", "latest", "v1.36.5+k3s1", "v1.34.11+k3s2", "v1.27.0+k3s10", "testing", "v1.34"} {
 		if err := ValidateK3SVersion(ok); err != nil {
 			t.Errorf("%q: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"1.36.5+k3s1", "v1.36.5", "v1.36", "v1.36.5-rc1+k3s1", "testing", "v1.36.5+k3s1; rm -rf /", "$(id)", "v1.36.5+k3s1\n", "`x`", "\"", " stable"} {
+	for _, bad := range []string{"1.36.5+k3s1", "v1.36.5", "v1.36.", "v1.36.5-rc1+k3s1", "v1.34\n", "Stable", "v1.36.5+k3s1; rm -rf /", "$(id)", "v1.36.5+k3s1\n", "`x`", "\"", " stable"} {
 		if err := ValidateK3SVersion(bad); err == nil {
 			t.Errorf("%q was accepted", bad)
 		}

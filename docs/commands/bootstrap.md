@@ -15,7 +15,7 @@ The device may be given as an argument, via the `--device` global flag, or selec
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--skip-upload` | `false` | Skip uploading the generated scripts. |
-| `--k3s-version` | `v1.36.5+k3s1` | k3s release the server script installs: an exact release (`v1.36.5+k3s1`), or `stable` / `latest` for the installer's channels. The agent script installs the release of its server instead; a release given here explicitly is installed only if it is not newer than the server's. |
+| `--k3s-version` | `v1.36.5+k3s1` | k3s release the server script installs: an exact release (`v1.36.5+k3s1`), or a channel (`stable`, `latest`, `testing`, `v1.34`) for the installer to resolve. The agent script installs the release of its server instead; a release given here explicitly is installed only if it is not newer than the server's. |
 | `--k3s-upgrade` | `false` | Let the scripts replace an installed k3s with `--k3s-version` (sets `TN_K3S_UPGRADE=true` as the script's default). Without it a re-run **keeps** the installed k3s. See [Re-running a script](#re-running-a-script-the-installed-k3s-is-kept). |
 | `--force` | `false` | Only with `--k3s-upgrade`: allow an upgrade over more than one minor version (`TN_K3S_FORCE=true`). A downgrade is never allowed. |
 | `--docker-secret` | `""` | Contents of the `.dockerconfigjson` to embed. |
@@ -48,8 +48,7 @@ the day the script runs, and that moved the fleet onto a k3s that refused the de
 | --- | --- |
 | *(default)* or `v1.36.5+k3s1` | `INSTALL_K3S_VERSION=v1.36.5+k3s1` |
 | any other `vX.Y.Z+k3sN` | that release |
-| `stable` | nothing: the old behaviour, the installer picks the `stable` channel |
-| `latest` | `INSTALL_K3S_CHANNEL=latest` |
+| `stable`, `latest`, `testing`, or a minor such as `v1.34` | `INSTALL_K3S_CHANNEL=<channel>` (never `INSTALL_K3S_VERSION`: the k3s installer reads that as an exact release). A channel given as `INSTALL_K3S_VERSION=stable` when running the script is moved to `INSTALL_K3S_CHANNEL` the same way. |
 
 - At run time, `INSTALL_K3S_VERSION=v1.xx.y+k3sN sh bootstrap_server_<device>.sh` overrides the pin.
 - The pin is the release for a **new server**. A device that already has k3s keeps what it has, see
