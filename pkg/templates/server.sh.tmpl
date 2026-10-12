@@ -12,6 +12,13 @@
 #   INSTALL_WATCHDOG=true (default: false, enable or disable the teknoir watchdog service)
 #   USE_DOCKER=true (default: false, enable the use of docker as container runtime for k3sm inly works for k3s < 1.24)
 #   CREATE_USER=false (default: ask, create a user for the device without asking)
+#   TN_K3S_CA_AUTO_REMEDIATE=false (default: true; a re-run on a device bootstrapped with the old
+#                          root CA repairs it before k3s is touched. false stops with advice instead)
+#   TN_K3S_UPGRADE=true (default: false; a re-run KEEPS the installed k3s version. true lets the pin
+#                          below replace it: never a downgrade, never more than one minor version)
+#   TN_K3S_FORCE=true (default: false; allows an upgrade over more than one minor version)
+#   TN_K3S_CGROUPV1=true|false (default: detected; on cgroup v1 with k3s >= v1.31 the kubelet gets
+#                          fail-cgroupv1=false, see /etc/rancher/k3s/config.yaml.d/99-teknoir-cgroupv1.yaml)
 
 
 TMP=$(mktemp -dt)
@@ -34,120 +41,50 @@ info "Teknoir bootstrapping...${TMP}"
 {{template "variables.sh.tmpl" .}}
 
 {{template "keys.sh.tmpl" .}}
-info "Prepare K3s CA Certs"
-export PRODUCT="${PRODUCT:-k3s}"
-export DATA_DIR="${DATA_DIR:-/var/lib/rancher/${PRODUCT}}"
+# The k3s CA of the device: the device certificate becomes the root CA (re-issued with
+# keyCertSign, which k3s >= v1.34.12/v1.35.9/v1.36.5/v1.37.1 requires). The library is also
+# available stand-alone as pkg/templates/scripts/tn-k3s-ca.sh (check / remediate).
+TN_K3S_CA_NO_MAIN=1
+{{template "tn-k3s-ca.sh" .}}
+# The k3s release policy (a re-run keeps the installed k3s) and the cgroup v1 kubelet flag.
+{{template "tn-k3s-install.sh" .}}
 
-if command -v openssl-3 >/dev/null 2>&1; then
-  OPENSSL=openssl-3
-else
-  OPENSSL=openssl
+{{template "k3s_version.sh.tmpl" .}}
+# Order: (0) the arguments of the k3s installer, (1) the k3s release policy and the cgroup v1 kubelet
+# flag, (2) the CA, (3) the k3s installer.
+# (0) comes first because (1) reads INSTALL_K3S_EXEC: it must see what the installer will get, or a
+# fail-cgroupv1 that the caller put there would be taken as "set by the device" (the drop-in removed)
+# and then lost when the variable is rebuilt. A value the caller gave is kept, after ours.
+# (1) comes before the CA step: it refuses before anything on the device is changed, and the kubelet
+# flag is in place when the CA step restarts k3s (a k3s that a cgroup v1 host made exit restarts itself
+# in a loop, and has to be up for rotate-ca). The data dir is looked up first, the way the CA step does
+# it, because a k3s datastore there decides whether a k3s whose version cannot be read is installed; a
+# data dir that disagrees with config.yaml is refused here, before (1) changes anything.
+# BEGIN install-k3s-exec
+export INSTALL_K3S_EXEC="server --token ${_K3S_TOKEN} --tls-san ${_DEVICE_ID}.${_DOMAIN} --tls-san 10.0.0.10${INSTALL_K3S_EXEC:+ ${INSTALL_K3S_EXEC}}"
+if [ "${USE_DOCKER}" = true ]; then
+    info "Use docker container-runtime for K3s"
+    export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
 fi
-
-info "Using ${OPENSSL}: $(${OPENSSL} version)"
-
-if ! ${OPENSSL} ecparam -name prime256v1 -genkey -noout -out /dev/null >/dev/null 2>&1; then
-  fatal "openssl not found or missing Elliptic Curve (ecparam) support."
-fi
-
-${OPENSSL} version | grep -qF 'OpenSSL 3' && OPENSSL_GENRSA_FLAGS=-traditional
-
-mkdir -p "${DATA_DIR}/server/tls/etcd"
-
-cp ${CONFIG_PATH}/rsa_public.pem ${DATA_DIR}/server/tls/root-ca.pem
-cp ${CONFIG_PATH}/rsa_private.pem ${DATA_DIR}/server/tls/root-ca.key
-
-cd "${DATA_DIR}/server/tls"
-
-# Set up temporary openssl configuration
-mkdir -p ".ca/certs"
-trap "rm -rf .ca" EXIT
-touch .ca/index
-openssl rand -hex 8 > .ca/serial
-cat >.ca/config <<'EOF'
-[ca]
-default_ca = ca_default
-[ca_default]
-dir = ./.ca
-database = $dir/index
-serial = $dir/serial
-new_certs_dir = $dir/certs
-default_md = sha256
-policy = policy_anything
-[policy_anything]
-commonName = supplied
-[req]
-distinguished_name = req_distinguished_name
-[req_distinguished_name]
-[v3_ca]
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid:always
-basicConstraints = critical, CA:true
-keyUsage = critical, digitalSignature, keyEncipherment, keyCertSign
-EOF
-
-if [ -e service.key ]; then
-  info "Generating additional Kubernetes service account issuer RSA key"
-  OLD_SERVICE_KEY="$(cat service.key)"
-else
-  info "Generating Kubernetes service account issuer RSA key"
-fi
-${OPENSSL} genrsa ${OPENSSL_GENRSA_FLAGS:-} -out service.key 2048
-echo "${OLD_SERVICE_KEY}" >> service.key
-
-cat root-ca.pem > root-ca.crt
-
-if [ ! -e root-ca.key ]; then
-  fatal "Cannot generate intermediate certificate without root certificate private key"
-fi
-
-info "Generating intermediate certificate authority RSA key and certificate"
-${OPENSSL} genrsa ${OPENSSL_GENRSA_FLAGS:-} -out intermediate-ca.key 4096
-${OPENSSL} req -new -nodes \
-               -subj "/CN=${PRODUCT}-intermediate-ca@${_DEVICE_ID}.${_DOMAIN}" \
-               -key intermediate-ca.key |
-${OPENSSL} ca  -batch -notext -days 3700 \
-               -in /dev/stdin \
-               -out intermediate-ca.pem \
-               -keyfile root-ca.key \
-               -cert root-ca.pem \
-               -config .ca/config \
-               -extensions v3_ca
-
-cat intermediate-ca.pem root-ca.pem > intermediate-ca.crt
-
-if [ ! -e intermediate-ca.key ]; then
-  fatal "Cannot generate leaf certificates without intermediate certificate private key"
-fi
-
-# Generate new leaf CAs for all the control-plane and etcd components
-for TYPE in client server request-header etcd/peer etcd/server; do
-  CERT_NAME="${PRODUCT}-$(echo ${TYPE} | tr / -)-ca"
-  info "Generating ${CERT_NAME} leaf certificate authority EC key and certificate"
-  ${OPENSSL} ecparam -name prime256v1 -genkey -noout -out ${TYPE}-ca.key
-  ${OPENSSL} req -new -nodes \
-                 -subj "/CN=${CERT_NAME}@${_DEVICE_ID}.${_DOMAIN}" \
-                 -key ${TYPE}-ca.key |
-  ${OPENSSL} ca  -batch -notext -days 3700 \
-                 -in /dev/stdin \
-                 -out ${TYPE}-ca.pem \
-                 -keyfile intermediate-ca.key \
-                 -cert intermediate-ca.pem \
-                 -config .ca/config \
-                 -extensions v3_ca
-  cat ${TYPE}-ca.pem \
-      intermediate-ca.pem \
-      root-ca.pem > ${TYPE}-ca.crt
-done
+# END install-k3s-exec
+tn_ca_resolve_datadir
+tn_ca_require_consistent_datadir
+tn_inst_prepare server
+tn_k3s_ca_setup
 
 info "Install Rancher K3s"
 export K3S_CONFIG_PATH=/etc/rancher/k3s
 $SUDO mkdir -p ${K3S_CONFIG_PATH}
-$SUDO tee ${K3S_CONFIG_PATH}/config.yaml > /dev/null << EOL
-disable:
-  - traefik
-node-name: teknoir-master
-EOL
+# A re-run must not replace a config.yaml that already exists (it may hold keys of the device owner,
+# like a kubelet-arg): the Teknoir keys are added when they are missing.
+tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml disable "disable:
+  - traefik"
+tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml node-name "node-name: teknoir-master"
+# The CA above was made in ${DATA_DIR}, the data dir that k3s uses on this device. The file just
+# written and the unit that the installer writes (it has no --data-dir) must keep it there.
+if [ "${DATA_DIR}" != "/var/lib/rancher/k3s" ]; then
+    tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml data-dir "data-dir: ${DATA_DIR}"
+fi
 cat >/etc/sysctl.d/teknoir-k3s.conf << EOF
 fs.inotify.max_user_instances=1024
 EOF
@@ -168,18 +105,20 @@ if [ ${OS_BUILD} ]; then
     $SUDO sed -i "s#-d /run/systemd#true#g" k3s_installer.sh
 fi
 
-export INSTALL_K3S_EXEC="server --token ${_K3S_TOKEN} --tls-san ${_DEVICE_ID}.${_DOMAIN} --tls-san 10.0.0.10 ${INSTALL_K3S_EXEC}"
-if [ "${USE_DOCKER}" = true ]; then
-    info "Use docker container-runtime for K3s"
-    export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
-fi
-
+# The release (INSTALL_K3S_VERSION) and the kubelet flag were decided by tn_inst_prepare above.
 export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
+# The kubelet flag that had to wait for the installer (an installed k3s older than v1.31 that was upgraded)
+tn_inst_finish
+
+# Tell the agents which k3s release this server runs: they install exactly that one (a kubelet must not be
+# newer than its apiserver), and k3s does not answer /version to an anonymous caller. Served by k3s at
+# https://<server>:6443/static/teknoir/k3s-version.
+tn_inst_publish_release
 
 info "Install Teknoir Manifests"
-$SUDO mkdir -p /var/lib/rancher/k3s/server/manifests
-$SUDO tee /var/lib/rancher/k3s/server/manifests/teknoir.yaml > /dev/null << EOL
+$SUDO mkdir -p ${DATA_DIR}/server/manifests
+$SUDO tee ${DATA_DIR}/server/manifests/teknoir.yaml > /dev/null << EOL
 {{template "manifests.yaml.tmpl" .}}
 EOL
 

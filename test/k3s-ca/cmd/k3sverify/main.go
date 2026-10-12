@@ -270,6 +270,11 @@ func CheckRoot(root, orig *x509.Certificate, key crypto.Signer, now time.Time, w
 		if len(orig.SubjectKeyId) != 0 && !bytes.Equal(root.SubjectKeyId, orig.SubjectKeyId) {
 			add("SKI differs from the original certificate")
 		}
+		// two different certificates with the same issuer and serial break RFC 5280 4.1.2.2
+		// (NSS: SEC_ERROR_REUSED_ISSUER_AND_SERIAL); OpenSSL 1.1.1 `x509 -signkey` ignores -set_serial
+		if bytes.Equal(root.RawIssuer, orig.RawIssuer) && root.SerialNumber.Cmp(orig.SerialNumber) == 0 && !bytes.Equal(root.Raw, orig.Raw) {
+			add("serial number equals the original certificate's (same issuer and serial, different certificate)")
+		}
 		if !orig.PublicKey.(interface{ Equal(crypto.PublicKey) bool }).Equal(root.PublicKey) {
 			add("public key differs from the original certificate")
 		}

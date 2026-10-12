@@ -9,6 +9,7 @@ FAIL_AFTER=${FAIL_AFTER:-45}  # 'CA cert validation failed' repeating this long 
 HELPER_IMAGE=${HELPER_IMAGE:-debian:bookworm}
 DATA_CT=/var/lib/rancher/k3s   # data dir path inside helper and k3s containers (S9 uses the host path)
 CA_LIB=${TN_K3S_CA_LIB:-}
+INSTALL_LIB=${TN_K3S_INSTALL_LIB:-}
 
 rand_hex() { head -c "${1:-16}" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
@@ -23,6 +24,7 @@ short_name() {
 h_mounts() { # WORK GEN
   HM=(-v "$1/k3s:$DATA_CT" -v "$(gen_dir "$2"):/etc/teknoir:ro" -v "$HERE:/h:ro" -v "$OUT/bin:/tnbin:ro")
   if [ -n "$CA_LIB" ]; then HM+=(-v "$CA_LIB:/tn/tn-k3s-ca.sh:ro"); fi
+  if [ -n "$INSTALL_LIB" ]; then HM+=(-v "$INSTALL_LIB:/tn/tn-k3s-install.sh:ro"); fi
   return 0
 }
 

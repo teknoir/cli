@@ -19,8 +19,9 @@
 # Environment: PRODUCT (default k3s). OPENSSL is detected as in the template.
 # Needs info() and fatal(); fallbacks are defined below.
 
-command -v info >/dev/null 2>&1 || info() { echo '[INFO] ' "$@"; }
-command -v fatal >/dev/null 2>&1 || fatal() { echo '[ERROR] ' "$@" >&2; exit 1; }
+# (`command -v info` would find the GNU info reader on Debian/Ubuntu: ask for a function)
+case $(type info 2>/dev/null) in *function*) ;; *) info() { echo '[INFO] ' "$@"; } ;; esac
+case $(type fatal 2>/dev/null) in *function*) ;; *) fatal() { echo '[ERROR] ' "$@" >&2; exit 1; } ;; esac
 
 tn_legacy_ca() {
   _tn_tls=$1 _tn_cert=$2 _tn_key=$3 _tn_suffix=${4:-device-0.test.local}

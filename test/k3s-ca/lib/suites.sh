@@ -382,7 +382,7 @@ run_compat() { # SPEC (platform/image or image)
   tag=$(helper_image "$image" "$platform") || { result_write openssl-compat "$name" - - lib PASS ERROR 0 "cannot build helper image"; return 0; }
   out="$OUT/logs/$name.out"
   docker run --rm --label "$LABEL" --name "$PREFIX-$name" ${platform:+--platform "$platform"} \
-    -v "$OUT/gen:/gens:ro" -v "$HERE/compat:/c:ro" -v "$HERE:/h:ro" -v "$(compat_bin_dir "$platform"):/tnbin:ro" -v "$CA_LIB:/tn/tn-k3s-ca.sh:ro" \
+    -v "$OUT/gen:/gens:ro" -v "$HERE/compat:/c:ro" -v "$HERE:/h:ro" -v "$(compat_bin_dir "$platform"):/tnbin:ro" -v "$CA_LIB:/tn/tn-k3s-ca.sh:ro" ${INSTALL_LIB:+-v "$INSTALL_LIB:/tn/tn-k3s-install.sh:ro"} \
     -e "GENS=$COMPAT_GENS" "$tag" sh /c/assert.sh > "$out" 2>&1 || true
   local seen=""
   while IFS= read -r line; do
@@ -407,5 +407,230 @@ suite_openssl_compat() {
   local spec
   for spec in ${COMPAT_IMAGES_OPT:-$COMPAT_IMAGES_DEFAULT}; do
     pool_run "$(compat_name "$spec")" run_compat "$spec"
+  done
+}
+
+# ------------------------------------------------------------ install: release policy and cgroup v1 flag
+# The library tn-k3s-install.sh ($TN_K3S_INSTALL_LIB) against real k3s.
+
+need_install_lib() { # SUITE
+  if [ -z "$INSTALL_LIB" ] || [ ! -f "$INSTALL_LIB" ]; then
+    log "suite $1 needs the install library: set TN_K3S_INSTALL_LIB=/path/to/tn-k3s-install.sh (skipped)"
+    result_write "$1" "$1:needs-install-lib" - - lib READY SKIP 0 "TN_K3S_INSTALL_LIB not set"
+    return 1
+  fi
+  return 0
+}
+
+# S11 cgroup: the kubelet flag of a cgroup v1 host, on a real k3s. The helper container runs
+# tn_inst_prepare with TN_K3S_CGROUPV1=true (this host is cgroup v2, so the detection is overridden)
+# against an /etc/rancher/k3s that already has a user kubelet-arg; then k3s starts from that
+# directory. k3s >= v1.35 must get fail-cgroupv1=false and keep the user's argument; older k3s gets nothing.
+scenario_install_cgroup() { # SCEN TAG
+  local scen=$1 tag t0 ver args want
+  tag=$(ver_tag "$2")
+  case_init "$scen"; t0=$(now)
+  ver=${tag/-k3s/+k3s}
+  d_pull "$K3S_IMAGE:$tag" || true
+  mkdir -p "$WORK/etc-rancher/k3s"
+  printf 'kubelet-arg: max-pods=77\n' > "$WORK/etc-rancher/k3s/config.yaml"
+  h_mounts "$WORK" "$(gens_for bs-o111 | cut -d' ' -f1)"
+  d_helper "$(helper_image debian:bookworm)" "${HM[@]}" -v "$WORK/etc-rancher:/etc/rancher" \
+    -e "INSTALL_K3S_VERSION=$ver" -e TN_K3S_CGROUPV1=true -- \
+    sh -c ". /h/shim.sh; . /tn/tn-k3s-install.sh; tn_inst_prepare server; tn_inst_prepare server" >"$OUT/logs/$CASE.prepare.log" 2>&1 ||
+    { step "$scen" 1-prepare "$tag" - lib READY ERROR $(( $(now) - t0 )) "tn_inst_prepare failed (see log)"; case_end; return 0; }
+  # the flag goes in from v1.31 (the kubelet knows it from then on); only >= v1.35 needs it
+  if [ "$(ver_minor "$tag")" -ge 31 ]; then want=yes; else want=no; fi
+  # (root-owned, mode 750: look from inside a container)
+  local dropin=/etc/rancher/k3s/config.yaml.d/99-teknoir-cgroupv1.yaml have=no
+  if d_helper "$(helper_image debian:bookworm)" -v "$WORK/etc-rancher:/etc/rancher" -- test -s "$dropin"; then have=yes; fi
+  if [ "$want" = yes ] && [ "$have" = no ]; then
+    step "$scen" 1-prepare "$tag" - lib READY ERROR $(( $(now) - t0 )) "no drop-in written for k3s $tag"; case_end; return 0
+  fi
+  if [ "$want" = no ] && [ "$have" = yes ]; then
+    step "$scen" 1-prepare "$tag" - lib READY ERROR $(( $(now) - t0 )) "a drop-in was written for k3s $tag (< v1.31)"; case_end; return 0
+  fi
+  srv_up "$tag"; wait_k3s server "$SRV" "$T_SERVER" "$SINCE"
+  if [ "$W_STATE" != READY ]; then step "$scen" 2-k3s-starts "$tag" - lib READY "$W_STATE" $(( $(now) - t0 )) "$W_NOTE"; save_logs "$SRV" server; case_end; return 0; fi
+  args=$(kc "$SRV" get nodes -o 'jsonpath={.items[0].metadata.annotations.k3s\.io/node-args}' 2>/dev/null)
+  if ! printf '%s' "$args" | grep -q 'max-pods=77'; then
+    step "$scen" 2-k3s-starts "$tag" - lib READY ERROR $(( $(now) - t0 )) "the user's kubelet-arg max-pods=77 was lost: $args"
+  elif [ "$want" = yes ] && ! printf '%s' "$args" | grep -q 'fail-cgroupv1=false'; then
+    step "$scen" 2-k3s-starts "$tag" - lib READY ERROR $(( $(now) - t0 )) "fail-cgroupv1=false is not in the k3s arguments: $args"
+  elif [ "$want" = no ] && printf '%s' "$args" | grep -q 'fail-cgroupv1'; then
+    step "$scen" 2-k3s-starts "$tag" - lib READY ERROR $(( $(now) - t0 )) "fail-cgroupv1 was passed to k3s $tag: $args"
+  else
+    step "$scen" 2-k3s-starts "$tag" - lib READY READY $(( $(now) - t0 )) "kubelet-arg max-pods=77 kept$([ "$want" = yes ] && echo ', fail-cgroupv1=false passed')"
+  fi
+  save_logs "$SRV" server
+  case_end
+}
+
+# S12 policy: the version of the installed k3s is read from the real `k3s --version` output
+# (K3S_BIN='docker run --rm rancher/k3s:<tag>'), and the policy decides on it.
+scenario_install_policy() { # SCEN TAG
+  local scen=$1 tag t0 ver out other
+  tag=$(ver_tag "$2")
+  case_init "$scen"; t0=$(now)
+  ver=${tag/-k3s/+k3s}
+  d_pull "$K3S_IMAGE:$tag" || true
+  mkdir -p "$WORK/cfg"
+  # run_policy PIN [ENV...]: prints the output and a last line RC=<exit code> (it runs in a command substitution)
+  run_policy() {
+    local pin=$1 rc=0; shift
+    env "K3S_BIN=docker run --rm $K3S_IMAGE:$tag" "INSTALL_K3S_VERSION=$pin" "TN_K3S_CONFIG_DIR=$WORK/cfg" TN_CGROUP_FSTYPE=cgroup2fs "$@" \
+      sh -c '. "$1"; . "$2"; tn_inst_plan; echo "RESULT version=$INSTALL_K3S_VERSION action=$TN_INST_ACTION"' sh "$HERE/shim.sh" "$INSTALL_LIB" 2>&1 || rc=$?
+    echo "RC=$rc"
+  }
+  P_RC=0
+  # 1. the installed release is recognised: asking for the same one is "same"
+  out=$(run_policy "$ver"); P_RC=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$P_RC" = 0 ] && printf '%s' "$out" | grep -q "RESULT version=$ver action=same"; then
+    step "$scen" 1-recognised "$tag" - lib READY READY $(( $(now) - t0 )) "installed $ver read from k3s --version"
+  else
+    step "$scen" 1-recognised "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$P_RC: $(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+  # 2. another pin is ignored: the installed release is kept
+  t0=$(now); other=v1.99.0+k3s1
+  out=$(run_policy "$other"); P_RC=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$P_RC" = 0 ] && printf '%s' "$out" | grep -q "RESULT version=$ver action=keep"; then
+    step "$scen" 2-keeps "$tag" - lib READY READY $(( $(now) - t0 )) "pin $other ignored, $ver kept"
+  else
+    step "$scen" 2-keeps "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$P_RC: $(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+  # 3. an upgrade over several minors, and any downgrade, are refused
+  t0=$(now)
+  out=$(run_policy "v1.99.0+k3s1" TN_K3S_UPGRADE=true); P_RC=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$P_RC" = 1 ] && printf '%s' "$out" | grep -q 'more than one minor version'; then
+    step "$scen" 3-refuses-jump "$tag" - lib READY READY $(( $(now) - t0 )) "upgrade to $other refused"
+  else
+    step "$scen" 3-refuses-jump "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$P_RC: $(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+  t0=$(now)
+  out=$(run_policy "v1.20.0+k3s1" TN_K3S_UPGRADE=true TN_K3S_FORCE=true); P_RC=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$P_RC" = 1 ] && printf '%s' "$out" | grep -q 'refusing to downgrade'; then
+    step "$scen" 4-refuses-downgrade "$tag" - lib READY READY $(( $(now) - t0 )) "downgrade refused even with TN_K3S_FORCE=true"
+  else
+    step "$scen" 4-refuses-downgrade "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$P_RC: $(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+  case_end
+}
+
+# S13 follow: an agent installs the k3s release of its SERVER, not the pin of the script. k3s does not
+# answer /version anonymously (401, on every release), so the server script publishes the release it
+# runs as server/static/teknoir/k3s-version, which k3s serves without authentication. Here: the server
+# side runs tn_inst_publish_release with the REAL k3s binary (the rancher/k3s image) on the data dir
+# before the server starts (like an OS build) and again when it is up; a helper container on the same
+# network runs tn_inst_prepare agent with K3S_URL=https://<server>:6443 and a default pin that is NOT the
+# server's release: it must read the real server and settle on the server's release. Then a real k3s agent
+# of exactly that release joins and must be Ready. A pin that was asked for and is newer than the server
+# is refused; a server that publishes nothing is refused; an unreachable server is refused.
+scenario_install_follow() { # SCEN TAG
+  local scen=$1 tag t0 ver pin rc out agent_tag
+  tag=$(ver_tag "$2")
+  case_init "$scen"; t0=$(now)
+  ver=${tag/-k3s/+k3s}
+  # a default pin that differs from the server: the other one of v1.34.11 / v1.36.5
+  if [ "$ver" = v1.36.5+k3s1 ]; then pin=v1.34.11+k3s1; else pin=v1.36.5+k3s1; fi
+  d_pull "$K3S_IMAGE:$tag" || true
+  ca_prepare lib "$(gens_for bs-o111 | cut -d' ' -f1)" "$HELPER_IMAGE" "$WORK" "dev.test.local" ||
+    { step "$scen" 1-server-ready "$tag" - lib READY ERROR 0 "CA preparation failed"; case_end; return 0; }
+  # the server script publishes the release it runs, with the real k3s binary of the image, before k3s starts
+  publish_release() { # -> output of tn_inst_publish_release
+    h_mounts "$WORK" "$(gens_for bs-o111 | cut -d' ' -f1)"
+    d_helper "$K3S_IMAGE:$tag" --entrypoint sh "${HM[@]}" -e "DATA_DIR=$DATA_CT" -- \
+      -c '. /h/shim.sh; . /tn/tn-k3s-install.sh; tn_inst_publish_release' 2>&1
+  }
+  out=$(publish_release) || true
+  echo "$out" > "$OUT/logs/$CASE.publish.log"
+  srv_up "$tag"; wait_k3s server "$SRV" "$T_SERVER" "$SINCE"
+  step "$scen" 1-server-ready "$tag" - lib READY "$W_STATE" $(( $(now) - t0 )) "$W_NOTE"
+  [ "$W_STATE" = READY ] || { save_logs "$SRV" server; case_end; return 0; }
+  # k3s starting on a data dir that has the file must not remove it, and serves it without authentication
+  t0=$(now)
+  out=$(publish_release) || true
+  if printf '%s' "$out" | grep -q "already published"; then
+    step "$scen" 1b-published "$tag" - lib READY READY $(( $(now) - t0 )) "file survived the first start of k3s; a second publish changes nothing"
+  else
+    step "$scen" 1b-published "$tag" - lib READY ERROR $(( $(now) - t0 )) "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+
+  # run_follow PIN SOURCE URL [ENV...]: prints the output and a last line RC=<exit code>
+  run_follow() {
+    local pin=$1 source=$2 url=$3 rc=0; shift 3
+    h_mounts "$WORK" "$(gens_for bs-o111 | cut -d' ' -f1)"
+    d_helper "$(helper_curl_image)" --network "$NET" "${HM[@]}" \
+      -e "K3S_URL=$url" -e "INSTALL_K3S_VERSION=$pin" -e "TN_K3S_PIN_SOURCE=$source" -e TN_CGROUP_FSTYPE=cgroup2fs \
+      -e TN_K3S_CONFIG_DIR=/tmp/k3s-cfg -e TN_K3S_SERVER_VERSION_WAIT=1 -e K3S_BIN=/nonexistent/k3s -e DATA_DIR=/tmp/no-k3s "$@" -- \
+      sh -c '. /h/shim.sh; . /tn/tn-k3s-install.sh; tn_inst_prepare agent; echo "RESULT version=$INSTALL_K3S_VERSION"' 2>&1 || rc=$?
+    echo "RC=$rc"
+  }
+
+  # 2. the default pin is not the server's release: the agent gets the server's
+  t0=$(now)
+  out=$(run_follow "$pin" default "https://$SRV_HOST:6443")
+  echo "$out" > "$OUT/logs/$CASE.follow.log"
+  rc=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q "RESULT version=$ver\$"; then
+    step "$scen" 2-agent-follows "$tag" - lib READY READY $(( $(now) - t0 )) "default pin $pin ignored, the real server published $ver"
+  else
+    step "$scen" 2-agent-follows "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$rc: $(printf '%s' "$out" | tail -3 | tr '\n' ' ' | cut -c1-240)"
+    save_logs "$SRV" server; case_end; return 0
+  fi
+
+  # 3. a real agent of exactly that release joins
+  t0=$(now); agent_tag=${ver/+k3s/-k3s}
+  agt_up "$agent_tag"
+  wait_k3s agent "$AGT" "$T_AGENT" "$ASINCE" "$SRV" "$AGT_HOST"
+  step "$scen" 3-agent-joins "$agent_tag" - lib READY "$([ "$W_STATE" = READY ] && echo READY || echo "AGENT-$W_STATE")" $(( $(now) - t0 )) "agent $agent_tag, server $tag $W_NOTE"
+  save_logs "$AGT" agent
+
+  # 4. a release that was asked for and is newer than the server is refused
+  t0=$(now)
+  out=$(run_follow v1.99.0+k3s1 flag "https://$SRV_HOST:6443")
+  rc=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$rc" = 1 ] && printf '%s' "$out" | grep -q "refusing to install k3s v1.99.0+k3s1 on this agent" && ! printf '%s' "$out" | grep -q '^RESULT'; then
+    step "$scen" 4-refuses-newer "$tag" - lib READY READY $(( $(now) - t0 )) "v1.99.0 refused, the server runs $ver"
+  else
+    step "$scen" 4-refuses-newer "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$rc: $(printf '%s' "$out" | tail -3 | tr '\n' ' ' | cut -c1-240)"
+  fi
+
+  # 4b. a server that publishes nothing gives an agent nothing to follow (k3s answers /version with 401 to
+  # an anonymous caller): refused, and the message says why. The file is removed for this step.
+  t0=$(now)
+  h_mounts "$WORK" "$(gens_for bs-o111 | cut -d' ' -f1)"
+  d_helper "$(helper_image debian:bookworm)" "${HM[@]}" -- rm -f "$DATA_CT/server/static/teknoir/k3s-version"
+  out=$(run_follow "$pin" default "https://$SRV_HOST:6443")
+  rc=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$rc" = 1 ] && printf '%s' "$out" | grep -q "does not publish its release" && ! printf '%s' "$out" | grep -q '^RESULT'; then
+    step "$scen" 4b-refuses-unpublished "$tag" - lib READY READY $(( $(now) - t0 )) "nothing published, /version is 401: refused"
+  else
+    step "$scen" 4b-refuses-unpublished "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$rc: $(printf '%s' "$out" | tail -3 | tr '\n' ' ' | cut -c1-240)"
+  fi
+
+  # 5. an unreachable server is refused (the script does not guess), unless the release was asked for
+  t0=$(now)
+  out=$(run_follow "$pin" default "https://no-such-server.invalid:6443" -e TN_K3S_SERVER_VERSION_TRIES=1)
+  rc=$(printf '%s' "$out" | sed -n 's/^RC=//p')
+  if [ "$rc" = 1 ] && printf '%s' "$out" | grep -q "cannot read the k3s release of the server" && ! printf '%s' "$out" | grep -q '^RESULT'; then
+    step "$scen" 5-refuses-unreachable "$tag" - lib READY READY $(( $(now) - t0 )) "no answer from the server: refused"
+  else
+    step "$scen" 5-refuses-unreachable "$tag" - lib READY ERROR $(( $(now) - t0 )) "rc=$rc: $(printf '%s' "$out" | tail -3 | tr '\n' ' ' | cut -c1-240)"
+  fi
+  save_logs "$SRV" server
+  case_end
+}
+
+suite_install() {
+  SUITE=install
+  need_install_lib install || return 0
+  local v
+  for v in $(versions_for "v1.30.14 v1.31.14 v1.34.11 v1.36.5"); do
+    pool_run "inst-cgroup-$(ver_slug "$v")" scenario_install_cgroup "inst-cgroup-$(ver_slug "$v")" "$v"
+    pool_run "inst-policy-$(ver_slug "$v")" scenario_install_policy "inst-policy-$(ver_slug "$v")" "$v"
+  done
+  # the agent follows its server: a pre-fix and a post-fix release, each with a default pin of the other kind
+  for v in $(versions_for "v1.34.11 v1.36.5"); do
+    pool_run "inst-follow-$(ver_slug "$v")" scenario_install_follow "inst-follow-$(ver_slug "$v")" "$v"
   done
 }
