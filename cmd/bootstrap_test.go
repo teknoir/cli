@@ -3,7 +3,7 @@ package cmd
 import (
 	"testing"
 
-	"teknoir/cli/pkg/templates"
+	"github.com/teknoir/cli/pkg/templates"
 )
 
 func TestBootstrapK3SVersionFlag(t *testing.T) {
