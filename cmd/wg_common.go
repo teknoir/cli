@@ -79,3 +79,25 @@ func validateWGTarget(namespace, device string, port int) error {
 	}
 	return nil
 }
+
+// validateHubHost refuses a hub outside the logged-in domain: the Keycloak
+// access token for the domain must not be sent to an arbitrary host (a
+// poisoned TNCTL_WG_HUB or a pasted command line). Loopback is allowed for tests.
+func validateHubHost(raw, domain string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return errors.New("the hub URL is not a valid URL")
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	d := strings.ToLower(strings.Trim(domain, "."))
+	if d != "" && (host == d || strings.HasSuffix(host, "."+d)) {
+		return nil
+	}
+	return fmt.Errorf("the hub host %q is outside the logged-in domain %q; refusing to send your login token there", host, domain)
+}

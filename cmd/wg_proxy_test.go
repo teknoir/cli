@@ -230,3 +230,14 @@ func TestWGProxyCobraUsageExit(t *testing.T) {
 		t.Errorf("stderr %q", buf.String())
 	}
 }
+
+func TestWGProxyRefusesForeignHubAndBadConfig(t *testing.T) {
+	o := goodOpts("https://wg.evil.example", t.TempDir())
+	if err := o.validate(); err == nil || !strings.Contains(err.Error(), "outside the logged-in domain") {
+		t.Fatalf("err = %v", err)
+	}
+	o = goodOpts("http://127.0.0.1:9", t.TempDir())
+	if err := o.validate(); err != nil {
+		t.Fatalf("loopback refused: %v", err)
+	}
+}

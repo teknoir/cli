@@ -65,9 +65,12 @@ var wgProxyCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		o := wgProxyOpts
 		// --domain is the root's persistent flag; Load resolves flag, config, default.
-		if cfg, err := config.Load(); err == nil {
-			o.domain = cfg.Domain
+		cfg, lerr := config.Load()
+		if lerr != nil {
+			wgLine(os.Stderr, "cannot read the tnctl configuration: %s", oneLine(lerr.Error()))
+			return &exitError{code: wgExitUsage}
 		}
+		o.domain = cfg.Domain
 		if o.hubURL == "" {
 			o.hubURL = resolveWGOption("", envWGHub, "")
 		}
@@ -122,6 +125,9 @@ func (o *wgProxyOptions) validate() error {
 		return errors.New("--hub-url is required")
 	}
 	if err := validateHubURL(o.hubURL); err != nil {
+		return err
+	}
+	if err := validateHubHost(o.hubURL, o.domain); err != nil {
 		return err
 	}
 	if o.direct && o.turnServer != "" {

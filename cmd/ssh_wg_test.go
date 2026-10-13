@@ -9,7 +9,9 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestQuoteArg(t *testing.T) {
@@ -280,4 +282,95 @@ func readFile(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestValidateHubHost(t *testing.T) {
+	ok := []string{"https://wg.teknoir.cloud", "https://teknoir.cloud", "https://WG.Teknoir.Cloud.:8443", "http://127.0.0.1:1", "http://localhost", "http://[::1]:9"}
+	for _, u := range ok {
+		if err := validateHubHost(u, "teknoir.cloud"); err != nil {
+			t.Errorf("%s: %v", u, err)
+		}
+	}
+	bad := []string{"https://wg.evil.example", "https://evilteknoir.cloud", "https://teknoir.cloud.evil.example", "https://wg.teknoir.online"}
+	for _, u := range bad {
+		if err := validateHubHost(u, "teknoir.cloud"); err == nil {
+			t.Errorf("%s accepted", u)
+		}
+	}
+	if err := validateHubHost("https://wg.teknoir.cloud", ""); err == nil {
+		t.Error("empty domain accepted")
+	}
+}
+
+func TestRunSSHWireGuardRefusesForeignHub(t *testing.T) {
+	dev := &api.BackstageDevice{}
+	dev.Spec.Settings.Username = base64.StdEncoding.EncodeToString([]byte("teknoir"))
+	dev.Spec.Settings.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("k"))
+	old := sshWGHubURL
+	sshWGHubURL = "https://wg.evil.example"
+	defer func() { sshWGHubURL = old }()
+	if err := runSSHWireGuard("teknoir.cloud", "ns1", "dev-1", dev); err == nil || !strings.Contains(err.Error(), "outside the logged-in domain") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// SIGTERM to tnctl while ssh runs: ssh gets it, and the key directory is removed.
+func TestRunSSHWireGuardCleansUpOnSIGTERM(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs sh")
+	}
+	bin := t.TempDir()
+	out := filepath.Join(t.TempDir(), "out")
+	script := "#!/bin/sh\n" +
+		"while [ $# -gt 0 ]; do if [ \"$1\" = -i ]; then key=$2; fi; shift; done\n" +
+		"echo \"$key\" > " + out + ".keypath\n" +
+		"trap 'exit 7' TERM\n" +
+		"while :; do sleep 0.05; done\n"
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(envWGHub, "")
+	dev := &api.BackstageDevice{}
+	dev.Spec.Settings.Username = base64.StdEncoding.EncodeToString([]byte("teknoir"))
+	dev.Spec.Settings.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("PRIVATE"))
+	old := sshWGHubURL
+	sshWGHubURL = ""
+	defer func() { sshWGHubURL = old }()
+
+	done := make(chan error, 1)
+	go func() { done <- runSSHWireGuard("teknoir.cloud", "ns1", "dev-1", dev) }()
+	var keyPath string
+	for i := 0; i < 200 && keyPath == ""; i++ {
+		time.Sleep(25 * time.Millisecond)
+		if b, err := os.ReadFile(out + ".keypath"); err == nil {
+			keyPath = strings.TrimSpace(string(b))
+		}
+	}
+	if keyPath == "" {
+		t.Fatal("fake ssh never started")
+	}
+	time.Sleep(100 * time.Millisecond) // let the trap install
+	if err := selfSignal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected ssh exit status 7")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runSSHWireGuard did not return")
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Errorf("key not removed after SIGTERM: %v", err)
+	}
+}
+
+func selfSignal(sig os.Signal) error {
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		return err
+	}
+	return p.Signal(sig)
 }

@@ -3,7 +3,11 @@ package auth
 import (
 	"context"
 	"fmt"
+	"os"
+	"sync"
 	"time"
+
+	"github.com/spf13/viper"
 
 	"github.com/teknoir/cli/pkg/config"
 	"golang.org/x/oauth2"
@@ -28,12 +32,55 @@ type tokenDeps struct {
 	load    func() (*config.Config, error)
 	refresh func(ctx context.Context, domain string, a config.AuthConfig) (*oauth2.Token, error)
 	save    func(*config.Config) error
+	// lock serialises the read-refresh-save cycle across processes; nil = none.
+	lock func(ctx context.Context) (unlock func(), err error)
+}
+
+// tokenMu serialises the cycle inside one process.
+var tokenMu sync.Mutex
+
+// fileLock takes an exclusive lock file next to the config file, so two tnctl
+// processes (a long-lived wg-proxy and another command) never run the
+// rotating-refresh-token cycle at the same time. A lock older than 30s is
+// considered stale (crashed holder) and is taken over.
+func fileLock(ctx context.Context) (func(), error) {
+	path := viper.ConfigFileUsed()
+	if path == "" {
+		return func() {}, nil
+	}
+	lock := path + ".lock"
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_ = f.Close()
+			return func() { _ = os.Remove(lock) }, nil
+		}
+		if !os.IsExist(err) {
+			return func() {}, nil // cannot lock (read-only dir): proceed unlocked
+		}
+		if st, serr := os.Stat(lock); serr == nil && time.Since(st.ModTime()) > 30*time.Second {
+			_ = os.Remove(lock)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for the tnctl config lock %s", lock)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 var defaultTokenDeps = tokenDeps{
-	load:    config.Load,
+	// LoadFresh re-reads the file, so a refresh token rotated by another
+	// process is never overwritten with a stale one.
+	load:    config.LoadFresh,
 	refresh: GetValidToken,
 	save:    func(c *config.Config) error { return c.Save() },
+	lock:    fileLock,
 }
 
 // AccessToken loads the tnctl configuration, returns a valid access token for
@@ -45,6 +92,15 @@ func AccessToken(ctx context.Context, domain string) (string, error) {
 }
 
 func accessToken(ctx context.Context, domain string, d tokenDeps) (string, error) {
+	tokenMu.Lock()
+	defer tokenMu.Unlock()
+	if d.lock != nil {
+		unlock, err := d.lock(ctx)
+		if err != nil {
+			return "", err
+		}
+		defer unlock()
+	}
 	cfg, err := d.load()
 	if err != nil {
 		return "", err

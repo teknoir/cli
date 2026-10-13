@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/teknoir/cli/pkg/api"
 	"github.com/teknoir/cli/pkg/config"
@@ -111,6 +113,9 @@ func runSSHWireGuard(domain, ns, deviceName string, dev *api.BackstageDevice) er
 	if err := validateHubURL(hubURL); err != nil {
 		return err
 	}
+	if err := validateHubHost(hubURL, domain); err != nil {
+		return err
+	}
 	turn := resolveWGOption(sshTURNServer, envWGTurnServer, "")
 
 	exe, err := os.Executable()
@@ -152,5 +157,31 @@ func runSSHWireGuard(domain, ns, deviceName string, dev *api.BackstageDevice) er
 
 	printRemoteShellBanner(deviceName, password)
 
-	return sshExec.Run()
+	return runWithSignalForwarding(sshExec)
+}
+
+// runWithSignalForwarding runs cmd, forwarding SIGINT/SIGTERM/SIGHUP to it and
+// waiting for it, so the caller's deferred cleanup (the private key directory)
+// still runs when tnctl is terminated or its terminal closes.
+func runWithSignalForwarding(cmd *exec.Cmd) error {
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigs)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case sig := <-sigs:
+				_ = cmd.Process.Signal(sig)
+			case <-done:
+				return
+			}
+		}
+	}()
+	err := cmd.Wait()
+	close(done)
+	return err
 }

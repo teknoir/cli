@@ -58,7 +58,7 @@ require (
 
 require (
 	github.com/teknoir/cli/pkg/templates v0.0.0
-	github.com/teknoir/wg-tunnel v0.0.0-20261013120015-4156b36f4d99
+	github.com/teknoir/wg-tunnel v0.0.0-20261013124842-b1098dea939c
 )
 
 replace github.com/teknoir/cli/pkg/templates => ./pkg/templates
