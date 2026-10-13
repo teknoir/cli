@@ -49,7 +49,7 @@ After extracting, move the `tnctl` binary into a directory on your `PATH` (for e
 
 ## From source
 
-Requires **Go 1.23+** (this repository builds with Go 1.25).
+Requires **Go 1.26+** (this repository builds with Go 1.26).
 
 ```bash
 git clone https://github.com/teknoir/cli.git

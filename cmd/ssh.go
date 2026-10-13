@@ -13,10 +13,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	sshWireGuard  bool
+	sshTURNServer string
+	sshWGHubURL   string
+)
+
 var sshCmd = &cobra.Command{
 	Use:   "ssh [device-name]",
 	Short: "SSH into a device",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !sshWireGuard && (sshTURNServer != "" || sshWGHubURL != "") {
+			return fmt.Errorf("--turn-server and --wg-hub-url require --wireguard")
+		}
+
 		cfg, err := config.Load()
 		if err != nil {
 			return err
@@ -62,29 +72,19 @@ var sshCmd = &cobra.Command{
 			return err
 		}
 
+		if sshWireGuard {
+			// The WireGuard path does not use the SSH tunnel's remote_access
+			// switch; access is decided by the hub (see ssh_wg.go).
+			return runSSHWireGuard(domain, namespace, deviceName, device)
+		}
+
 		if !device.Spec.Subresources.Status.RemoteAccess.Active {
 			return fmt.Errorf("remote access is not enabled for device %s. Please enable it in the Teknoir Console", deviceName)
 		}
 
-		// Decode base64 username, password and private key
-		usernameBytes, err := base64.StdEncoding.DecodeString(device.Spec.Settings.Username)
+		username, password, privateKey, err := decodeDeviceLogin(device)
 		if err != nil {
-			return fmt.Errorf("failed to decode username: %w", err)
-		}
-		username := string(usernameBytes)
-
-		var password string
-		if device.Spec.Settings.Password != "" {
-			passwordBytes, err := base64.StdEncoding.DecodeString(device.Spec.Settings.Password)
-			if err != nil {
-				return fmt.Errorf("failed to decode password: %w", err)
-			}
-			password = string(passwordBytes)
-		}
-
-		privateKey, err := base64.StdEncoding.DecodeString(device.Spec.Settings.RSAPrivate)
-		if err != nil {
-			return fmt.Errorf("failed to decode RSA private key: %w", err)
+			return err
 		}
 
 		// Create secure temp file for private key
@@ -123,18 +123,52 @@ var sshCmd = &cobra.Command{
 			fmt.Printf("DEBUG: Executing command: %s %v\n", sshExec.Path, sshExec.Args)
 		}
 
-		// Print colorful message and password
-		fmt.Printf("\033[1;32m\n>>> You are now using a remote shell on device: %s\033[0m\n", deviceName)
-		if password != "" {
-			fmt.Printf("\033[1;36m>>> SSH Password: %s\033[0m\n\n", password)
-		} else {
-			fmt.Println()
-		}
+		printRemoteShellBanner(deviceName, password)
 
 		return sshExec.Run()
 	},
 }
 
+// decodeDeviceLogin decodes the base64 username, password and RSA private key
+// from the device details. password is empty when the device has none.
+func decodeDeviceLogin(device *api.BackstageDevice) (username, password string, privateKey []byte, err error) {
+	usernameBytes, err := base64.StdEncoding.DecodeString(device.Spec.Settings.Username)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to decode username: %w", err)
+	}
+	username = string(usernameBytes)
+
+	if device.Spec.Settings.Password != "" {
+		passwordBytes, err := base64.StdEncoding.DecodeString(device.Spec.Settings.Password)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("failed to decode password: %w", err)
+		}
+		password = string(passwordBytes)
+	}
+
+	privateKey, err = base64.StdEncoding.DecodeString(device.Spec.Settings.RSAPrivate)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to decode RSA private key: %w", err)
+	}
+	return username, password, privateKey, nil
+}
+
+// printRemoteShellBanner prints the colorful message and the device password.
+func printRemoteShellBanner(deviceName, password string) {
+	fmt.Printf("\033[1;32m\n>>> You are now using a remote shell on device: %s\033[0m\n", deviceName)
+	if password != "" {
+		fmt.Printf("\033[1;36m>>> SSH Password: %s\033[0m\n\n", password)
+	} else {
+		fmt.Println()
+	}
+}
+
 func init() {
 	rootCmd.AddCommand(sshCmd)
+	sshCmd.Flags().BoolVar(&sshWireGuard, "wireguard", false,
+		"connect through the WireGuard (ZTNA) tunnel instead of the SSH tunnel")
+	sshCmd.Flags().StringVar(&sshTURNServer, "turn-server", "",
+		"with --wireguard: TURN server host:port overriding the hub's (env TNCTL_WG_TURN_SERVER)")
+	sshCmd.Flags().StringVar(&sshWGHubURL, "wg-hub-url", "",
+		"with --wireguard: WireGuard hub URL (default https://wg.<domain>, env TNCTL_WG_HUB)")
 }

@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"time"
 
 	"github.com/teknoir/cli/pkg/auth"
-	"github.com/teknoir/cli/pkg/config"
 )
 
 type DeviceAlert struct {
@@ -75,31 +73,9 @@ type backstageResponse struct {
 }
 
 func FetchDeviceDetails(ctx context.Context, domain, namespace, deviceName string) (*BackstageDevice, error) {
-	cfg, err := config.Load()
+	accessToken, err := auth.AccessToken(ctx, domain)
 	if err != nil {
 		return nil, err
-	}
-
-	sanitizedDomain := config.SanitizeDomain(domain)
-	authData, exists := cfg.Auths[sanitizedDomain]
-	if !exists || authData.AccessToken == "" {
-		return nil, fmt.Errorf("no credentials found for domain %s. Please log in first", domain)
-	}
-
-	token, err := auth.GetValidToken(ctx, domain, authData)
-	if err != nil {
-		return nil, err
-	}
-
-	// Update config with new token if refreshed
-	if token.AccessToken != authData.AccessToken || token.RefreshToken != authData.RefreshToken {
-		authData.AccessToken = token.AccessToken
-		authData.RefreshToken = token.RefreshToken
-		authData.Expiry = token.Expiry.Format(time.RFC3339)
-		cfg.Auths[sanitizedDomain] = authData
-		if err := cfg.Save(); err != nil {
-			return nil, fmt.Errorf("failed to save refreshed token: %w", err)
-		}
 	}
 
 	url := fmt.Sprintf("https://%s/api/catalog/entities/by-refs", domain)
@@ -108,7 +84,7 @@ func FetchDeviceDetails(ctx context.Context, domain, namespace, deviceName strin
 	}
 
 	var resp backstageResponse
-	if err := RequestWithBody(ctx, "POST", url, token.AccessToken, payload, &resp); err != nil {
+	if err := RequestWithBody(ctx, "POST", url, accessToken, payload, &resp); err != nil {
 		return nil, err
 	}
 
@@ -132,31 +108,9 @@ func FetchDevices(ctx context.Context, domain, namespace string) ([]string, erro
 }
 
 func FetchDeviceDetailsList(ctx context.Context, domain, namespace string, labels map[string]string) ([]BackstageDevice, error) {
-	cfg, err := config.Load()
+	accessToken, err := auth.AccessToken(ctx, domain)
 	if err != nil {
 		return nil, err
-	}
-
-	sanitizedDomain := config.SanitizeDomain(domain)
-	authData, exists := cfg.Auths[sanitizedDomain]
-	if !exists || authData.AccessToken == "" {
-		return nil, fmt.Errorf("no credentials found for domain %s. Please log in first", domain)
-	}
-
-	token, err := auth.GetValidToken(ctx, domain, authData)
-	if err != nil {
-		return nil, err
-	}
-
-	// Update config with new token if refreshed
-	if token.AccessToken != authData.AccessToken || token.RefreshToken != authData.RefreshToken {
-		authData.AccessToken = token.AccessToken
-		authData.RefreshToken = token.RefreshToken
-		authData.Expiry = token.Expiry.Format(time.RFC3339)
-		cfg.Auths[sanitizedDomain] = authData
-		if err := cfg.Save(); err != nil {
-			return nil, fmt.Errorf("failed to save refreshed token: %w", err)
-		}
 	}
 
 	filterStr := fmt.Sprintf("kind=resource,spec.type=device,metadata.namespace=%s", namespace)
@@ -167,7 +121,7 @@ func FetchDeviceDetailsList(ctx context.Context, domain, namespace string, label
 	reqURL := fmt.Sprintf("https://%s/api/catalog/entities?filter=%s&order=asc%%3Ametadata.name", domain, url.QueryEscape(filterStr))
 
 	var items []BackstageDevice
-	if err := Request(ctx, "GET", reqURL, token.AccessToken, &items); err != nil {
+	if err := Request(ctx, "GET", reqURL, accessToken, &items); err != nil {
 		return nil, err
 	}
 
