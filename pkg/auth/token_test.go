@@ -205,3 +205,31 @@ func TestFileLockExcludesAndRecovers(t *testing.T) {
 	}
 	un3()
 }
+
+func TestFreshAccessTokenForcesRefresh(t *testing.T) {
+	var sawExpiry []string
+	d := tokenDeps{
+		load: func() (*config.Config, error) {
+			return &config.Config{Auths: map[string]config.AuthConfig{
+				config.SanitizeDomain("example.com"): {AccessToken: "old", RefreshToken: "r", Expiry: time.Now().Add(time.Hour).Format(time.RFC3339)},
+			}}, nil
+		},
+		refresh: func(_ context.Context, _ string, a config.AuthConfig) (*oauth2.Token, error) {
+			sawExpiry = append(sawExpiry, a.Expiry)
+			return &oauth2.Token{AccessToken: "new", RefreshToken: "r2", Expiry: time.Now().Add(5 * time.Minute)}, nil
+		},
+		save: func(*config.Config) error { return nil },
+	}
+	refresh := d.refresh
+	d.refresh = func(ctx context.Context, domain string, a config.AuthConfig) (*oauth2.Token, error) {
+		a.Expiry = ""
+		return refresh(ctx, domain, a)
+	}
+	tok, err := accessToken(context.Background(), "example.com", d)
+	if err != nil || tok != "new" {
+		t.Fatalf("got %q, %v", tok, err)
+	}
+	if len(sawExpiry) != 1 || sawExpiry[0] != "" {
+		t.Fatalf("refresh did not see a cleared expiry: %v", sawExpiry)
+	}
+}

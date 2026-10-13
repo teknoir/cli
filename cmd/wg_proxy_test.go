@@ -168,7 +168,9 @@ func TestRunWGProxyNotLoggedIn(t *testing.T) {
 	var hit atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit.Store(true) }))
 	defer srv.Close()
-	cred := func(context.Context, string) (string, error) { return "", &auth.NotLoggedInError{Domain: "teknoir.cloud"} }
+	cred := func(context.Context, string) (string, error) {
+		return "", &auth.NotLoggedInError{Domain: "teknoir.cloud"}
+	}
 	var stdout, stderr bytes.Buffer
 	code := runWGProxy(context.Background(), goodOpts(srv.URL, t.TempDir()), cred, nil, strings.NewReader(""), &stdout, &stderr)
 	if code != 1 || stderr.String() != "tnctl: wireguard: not logged in to teknoir.cloud; run 'tnctl login'\n" {

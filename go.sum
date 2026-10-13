@@ -136,10 +136,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/subosito/gotenv v1.6.0 h1:9NlTDc1FTs4qu0DDq7AEtTPNw6SVm7uBMsUCUjABIf8=
 github.com/subosito/gotenv v1.6.0/go.mod h1:Dk4QP5c2W3ibzajGcXpNraDfq2IrhjMIvMSWPKKo0FU=
-github.com/teknoir/wg-tunnel v0.0.0-20261013120015-4156b36f4d99 h1:62w/N9JCYZfoFIyuFnENEeug6fJBPnawbW0AeGQIohg=
-github.com/teknoir/wg-tunnel v0.0.0-20261013120015-4156b36f4d99/go.mod h1:zi/Cgy80eT8qwsRQsGze1sv2Rq/QirE17BUT0gnzwKM=
-github.com/teknoir/wg-tunnel v0.0.0-20261013124842-b1098dea939c h1:mMZXBPxvzG3qPwICWRsKX8b4keDvELatRLGFDQhcHCk=
-github.com/teknoir/wg-tunnel v0.0.0-20261013124842-b1098dea939c/go.mod h1:zi/Cgy80eT8qwsRQsGze1sv2Rq/QirE17BUT0gnzwKM=
+github.com/teknoir/wg-tunnel v0.0.0-20261013132118-b1b2d6f5dafc h1:K5jNO9mn8X7HCwyEywzo0FrpHAeep9cD4wszTwd8AJA=
+github.com/teknoir/wg-tunnel v0.0.0-20261013132118-b1b2d6f5dafc/go.mod h1:zi/Cgy80eT8qwsRQsGze1sv2Rq/QirE17BUT0gnzwKM=
 github.com/wlynxg/anet v0.0.5 h1:J3VJGi1gvo0JwZ/P1/Yc/8p63SoW98B5dHkYDmpgvvU=
 github.com/wlynxg/anet v0.0.5/go.mod h1:eay5PRQr7fIVAMbTbchTnO9gG65Hg/uYGdc7mguHxoA=
 github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778/go.mod h1:2MuV+tbUrU1zIOPMxZ5EncGwgmMJsa+9ucAQZXxsObs=

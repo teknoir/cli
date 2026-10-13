@@ -85,9 +85,16 @@ var wgProxyCmd = &cobra.Command{
 		defer stop()
 
 		// The token is read from ~/.tnctl.yaml (and refreshed) on every call,
-		// never from argv or the environment.
+		// never from argv or the environment. Session creation may use the
+		// cached token; every renewal must present a newly issued one (the hub
+		// refuses a token it has already accepted), so renewals force a refresh.
+		var calls int
 		cred := func(ctx context.Context, _ string) (string, error) {
-			return auth.AccessToken(ctx, o.domain)
+			calls++
+			if calls == 1 {
+				return auth.AccessToken(ctx, o.domain)
+			}
+			return auth.FreshAccessToken(ctx, o.domain)
 		}
 		code := runWGProxy(ctx, o, cred, nil, os.Stdin, os.Stdout, os.Stderr)
 		if code != wgExitOK {
