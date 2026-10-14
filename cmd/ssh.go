@@ -75,6 +75,9 @@ var sshCmd = &cobra.Command{
 		if sshWireGuard {
 			// The WireGuard path does not use the SSH tunnel's remote_access
 			// switch; access is decided by the hub (see ssh_wg.go).
+			// Errors from here on are runtime failures (a hub denial, ssh's exit
+			// status), not usage mistakes: don't print the usage text.
+			cmd.SilenceUsage = true
 			return runSSHWireGuard(domain, namespace, deviceName, device)
 		}
 
