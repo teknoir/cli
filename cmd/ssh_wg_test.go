@@ -171,7 +171,7 @@ func TestSSHWireGuardFlags(t *testing.T) {
 	}
 	// local to ssh only
 	for _, c := range rootCmd.Commands() {
-		if c == sshCmd || c.Name() == "wg-proxy" {
+		if c == sshCmd || c == portForwardCmd || c.Name() == "wg-proxy" {
 			continue
 		}
 		if c.Flags().Lookup("wireguard") != nil {

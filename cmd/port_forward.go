@@ -18,6 +18,11 @@ import (
 var (
 	localPort  int
 	targetAddr string
+
+	pfWireGuard  bool
+	pfNoP2P      bool
+	pfTURNServer string
+	pfWGHubURL   string
 )
 
 var portForwardCmd = &cobra.Command{
@@ -28,8 +33,17 @@ Example:
   tnctl port-forward my-device 8080:localhost:80
   tnctl port-forward my-device 8080:192.168.1.10:80
   tnctl port-forward my-device 31883:31883 (defaults to localhost:31883)
-  tnctl port-forward --port 8080 --to localhost:80`,
+  tnctl port-forward --port 8080 --to localhost:80
+
+Through the WireGuard (ZTNA) tunnel the target is a service ID that the device
+publishes, not host:port. A direct path to the device is tried first and the
+hub relays when that fails:
+  tnctl port-forward --wireguard my-device 8080:grafana
+  tnctl port-forward --wireguard my-device grafana   (random local port)`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !pfWireGuard && (pfNoP2P || pfTURNServer != "" || pfWGHubURL != "") {
+			return fmt.Errorf("--no-p2p, --turn-server and --wg-hub-url require --wireguard")
+		}
 		cfg, err := config.Load()
 		if err != nil {
 			return err
@@ -44,7 +58,19 @@ Example:
 
 		var deviceName string
 		argIdx := 0
-		if len(args) > argIdx && !strings.Contains(args[argIdx], ":") {
+		if pfWireGuard {
+			// [device] [local:]service-id. One bare word is the device, unless
+			// --device names it, in which case the word is the service.
+			if len(args) > 2 {
+				return fmt.Errorf("too many arguments: expected [device] [local-port:]service-id")
+			}
+			if len(args) == 2 || (len(args) == 1 && !strings.Contains(args[0], ":") && device == "") {
+				deviceName = args[0]
+				argIdx = 1
+			} else if device != "" {
+				deviceName = device
+			}
+		} else if len(args) > argIdx && !strings.Contains(args[argIdx], ":") {
 			deviceName = args[argIdx]
 			argIdx++
 		} else if device != "" {
@@ -69,6 +95,24 @@ Example:
 				return err
 			}
 			deviceName = devices[idx]
+		}
+
+		if pfWireGuard {
+			if len(args) <= argIdx {
+				return fmt.Errorf("a service ID is required: tnctl port-forward --wireguard %s [local-port:]service-id (see 'tnctl wg status %s')", deviceName, deviceName)
+			}
+			local, service, err := parseWGForwardArg(args[argIdx])
+			if err != nil {
+				return err
+			}
+			if localPort != 0 {
+				if local != 0 && local != localPort {
+					return fmt.Errorf("--port %d conflicts with the local port %d in the argument", localPort, local)
+				}
+				local = localPort
+			}
+			cmd.SilenceUsage = true
+			return runPortForwardWireGuard(cmd, domain, namespace, deviceName, service, local)
 		}
 
 		// Handle port mapping from arguments if provided
@@ -199,5 +243,13 @@ Example:
 func init() {
 	rootCmd.AddCommand(portForwardCmd)
 	portForwardCmd.Flags().IntVarP(&localPort, "port", "p", 0, "Local port to listen on")
+	portForwardCmd.Flags().BoolVar(&pfWireGuard, "wireguard", false,
+		"forward a device service through the WireGuard (ZTNA) tunnel; the target is a service ID")
+	portForwardCmd.Flags().BoolVar(&pfNoP2P, "no-p2p", false,
+		"with --wireguard: do not try a direct connection to the device, always go through the hub")
+	portForwardCmd.Flags().StringVar(&pfTURNServer, "turn-server", "",
+		"with --wireguard: TURN server host:port overriding the hub's (env TNCTL_WG_TURN_SERVER)")
+	portForwardCmd.Flags().StringVar(&pfWGHubURL, "wg-hub-url", "",
+		"with --wireguard: WireGuard hub URL (default https://wg.<domain>, env TNCTL_WG_HUB)")
 	portForwardCmd.Flags().StringVarP(&targetAddr, "to", "t", "", "Target address on the device network (e.g. 127.0.0.1:80)")
 }

@@ -15,6 +15,7 @@ usage, or follow the links below for full documentation.
 | [`devices`](devices.md) | `devs` | Print a summary list of devices in the namespace. |
 | [`ssh`](ssh.md) | | Open an interactive SSH session on a device. |
 | [`port-forward`](port-forward.md) | | Forward a local port to the device or its network. |
+| [`wg status`](wg.md) | | Show how a device is reachable through WireGuard and which services it publishes. |
 | [`socks-proxy`](socks-proxy.md) | | Establish a SOCKS5 proxy via a device. |
 | [`bootstrap`](bootstrap.md) | | Generate device provisioning scripts. |
 

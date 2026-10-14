@@ -53,6 +53,8 @@ type BackstageDevice struct {
 		Name      string            `json:"name"`
 		Namespace string            `json:"namespace"`
 		Labels    map[string]string `json:"labels"`
+		// Annotations include ztna.teknoir.org/services (JSON list of service specs).
+		Annotations map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		Settings struct {

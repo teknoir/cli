@@ -23,6 +23,7 @@ nav:
       - devices: commands/devices.md
       - ssh: commands/ssh.md
       - port-forward: commands/port-forward.md
+      - wg: commands/wg.md
       - socks-proxy: commands/socks-proxy.md
       - bootstrap: commands/bootstrap.md
   - Troubleshooting: troubleshooting.md

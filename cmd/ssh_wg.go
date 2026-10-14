@@ -28,6 +28,7 @@ type proxyArgs struct {
 	Port           int
 	KnownHostsFile string
 	TURNServer     string // optional
+	P2P            bool
 	HubURL         string
 }
 
@@ -63,6 +64,9 @@ func buildProxyCommand(a proxyArgs, goos string) string {
 		words = append(words, "--turn-server", a.TURNServer)
 	}
 	words = append(words, "--hub-url", a.HubURL)
+	if a.P2P {
+		words = append(words, "--p2p")
+	}
 
 	quoted := make([]string, len(words))
 	for i, w := range words {
@@ -142,7 +146,7 @@ func runSSHWireGuard(domain, ns, deviceName string, dev *api.BackstageDevice) er
 
 	proxy := buildProxyCommand(proxyArgs{
 		Exe: exe, ConfigFile: cfgFile, Domain: domain, Namespace: ns, Device: deviceName, Port: 22,
-		KnownHostsFile: knownHosts, TURNServer: turn, HubURL: hubURL,
+		KnownHostsFile: knownHosts, TURNServer: turn, HubURL: hubURL, P2P: !sshNoP2P,
 	}, runtime.GOOS)
 
 	sshExec := exec.Command("ssh",

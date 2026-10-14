@@ -17,14 +17,15 @@ var (
 	sshWireGuard  bool
 	sshTURNServer string
 	sshWGHubURL   string
+	sshNoP2P      bool
 )
 
 var sshCmd = &cobra.Command{
 	Use:   "ssh [device-name]",
 	Short: "SSH into a device",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if !sshWireGuard && (sshTURNServer != "" || sshWGHubURL != "") {
-			return fmt.Errorf("--turn-server and --wg-hub-url require --wireguard")
+		if !sshWireGuard && (sshTURNServer != "" || sshWGHubURL != "" || sshNoP2P) {
+			return fmt.Errorf("--turn-server, --wg-hub-url and --no-p2p require --wireguard")
 		}
 
 		cfg, err := config.Load()
@@ -170,6 +171,8 @@ func init() {
 	rootCmd.AddCommand(sshCmd)
 	sshCmd.Flags().BoolVar(&sshWireGuard, "wireguard", false,
 		"connect through the WireGuard (ZTNA) tunnel instead of the SSH tunnel")
+	sshCmd.Flags().BoolVar(&sshNoP2P, "no-p2p", false,
+		"with --wireguard: do not try a direct connection to the device, always go through the hub")
 	sshCmd.Flags().StringVar(&sshTURNServer, "turn-server", "",
 		"with --wireguard: TURN server host:port overriding the hub's (env TNCTL_WG_TURN_SERVER)")
 	sshCmd.Flags().StringVar(&sshWGHubURL, "wg-hub-url", "",

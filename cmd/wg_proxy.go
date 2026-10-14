@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -49,6 +48,8 @@ type wgProxyOptions struct {
 	turnServer     string
 	hubURL         string
 	direct         bool
+	p2p            bool   // ask for a direct (plane B) path; the ssh stream uses service "ssh"
+	stunServer     string // STUN host:port overriding the hub's
 }
 
 var wgProxyOpts wgProxyOptions
@@ -88,14 +89,7 @@ var wgProxyCmd = &cobra.Command{
 		// never from argv or the environment. Session creation may use the
 		// cached token; every renewal must present a newly issued one (the hub
 		// refuses a token it has already accepted), so renewals force a refresh.
-		var calls int
-		cred := func(ctx context.Context, _ string) (string, error) {
-			calls++
-			if calls == 1 {
-				return auth.AccessToken(ctx, o.domain)
-			}
-			return auth.FreshAccessToken(ctx, o.domain)
-		}
+		cred := newWGCredential(o.domain)
 		code := runWGProxy(ctx, o, cred, nil, os.Stdin, os.Stdout, os.Stderr)
 		if code != wgExitOK {
 			return &exitError{code: code}
@@ -115,6 +109,8 @@ func init() {
 	f.StringVar(&wgProxyOpts.knownHostsFile, "known-hosts-file", "", "file to write the device SSH host keys to")
 	f.StringVar(&wgProxyOpts.turnServer, "turn-server", "", "TURN server host:port overriding the hub's (env TNCTL_WG_TURN_SERVER)")
 	f.StringVar(&wgProxyOpts.hubURL, "hub-url", "", "WireGuard hub URL (default https://wg.<domain>, env TNCTL_WG_HUB)")
+	f.BoolVar(&wgProxyOpts.p2p, "p2p", false, "try a direct WireGuard path to the device (falls back to the hub)")
+	f.StringVar(&wgProxyOpts.stunServer, "stun-server", "", "STUN server host:port overriding the hub's")
 	f.BoolVar(&wgProxyOpts.direct, "direct", false, "debug: send WireGuard straight to the hub over UDP (in-cluster only)")
 }
 
@@ -136,6 +132,9 @@ func (o *wgProxyOptions) validate() error {
 	}
 	if err := validateHubHost(o.hubURL, o.domain); err != nil {
 		return err
+	}
+	if o.direct && o.p2p {
+		return errors.New("--direct and --p2p are mutually exclusive")
 	}
 	if o.direct && o.turnServer != "" {
 		return errors.New("--direct and --turn-server are mutually exclusive")
@@ -169,6 +168,16 @@ func wgHint(reason, namespace, device string) string {
 		return "the device agent identity needs attention; ask a teamspace admin to reset its enrollment"
 	case api.ReasonPortNotAllowed:
 		return "this port is not allowed for the device"
+	case api.ReasonPendingApproval:
+		return "the device identity is waiting for approval; ask a teamspace admin to approve its fingerprint"
+	case api.ReasonAttestRequired:
+		return "the device agent could not prove its identity (host-key attestation); ask a teamspace admin"
+	case api.ReasonServiceUnknown:
+		return "the device has no such service; list them with 'tnctl wg status <device>'"
+	case api.ReasonServiceDenied:
+		return "the device refused the service target; ask a teamspace admin to check the service definition"
+	case api.ReasonP2PUnavailable:
+		return "the device cannot take a direct connection; retry with --no-p2p to go through the hub"
 	case api.ReasonPosture:
 		return "this tnctl version is not accepted by the hub; update tnctl"
 	case api.ReasonSessionLimit:
@@ -234,18 +243,22 @@ func runWGProxy(ctx context.Context, o wgProxyOptions, cred wgclient.Credential,
 		return wgExitUsage
 	}
 
-	host, _ := os.Hostname()
+	req := &api.ClientSessionRequest{Namespace: o.namespace, Device: o.device, Port: o.port, Posture: wgPosture()}
+	if o.p2p {
+		// Named services are what plane B grants are made for (phase 2). The
+		// raw-port request stays for the plain hub path, which older hubs know.
+		req.Service, req.Port = api.ServiceSSHID, 0
+	}
 	opts := wgclient.Options{
-		HubURL:     o.hubURL,
-		Kind:       api.KindClient,
-		Credential: cred,
-		ClientRequest: &api.ClientSessionRequest{
-			Namespace: o.namespace, Device: o.device, Port: o.port,
-			Posture: api.Posture{Software: "tnctl", Version: Version, OS: runtime.GOOS, Arch: runtime.GOARCH, Hostname: host},
-		},
+		HubURL:             o.hubURL,
+		Kind:               api.KindClient,
+		Credential:         cred,
+		ClientRequest:      req,
 		Direct:             o.direct,
 		TURNServerOverride: o.turnServer,
 		HTTPClient:         hc,
+		P2P:                o.p2p,
+		P2PSTUN:            o.stunServer,
 	}
 	if err := opts.Validate(); err != nil {
 		wgLine(stderr, "%s", oneLine(err.Error()))
@@ -273,7 +286,12 @@ func runWGProxy(ctx context.Context, o wgProxyOptions, cred wgclient.Credential,
 	}
 
 	dctx, dcancel := context.WithTimeout(ctx, wgDialTimeout)
-	conn, err := sess.Dial(dctx)
+	var conn net.Conn
+	if o.p2p {
+		conn, err = sess.DialService(dctx, api.ServiceSSHID)
+	} else {
+		conn, err = sess.Dial(dctx)
+	}
 	dcancel()
 	if err != nil {
 		wgLine(stderr, "cannot reach the device through the tunnel: %s", describeWGError(err, &o))

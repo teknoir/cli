@@ -87,6 +87,11 @@ Securely connect to your edge devices via Teknoir's proxy infrastructure.
   ```bash
   tnctl port-forward [device] 8080:localhost:80
   ```
+  Or forward a device service through the WireGuard tunnel (direct to the device when possible), and check the path:
+  ```bash
+  tnctl port-forward --wireguard [device] 8080:grafana
+  tnctl wg status [device]
+  ```
 - **SOCKS5 Proxy**:
   Establish a SOCKS5 proxy to access the device's entire network:
   ```bash

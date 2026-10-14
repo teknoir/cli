@@ -52,8 +52,15 @@ and prints a ready-to-click `http(s)://localhost:<port>` URL.
 
 ## WireGuard (ZTNA) path
 
-`tnctl ssh --wireguard` reaches the device through a different transport that is built for zero trust
-access. It is available for `ssh` only, and it runs next to the SSH tunnel described above.
+`tnctl ssh --wireguard` and `tnctl port-forward --wireguard` reach the device through a different
+transport that is built for zero trust access. It runs next to the SSH tunnel described above.
+`port-forward --wireguard` forwards a named device service (a web UI, or a Kubernetes Service inside
+the device) to a local port, and `tnctl wg status` shows how a device is reachable.
+
+Both try a **direct** path first: a peer-to-peer WireGuard session between your machine and the device
+(on the same LAN, or through NAT), so the hub carries no traffic. If that does not come up within
+about 2.5 seconds, the hub relays the connection as described below. Use `--no-p2p` to skip the direct
+path.
 
 How it works:
 
