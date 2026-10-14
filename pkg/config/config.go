@@ -73,7 +73,55 @@ func (c *Config) Save() error {
 	viper.Set("namespace", nil)
 	viper.Set("device", nil)
 	viper.Set("debug", nil)
-	return viper.WriteConfig()
+	return writeConfigAtomic()
+}
+
+// writeConfigAtomic writes viper's state next to the config file and renames
+// it into place, so a concurrent reader never sees a half-written file.
+func writeConfigAtomic() error {
+	path := viper.ConfigFileUsed()
+	if path == "" {
+		return viper.WriteConfig()
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".tnctl-*"+filepath.Ext(path))
+	if err != nil {
+		return viper.WriteConfig()
+	}
+	tmp := f.Name()
+	_ = f.Close()
+	defer os.Remove(tmp)
+	if err := viper.WriteConfigAs(tmp); err != nil {
+		return err
+	}
+	mode := os.FileMode(0o600)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+	}
+	_ = os.Chmod(tmp, mode)
+	return os.Rename(tmp, path)
+}
+
+// LoadFresh reads the configuration file from disk again, ignoring viper's
+// in-memory state, for long-running processes that must see token refreshes
+// made by other tnctl processes. Without a config file it behaves like Load.
+func LoadFresh() (*Config, error) {
+	path := viper.ConfigFileUsed()
+	if path == "" {
+		return Load()
+	}
+	v := viper.New()
+	v.SetConfigFile(path)
+	if err := v.ReadInConfig(); err != nil {
+		return nil, err
+	}
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, err
+	}
+	if cfg.Auths == nil {
+		cfg.Auths = make(map[string]AuthConfig)
+	}
+	return &cfg, nil
 }
 
 // UpdateDomain switches the active domain.

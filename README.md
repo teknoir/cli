@@ -77,6 +77,11 @@ Securely connect to your edge devices via Teknoir's proxy infrastructure.
   ```bash
   tnctl ssh [device-name]
   ```
+  Or through the WireGuard (ZTNA) tunnel, which the platform can cut off at once if the device is
+  flagged compromised or fails its health check:
+  ```bash
+  tnctl ssh --wireguard [device-name]
+  ```
 - **Port Forwarding**:
   Forward a local port to the device or its network:
   ```bash

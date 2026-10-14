@@ -50,6 +50,41 @@ The SSH options used harden and stabilize the session:
 `port-forward` additionally recognizes common web ports (80, 443, 3000, 5000, 8080, 8443, 9000, 9090)
 and prints a ready-to-click `http(s)://localhost:<port>` URL.
 
+## WireGuard (ZTNA) path
+
+`tnctl ssh --wireguard` reaches the device through a different transport that is built for zero trust
+access. It is available for `ssh` only, and it runs next to the SSH tunnel described above.
+
+How it works:
+
+1. `tnctl` asks the WireGuard hub (`https://wg.<domain>`) for a session to one device and one port
+   (22), authenticating with your `tnctl login` token. The hub checks your access to the teamspace
+   and the device's state before it answers.
+2. The hub returns a WireGuard session and the device's SSH host keys. `tnctl` brings up a userspace
+   WireGuard tunnel (no root, no network interface) to the hub, relayed over UDP through a TURN
+   gateway, so no inbound ports are needed on your side or on the device.
+3. `ssh` runs with `ProxyCommand` pointing at `tnctl wg-proxy`, which pipes the SSH stream through the
+   tunnel. The host keys from step 2 are written to a temporary `known_hosts`, and `ssh` runs with
+   `StrictHostKeyChecking=yes`: the device must present exactly those keys.
+4. The hub splices the stream to the device's own, outbound-connected agent. You never get network
+   access to the device or its network, only the one port you asked for.
+
+```mermaid
+flowchart LR
+    L[Local tnctl + ssh] -->|HTTPS: create session| H[WireGuard hub]
+    L ==>|WireGuard over TURN/UDP| H
+    D[Device agent] ==>|WireGuard over TURN/UDP| H
+```
+
+Sessions are short-lived and renewed with a fresh credential every time. The hub re-checks the device
+and your access on each renewal. If the device is flagged compromised, fails its health check, or you
+lose access, new sessions are refused and open ones are ended at once. `tnctl` prints a single
+`tnctl: wireguard: <reason>: <message>` line and exits with status 1.
+
+Differences from the SSH tunnel path: it does not need Remote Access to be enabled, it does not need
+`ncat`, and the SSH host key is verified instead of ignored. See
+[`tnctl ssh`](../commands/ssh.md#wireguard-ztna-path-wireguard) for flags and requirements.
+
 ## Security notes
 
 - Private keys are **never** written to your project directory — only to a temporary file that is
