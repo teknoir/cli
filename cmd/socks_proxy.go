@@ -138,17 +138,17 @@ Example:
 			deadendHost, tmpFile.Name(), deadendHost)
 
 		// Final SSH execution command using os/exec
-		sshExec := exec.Command("ssh",
-			"-o", "ProxyCommand="+proxyCommand,
-			"-o", "UserKnownHostsFile=/dev/null",
-			"-o", "StrictHostKeyChecking=no",
+		sshArgs := []string{
+			"-o", "ProxyCommand=" + proxyCommand,
 			"-o", "ServerAliveInterval=60",
 			"-i", tmpFile.Name(),
 			"-p", remoteAccessPort,
 			"-D", strconv.Itoa(socksPort),
 			"-N",
-			fmt.Sprintf("%s@127.0.0.1", username),
-		)
+		}
+		sshArgs = append(sshArgs, deviceHostKeyOpts(deviceName, namespace, domain)...)
+		sshArgs = append(sshArgs, fmt.Sprintf("%s@127.0.0.1", username))
+		sshExec := exec.Command("ssh", sshArgs...)
 
 		// Wire standard streams
 		sshExec.Stdin = os.Stdin

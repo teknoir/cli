@@ -110,12 +110,10 @@ var sshCmd = &cobra.Command{
 			deadendHost, tmpFile.Name(), deadendHost)
 
 		// Final SSH execution command using os/exec
-		sshExec := exec.Command("ssh",
-			"-p", remoteAccessPort,
-			"-i", tmpFile.Name(),
-			"-o", "ProxyCommand="+proxyCommand,
-			fmt.Sprintf("%s@127.0.0.1", username),
-		)
+		sshArgs := []string{"-p", remoteAccessPort, "-i", tmpFile.Name(), "-o", "ProxyCommand=" + proxyCommand}
+		sshArgs = append(sshArgs, deviceHostKeyOpts(deviceName, namespace, domain)...)
+		sshArgs = append(sshArgs, fmt.Sprintf("%s@127.0.0.1", username))
+		sshExec := exec.Command("ssh", sshArgs...)
 
 		// Wire standard streams for interactive terminal session
 		sshExec.Stdin = os.Stdin
