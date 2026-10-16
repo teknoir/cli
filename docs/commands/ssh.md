@@ -26,7 +26,7 @@ omitted.
 3. Otherwise it stops with one message, the same for `ssh`, `port-forward` and `socks-proxy`:
 
    ```text
-   Tunneling is not active for <device>. Turn it on under Tunneling on the device page in the Teknoir console.
+   Tunneling is not active for <device>. It turns on by itself once the device is bootstrapped and online; if it stays off, a teamspace admin turned it off or the device is flagged. See: tnctl wg status <device>
    ```
 
 !!! note "The legacy SSH tunnel is deprecated"

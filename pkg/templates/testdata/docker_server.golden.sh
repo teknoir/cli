@@ -966,7 +966,7 @@ setup_user() {
     usermod --password $(openssl passwd -1 "${_FIRST_USER_PASS}") "${_FIRST_USER_NAME}"
   else
       warn "Could not set password for user ${_FIRST_USER_NAME}"
-      info "Skipping tunneling setup"
+      info "Skipping the platform user setup"
       exit
   fi
 

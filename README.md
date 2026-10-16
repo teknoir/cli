@@ -75,8 +75,7 @@ Securely connect to your edge devices through their tunnel. `tnctl` picks the tu
 WireGuard when the device has an active WireGuard tunnel, otherwise the legacy SSH tunnel (deprecated; this
 fallback goes away after production has moved to WireGuard). `tnctl devices` shows the tunnel of each
 device in the `Tunnel` column (`wireguard`, `legacy`, `off`, or the WireGuard state such as `enrolling`).
-If a device has no tunnel, the commands say: `Tunneling is not active for <device>. Turn it on under
-Tunneling on the device page in the Teknoir console.`
+If a device has no tunnel, the commands say: `Tunneling is not active for <device>. It turns on by itself once the device is bootstrapped and online; if it stays off, a teamspace admin turned it off or the device is flagged. See: tnctl wg status <device>`
 
 - **SSH into a device**:
   ```bash

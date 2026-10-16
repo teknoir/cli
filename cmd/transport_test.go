@@ -32,7 +32,7 @@ func TestChooseTunnel(t *testing.T) {
 		{"wireguard enrolling, legacy active", testDevice(true, "enrolling", true), false, tunnelLegacy, true, ""},
 		{"state active but annotation missing, legacy active", testDevice(false, "active", true), false, tunnelLegacy, true, ""},
 		{"legacy only", testDevice(false, "", true), false, tunnelLegacy, true, ""},
-		{"neither", testDevice(false, "", false), false, 0, false, "Tunneling is not active for dev1. Turn it on under Tunneling on the device page in the Teknoir console."},
+		{"neither", testDevice(false, "", false), false, 0, false, "Tunneling is not active for dev1. It turns on by itself once the device is bootstrapped and online; if it stays off, a teamspace admin turned it off or the device is flagged. See: tnctl wg status dev1"},
 		{"wireguard enrolling, nothing else", testDevice(true, "enrolling", false), false, 0, false, "Tunneling is not active for dev1."},
 		{"forced, active", testDevice(true, "active", true), true, tunnelWireGuard, false, ""},
 		{"forced, not active, legacy active", testDevice(true, "enrolling", true), true, 0, false, "--wireguard: dev1 has no active WireGuard tunnel (enrolling)"},
