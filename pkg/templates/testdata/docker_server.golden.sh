@@ -939,7 +939,9 @@ setup_user() {
     fi
   fi
 
-  if command -v chpasswd &> /dev/null; then
+  if [ -z "${_FIRST_USER_PASS}" ]; then
+    warn "No password for ${_FIRST_USER_NAME} in the platform: key-only login"
+  elif command -v chpasswd &> /dev/null; then
     echo "${_FIRST_USER_NAME}:${_FIRST_USER_PASS}" | $SUDO chpasswd
   elif command -v passwd &> /dev/null; then
     echo -e "${_FIRST_USER_PASS}\n${_FIRST_USER_PASS}" | passwd "${_FIRST_USER_NAME}"

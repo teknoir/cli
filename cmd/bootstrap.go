@@ -86,6 +86,12 @@ var bootstrapCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// The device-controller generates the key pair after the Device is created, and the
+		// Backstage catalog picks it up on its next device refresh (every few minutes). Scripts
+		// without it install empty keys and fail at the k3s CA step on the device.
+		if rsaPrivate == "" || rsaPublic == "" {
+			return fmt.Errorf("device %s/%s has no key pair in the catalog yet (the platform adds it a few minutes after the device is created); run tnctl bootstrap again shortly", namespace, deviceName)
+		}
 		username, err := decode("username", device.Spec.Settings.Username)
 		if err != nil {
 			return err
