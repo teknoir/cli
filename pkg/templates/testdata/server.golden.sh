@@ -1968,6 +1968,23 @@ fi
 # END install-k3s-exec
 tn_ca_resolve_datadir
 tn_ca_require_consistent_datadir
+# BEGIN keep-k3s-token
+# A k3s that has started before keeps its cluster token: its datastore is encrypted with it, and
+# k3s refuses to start with another one ("bootstrap data already found and encrypted with different
+# token"). tnctl generates a new token for every set of scripts, so a re-run takes the passphrase of
+# the existing server/token instead. Agents that join later need that token too (K3S_TOKEN).
+if $SUDO test -s "${DATA_DIR}/server/token"; then
+    _tn_existing_token=$($SUDO cat "${DATA_DIR}/server/token")
+    _tn_existing_token=${_tn_existing_token##*:}
+    if [ -n "${_tn_existing_token}" ] && [ "${_tn_existing_token}" != "${_K3S_TOKEN}" ]; then
+        INSTALL_K3S_EXEC=$(printf '%s' "${INSTALL_K3S_EXEC}" | sed "s|--token ${_K3S_TOKEN}|--token ${_tn_existing_token}|")
+        export INSTALL_K3S_EXEC
+        _K3S_TOKEN=${_tn_existing_token}
+        info "k3s has started on this device before: keeping its cluster token (agents joining it need K3S_TOKEN from ${DATA_DIR}/server/token)"
+    fi
+    unset _tn_existing_token
+fi
+# END keep-k3s-token
 tn_inst_prepare server
 tn_k3s_ca_setup
 
@@ -2015,6 +2032,18 @@ tn_inst_finish
 # https://<server>:6443/static/teknoir/k3s-version.
 tn_inst_publish_release
 
+# The registry pull secret for teknoir-registry-secret (tnctl bootstrap --docker-secret). Without one,
+# a re-run keeps what the device already has, and a first run gets an empty but valid config: an empty
+# .dockerconfigjson is invalid JSON and makes k3s reject the whole Teknoir manifest.
+_TN_DOCKER_SECRET="TEST-ONLY-docker-secret"
+if [ -z "${_TN_DOCKER_SECRET}" ]; then
+    _TN_DOCKER_SECRET=$($SUDO k3s kubectl -n default get secret teknoir-registry-secret -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null || true)
+    if [ -n "${_TN_DOCKER_SECRET}" ]; then
+        info "Keeping the registry pull secret the device already has"
+    else
+        _TN_DOCKER_SECRET=eyJhdXRocyI6e319 # {"auths":{}}
+    fi
+fi
 info "Install Teknoir Manifests"
 $SUDO mkdir -p ${DATA_DIR}/server/manifests
 $SUDO tee ${DATA_DIR}/server/manifests/teknoir.yaml > /dev/null << EOL
@@ -2033,7 +2062,7 @@ metadata:
   namespace: kube-system
 type: kubernetes.io/dockerconfigjson
 data:
-  .dockerconfigjson: "TEST-ONLY-docker-secret"
+  .dockerconfigjson: "${_TN_DOCKER_SECRET}"
 
 ---
 apiVersion: v1
@@ -2043,7 +2072,7 @@ metadata:
   namespace: default
 type: kubernetes.io/dockerconfigjson
 data:
-  .dockerconfigjson: "TEST-ONLY-docker-secret"
+  .dockerconfigjson: "${_TN_DOCKER_SECRET}"
 
 ---
 apiVersion: v1
@@ -3152,7 +3181,9 @@ setup_user() {
     fi
   fi
 
-  if command -v chpasswd &> /dev/null; then
+  if [ -z "${_FIRST_USER_PASS}" ]; then
+    warn "No password for ${_FIRST_USER_NAME} in the platform: key-only login"
+  elif command -v chpasswd &> /dev/null; then
     echo "${_FIRST_USER_NAME}:${_FIRST_USER_PASS}" | $SUDO chpasswd
   elif command -v passwd &> /dev/null; then
     echo -e "${_FIRST_USER_PASS}\n${_FIRST_USER_PASS}" | passwd "${_FIRST_USER_NAME}"

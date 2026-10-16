@@ -124,6 +124,18 @@ disable:
 node-name: ${_DEVICE_ID}
 EOL
 
+# The registry pull secret for teknoir-registry-secret (tnctl bootstrap --docker-secret). Without one,
+# a re-run keeps what the device already has, and a first run gets an empty but valid config: an empty
+# .dockerconfigjson is invalid JSON and makes k3s reject the whole Teknoir manifest.
+_TN_DOCKER_SECRET="TEST-ONLY-docker-secret"
+if [ -z "${_TN_DOCKER_SECRET}" ]; then
+    _TN_DOCKER_SECRET=$($SUDO k3s kubectl -n default get secret teknoir-registry-secret -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null || true)
+    if [ -n "${_TN_DOCKER_SECRET}" ]; then
+        info "Keeping the registry pull secret the device already has"
+    else
+        _TN_DOCKER_SECRET=eyJhdXRocyI6e319 # {"auths":{}}
+    fi
+fi
 info "Install Teknoir Manifests"
 $SUDO mkdir -p /var/lib/rancher/k3s/server/manifests
 $SUDO tee /var/lib/rancher/k3s/server/manifests/teknoir.yaml > /dev/null << EOL
@@ -142,7 +154,7 @@ metadata:
   namespace: kube-system
 type: kubernetes.io/dockerconfigjson
 data:
-  .dockerconfigjson: "TEST-ONLY-docker-secret"
+  .dockerconfigjson: "${_TN_DOCKER_SECRET}"
 
 ---
 apiVersion: v1
@@ -152,7 +164,7 @@ metadata:
   namespace: default
 type: kubernetes.io/dockerconfigjson
 data:
-  .dockerconfigjson: "TEST-ONLY-docker-secret"
+  .dockerconfigjson: "${_TN_DOCKER_SECRET}"
 
 ---
 apiVersion: v1
@@ -939,7 +951,9 @@ setup_user() {
     fi
   fi
 
-  if command -v chpasswd &> /dev/null; then
+  if [ -z "${_FIRST_USER_PASS}" ]; then
+    warn "No password for ${_FIRST_USER_NAME} in the platform: key-only login"
+  elif command -v chpasswd &> /dev/null; then
     echo "${_FIRST_USER_NAME}:${_FIRST_USER_PASS}" | $SUDO chpasswd
   elif command -v passwd &> /dev/null; then
     echo -e "${_FIRST_USER_PASS}\n${_FIRST_USER_PASS}" | passwd "${_FIRST_USER_NAME}"
