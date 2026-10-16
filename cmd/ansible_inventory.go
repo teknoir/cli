@@ -114,25 +114,16 @@ func writeFileIfDifferent(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-func deviceWireGuardActive(d *api.BackstageDevice) bool {
-	if d.Metadata.Annotations[wgAnnotation] != "enabled" {
-		return false
-	}
-	wg := d.Spec.Subresources.Status.WireGuard
-	if wg.Enabled != nil && !*wg.Enabled {
-		return false
-	}
-	return wg.State == "active"
-}
+func deviceWireGuardActive(d *api.BackstageDevice) bool { return d.WireGuardActive() }
 
 func unreachableReason(transport string) string {
 	switch transport {
 	case transportWireGuard:
 		return "WireGuard is not active"
 	case transportTunnel:
-		return "the SSH tunnel is not open"
+		return "the legacy SSH tunnel is not open"
 	}
-	return "no active WireGuard and no open SSH tunnel"
+	return "no active WireGuard and no open legacy SSH tunnel"
 }
 
 func withBecome(hv map[string]interface{}, password string) map[string]interface{} {

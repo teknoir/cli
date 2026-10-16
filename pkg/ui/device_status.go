@@ -12,6 +12,19 @@ func formatPercent(val float64) string {
 	return fmt.Sprintf("%.2f%%", val*100)
 }
 
+// colorTunnel renders the device's tunnel label: green when usable, yellow
+// while WireGuard is enabled but not active, red when off.
+func colorTunnel(d *api.BackstageDevice) string {
+	label := d.TunnelLabel()
+	switch label {
+	case "wireguard", "legacy":
+		return pterm.Green(label)
+	case "off":
+		return pterm.Red(label)
+	}
+	return pterm.Yellow(label)
+}
+
 func PrintDeviceStatus(device *api.BackstageDevice) {
 	status := device.Spec.Subresources.Status
 	state := status.State
@@ -21,14 +34,11 @@ func PrintDeviceStatus(device *api.BackstageDevice) {
 	// Top level info
 	pterm.DefaultSection.Println("Top Level Info")
 
-	remoteAccessStr := pterm.Red("Disabled")
-	if status.RemoteAccess.Active {
-		remoteAccessStr = pterm.Green(fmt.Sprintf("Enabled (Port: %s)", status.RemoteAccess.Port))
-	}
+	tunnelStr := colorTunnel(device)
 
 	infoTable := pterm.TableData{
 		{"Namespace", device.Metadata.Namespace},
-		{"Remote Access", remoteAccessStr},
+		{"Tunnel", tunnelStr},
 		{"Config Hash", status.Config.ActiveConfigHash},
 		{"Last Config Change", status.Config.LastConfigChange},
 	}
@@ -84,25 +94,22 @@ func PrintDeviceStatus(device *api.BackstageDevice) {
 		}
 		pterm.DefaultTable.WithHasHeader().WithData(appsTable).Render()
 	}
-	
+
 	fmt.Println()
 }
 
 func PrintDevicesSummary(devices []api.BackstageDevice) {
 	pterm.DefaultHeader.WithFullWidth().Println("Devices Summary")
-	
+
 	var table pterm.TableData
-	table = append(table, []string{"Device Name", "Remote Access", "CPU", "Memory", "Storage", "Alerts", "Apps", "Last Config Change"})
-	
+	table = append(table, []string{"Device Name", "Tunnel", "CPU", "Memory", "Storage", "Alerts", "Apps", "Last Config Change"})
+
 	for _, d := range devices {
 		status := d.Spec.Subresources.Status
 		state := status.State
-		
-		remoteAccessStr := pterm.Red("Off")
-		if status.RemoteAccess.Active {
-			remoteAccessStr = pterm.Green("On")
-		}
-		
+
+		tunnelStr := colorTunnel(&d)
+
 		alertsCount := 0
 		for _, a := range state.Alerts {
 			alertsCount += a.Count
@@ -113,12 +120,12 @@ func PrintDevicesSummary(devices []api.BackstageDevice) {
 		} else {
 			alertsStr = pterm.Green(alertsStr)
 		}
-		
+
 		appsCount := len(state.Apps)
-		
+
 		table = append(table, []string{
 			d.Metadata.Name,
-			remoteAccessStr,
+			tunnelStr,
 			formatPercent(state.CpuUsage),
 			formatPercent(state.MemoryUsage),
 			formatPercent(state.StorageUsage),
@@ -127,6 +134,6 @@ func PrintDevicesSummary(devices []api.BackstageDevice) {
 			status.Config.LastConfigChange,
 		})
 	}
-	
+
 	pterm.DefaultTable.WithHasHeader().WithData(table).Render()
 }

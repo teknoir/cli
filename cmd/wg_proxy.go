@@ -54,11 +54,11 @@ type wgProxyOptions struct {
 
 var wgProxyOpts wgProxyOptions
 
-// wgProxyCmd is the ssh ProxyCommand behind `tnctl ssh --wireguard`. It is not
+// wgProxyCmd is the ssh ProxyCommand behind `tnctl ssh` over WireGuard. It is not
 // meant to be run by hand: stdin/stdout carry the raw SSH byte stream.
 var wgProxyCmd = &cobra.Command{
 	Use:           "wg-proxy",
-	Short:         "SSH ProxyCommand over the WireGuard tunnel (used by ssh --wireguard and the Ansible inventory)",
+	Short:         "SSH ProxyCommand over the WireGuard tunnel (used by tnctl ssh and the Ansible inventory)",
 	Hidden:        false,
 	Args:          cobra.NoArgs,
 	SilenceUsage:  true,
