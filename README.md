@@ -69,36 +69,36 @@ tnctl login --domain teknoir.cloud
   tnctl devices env=prod region=us-east
   ```
 
-### 3. Remote Access
+### 3. Tunneling
 
-Securely connect to your edge devices via Teknoir's proxy infrastructure.
+Securely connect to your edge devices through their tunnel. `tnctl` picks the tunnel automatically:
+WireGuard when the device has an active WireGuard tunnel, otherwise the legacy SSH tunnel (deprecated; this
+fallback goes away after production has moved to WireGuard). `tnctl devices` shows the tunnel of each
+device in the `Tunnel` column (`wireguard`, `legacy`, `off`, or the WireGuard state such as `enrolling`).
+If a device has no tunnel, the commands say: `Tunneling is not active for <device>. Turn it on under
+Tunneling on the device page in the Teknoir console.`
 
 - **SSH into a device**:
   ```bash
   tnctl ssh [device-name]
   ```
-  Or through the WireGuard (ZTNA) tunnel, which the platform can cut off at once if the device is
-  flagged compromised or fails its health check:
-  ```bash
-  tnctl ssh --wireguard [device-name]
-  ```
+  Over WireGuard the platform can cut access off at once if the device is flagged compromised or fails
+  its health check.
 - **Port Forwarding**:
-  Forward a local port to the device or its network:
+  Forward a service of the device to a local port, and list a device's services:
   ```bash
-  tnctl port-forward [device] 8080:localhost:80
+  tnctl port-forward [device]                  # list the device's services
+  tnctl port-forward [device] 8080:grafana     # [local-port:]service-id
+  tnctl wg status [device]                     # check the WireGuard path
   ```
-  Or forward a device service through the WireGuard tunnel (direct to the device when possible), and check the path:
-  ```bash
-  tnctl port-forward --wireguard [device] 8080:grafana
-  tnctl wg status [device]
-  ```
-- **SOCKS5 Proxy**:
-  Establish a SOCKS5 proxy to access the device's entire network:
+  Over the legacy SSH tunnel the target is `host:port` instead (`tnctl port-forward [device] 8080:localhost:80`).
+- **SOCKS5 Proxy** (legacy SSH tunnel only; not available over WireGuard, forward a service instead):
   ```bash
   tnctl socks-proxy [device] 1080
   ```
+- **Copy files**: `scp`/`rsync` over WireGuard use `tnctl wg-proxy` as ProxyCommand, see [`docs/commands/ssh.md`](docs/commands/ssh.md#copying-files-scp-and-rsync).
 - **Ansible**:
-  Use tnctl as the Ansible inventory (WireGuard where active, else the SSH tunnel), see [`docs/commands/ansible.md`](docs/commands/ansible.md):
+  Use tnctl as the Ansible inventory (WireGuard where active, else the legacy SSH tunnel), see [`docs/commands/ansible.md`](docs/commands/ansible.md):
   ```bash
   tnctl -d teknoir.cloud -n teknoir-demo ansible all -m ping
   ```

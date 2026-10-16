@@ -1,6 +1,8 @@
 # `tnctl wg`
 
-Inspect the WireGuard (ZTNA) connection to a device.
+Inspect the WireGuard tunnel to a device. `tnctl ssh` and `tnctl port-forward` use WireGuard
+automatically when it is active; this command is for checking and troubleshooting. To only list a device's
+services, `tnctl port-forward <device>` is enough.
 
 ## `tnctl wg status`
 
@@ -27,7 +29,7 @@ Services       ssh (external, tcp)
 | `Hub` | Whether the WireGuard hub answered. A denial counts as reachable. |
 | `Device online` | `yes`, `no` (the hub says the agent is not connected) or `unknown`. |
 | `Problem` | The hub's reason and hint when no session could be made. |
-| `Path` | `direct (LAN)`, `direct` or `via hub`; see [`port-forward`](port-forward.md#through-wireguard-wireguard). |
+| `Path` | `direct (LAN)`, `direct` or `via hub`; see [`port-forward`](port-forward.md#over-wireguard). |
 | `Candidates` | Addresses the device offered for the direct path. |
 | `RTT` | Time to open a TCP connection to the device's ssh service over that path. |
 | `Services` | The services published for the device, read from the catalog annotation `ztna.teknoir.org/services`. |
@@ -44,6 +46,6 @@ Plus all [global flags](index.md#global-flags).
 
 ## wg-proxy
 
-`tnctl wg-proxy` is the SSH `ProxyCommand` behind `tnctl ssh --wireguard`. It is visible in `tnctl --help` because
+`tnctl wg-proxy` is the SSH `ProxyCommand` behind `tnctl ssh` over WireGuard. It is visible in `tnctl --help` because
 ssh configs and the [Ansible inventory](ansible.md) call it directly. It is normally not run by hand; see
-`tnctl wg-proxy --help` for its flags.
+`tnctl wg-proxy --help` for its flags, and [`ssh`](ssh.md#copying-files-scp-and-rsync) for using it with `scp` and `rsync`.

@@ -13,12 +13,19 @@ usage, or follow the links below for full documentation.
 | [`ns`](ns.md) | | Select the active namespace. |
 | [`device`](device.md) | `dev` | Print detailed status for a device. |
 | [`devices`](devices.md) | `devs` | Print a summary list of devices in the namespace. |
-| [`ssh`](ssh.md) | | Open an interactive SSH session on a device. |
-| [`port-forward`](port-forward.md) | | Forward a local port to the device or its network. |
-| [`wg status`](wg.md) | | Show how a device is reachable through WireGuard and which services it publishes. |
+| [`ssh`](ssh.md) | | Open an interactive SSH session on a device through its tunnel. |
+| [`port-forward`](port-forward.md) | | Forward a local port to a service on a device (`port-forward <device>` lists its services). |
+| [`wg status`](wg.md) | | Show whether and how a device is reachable through its WireGuard tunnel, and which services it publishes. |
 | [`ansible`](ansible.md) | | Run `ansible` / `ansible-playbook` with the devices as inventory (also `ansible-inventory`). |
-| [`socks-proxy`](socks-proxy.md) | | Establish a SOCKS5 proxy via a device. |
+| [`socks-proxy`](socks-proxy.md) | | Establish a SOCKS5 proxy via a device (legacy SSH tunnel only). |
 | [`bootstrap`](bootstrap.md) | | Generate device provisioning scripts. |
+
+## Tunnels
+
+`ssh`, `port-forward` and `socks-proxy` reach a device through its tunnel, chosen automatically: WireGuard
+when the device has an active WireGuard tunnel, otherwise the legacy SSH tunnel (deprecated; the
+fallback goes away after production has moved to WireGuard). The `Tunnel` column of `tnctl devices` shows
+`wireguard`, `legacy`, `off`, or the WireGuard state (for example `enrolling`) while it is being set up.
 
 ## Global flags
 

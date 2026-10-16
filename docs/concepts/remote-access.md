@@ -50,11 +50,11 @@ The SSH options used harden and stabilize the session:
 `port-forward` additionally recognizes common web ports (80, 443, 3000, 5000, 8080, 8443, 9000, 9090)
 and prints a ready-to-click `http(s)://localhost:<port>` URL.
 
-## WireGuard (ZTNA) path
+## WireGuard tunnel
 
-`tnctl ssh --wireguard` and `tnctl port-forward --wireguard` reach the device through a different
-transport that is built for zero trust access. It runs next to the SSH tunnel described above.
-`port-forward --wireguard` forwards a named device service (a web UI, or a Kubernetes Service inside
+`tnctl ssh` and `tnctl port-forward` use the WireGuard tunnel whenever the device has one; the SSH
+tunnel described above is only an automatic fallback for devices without WireGuard, and it goes away
+after production has moved to WireGuard. `port-forward` over WireGuard forwards a named device service (a web UI, or a Kubernetes Service inside
 the device) to a local port, and `tnctl wg status` shows how a device is reachable.
 
 Both try a **direct** path first: a peer-to-peer WireGuard session between your machine and the device
@@ -88,9 +88,9 @@ and your access on each renewal. If the device is flagged compromised, fails its
 lose access, new sessions are refused and open ones are ended at once. `tnctl` prints a single
 `tnctl: wireguard: <reason>: <message>` line and exits with status 1.
 
-Differences from the SSH tunnel path: it does not need Remote Access to be enabled, it does not need
+Differences from the legacy SSH tunnel: it does not need the legacy tunnel to be on, it does not need
 `ncat`, and the SSH host key is verified instead of ignored. See
-[`tnctl ssh`](../commands/ssh.md#wireguard-ztna-path-wireguard) for flags and requirements.
+[`tnctl ssh`](../commands/ssh.md#over-wireguard) for flags and requirements.
 
 ## Security notes
 

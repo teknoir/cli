@@ -39,10 +39,19 @@ including resolved URLs and the exact `ssh` invocation used.
     tnctl add domain teknoir.cloud
     ```
 
-## Devices & remote access
+## Devices & tunneling
 
-??? failure "`remote access is not enabled for device <name>`"
-    Enable Remote Access for the device in the Teknoir Console, then retry `ssh`/`port-forward`/`socks-proxy`.
+??? failure "`Tunneling is not active for <name>`"
+    Turn Tunneling on for the device under Tunneling on the device page in the Teknoir console, wait until
+    the device has connected, then retry `ssh`/`port-forward`/`socks-proxy`. `tnctl devices` shows the state in
+    the `Tunnel` column.
+
+??? failure "`tnctl: <name> has no active WireGuard tunnel; using the legacy SSH tunnel`"
+    Not an error: the device only has the deprecated legacy SSH tunnel, which is used as a fallback.
+
+??? failure "`SOCKS is not available over WireGuard` / `--to is not available over WireGuard`"
+    Over WireGuard only the device's services can be forwarded: `tnctl port-forward <device>` lists them,
+    `tnctl port-forward <device> [local-port:]<service-id>` forwards one.
 
 ??? failure "`no devices found in namespace <ns>`"
     Confirm you're in the right namespace (`tnctl ns`) and that the namespace actually contains

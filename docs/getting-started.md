@@ -67,9 +67,11 @@ tnctl port-forward my-device 8080:localhost:80
 tnctl socks-proxy my-device 1080
 ```
 
-!!! warning "Remote access must be enabled"
-    The `ssh`, `port-forward`, and `socks-proxy` commands require **Remote Access** to be enabled for
-    the target device in the Teknoir Console. If it is disabled, `tnctl` reports a clear error.
+!!! warning "Tunneling must be active"
+    The `ssh`, `port-forward`, and `socks-proxy` commands need an active tunnel for the target device
+    (WireGuard, or the deprecated legacy SSH tunnel as a fallback). Turn it on under Tunneling on the device
+    page in the Teknoir console; if it is off, `tnctl` says so. `socks-proxy` works over the legacy tunnel
+    only, and `port-forward` forwards a device service (`tnctl port-forward <device>` lists them).
 
 ## A typical workflow
 

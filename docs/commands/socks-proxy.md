@@ -2,6 +2,16 @@
 
 Establish a SOCKS5 proxy through a device, giving you access to the device's entire network.
 
+!!! warning "Legacy SSH tunnel only"
+    `socks-proxy` works only over the legacy SSH tunnel (deprecated; it goes away after production has moved
+    to WireGuard). On a device with an active WireGuard tunnel it fails with:
+
+    ```text
+    SOCKS is not available over WireGuard. Forward one of the device's services instead: tnctl port-forward <device> <service-id>
+    ```
+
+    List a device's services with `tnctl port-forward <device>`.
+
 ## Synopsis
 
 ```bash
@@ -49,8 +59,9 @@ google-chrome --proxy-server="socks5://127.0.0.1:1080" --user-data-dir=$(mktemp 
 
 ## Requirements
 
-Same as [`ssh`](ssh.md): a set domain/namespace, remote access enabled for the device, and local
-`ssh`/`ncat`. See **[Remote Access](../concepts/remote-access.md)**.
+A set domain/namespace, an active legacy tunnel for the device, and local `ssh`/`ncat`. If the device has
+no tunnel at all, the message is `Tunneling is not active for <device>. Turn it on under Tunneling on the
+device page in the Teknoir console.` See **[Remote Access](../concepts/remote-access.md)**.
 
 ## See also
 
