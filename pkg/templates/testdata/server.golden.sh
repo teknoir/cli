@@ -3196,7 +3196,7 @@ setup_user() {
     usermod --password $(openssl passwd -1 "${_FIRST_USER_PASS}") "${_FIRST_USER_NAME}"
   else
       warn "Could not set password for user ${_FIRST_USER_NAME}"
-      info "Skipping tunneling setup"
+      info "Skipping the platform user setup"
       exit
   fi
 
@@ -3274,11 +3274,11 @@ CREATE_USER=${CREATE_USER:-ask}
 if [ "${OS_BUILD}" ] || [ "${CREATE_USER}" = true ]; then
   setup_user
 else
-  warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
+  warn "The platform user ${_FIRST_USER_NAME} is used for SSH and remote maintenance over the tunnel."
   if id -u "${_FIRST_USER_NAME}" >/dev/null 2>&1; then
     warn "The user ${_FIRST_USER_NAME} already exist! This operation will change the password and OVERWRITE ssh keys for this users."
   fi
-  warn "Do you want to add \"${_FIRST_USER_NAME}\" as a user and enable tunneling? [yY]"
+  warn "Do you want to add the platform user \"${_FIRST_USER_NAME}\" (used for SSH and remote maintenance over the tunnel)? [yY]"
   read REPLY
 
   case ${REPLY} in
@@ -3286,7 +3286,7 @@ else
       setup_user
       ;;
     * )
-      info "Skipping tunneling setup"
+      info "Skipping the platform user setup"
       ;;
   esac
 fi
