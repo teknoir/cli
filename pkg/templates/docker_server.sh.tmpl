@@ -44,7 +44,7 @@ disable:
 node-name: ${_DEVICE_ID}
 EOL
 
-info "Install Teknoir Manifests"
+{{template "registry_secret.sh.tmpl" .}}info "Install Teknoir Manifests"
 $SUDO mkdir -p /var/lib/rancher/k3s/server/manifests
 $SUDO tee /var/lib/rancher/k3s/server/manifests/teknoir.yaml > /dev/null << EOL
 {{template "manifests.yaml.tmpl" .}}

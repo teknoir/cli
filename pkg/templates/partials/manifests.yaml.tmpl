@@ -13,7 +13,7 @@ metadata:
   namespace: kube-system
 type: kubernetes.io/dockerconfigjson
 data:
-  .dockerconfigjson: "{{.DockerSecret}}"
+  .dockerconfigjson: "${_TN_DOCKER_SECRET}"
 
 ---
 apiVersion: v1
@@ -23,7 +23,7 @@ metadata:
   namespace: default
 type: kubernetes.io/dockerconfigjson
 data:
-  .dockerconfigjson: "{{.DockerSecret}}"
+  .dockerconfigjson: "${_TN_DOCKER_SECRET}"
 
 ---
 apiVersion: v1
