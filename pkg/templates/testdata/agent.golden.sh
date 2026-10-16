@@ -870,6 +870,36 @@ if [ -e /etc/group ]; then
     sed -i "/^sudo:/s/\(.*\)/\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
 fi
 EOF
+
+  setup_user_sudo
+}
+
+# A key-only platform user (no password in the platform) cannot answer sudo's
+# password prompt, so automation over SSH (Ansible become, tnctl) could never
+# act as root. Give exactly that user passwordless sudo with a validated
+# drop-in. This is no weaker than a password: the SSH key and any password
+# live in the same platform record, and the key alone already logs in. With a
+# password set, the drop-in is removed again and sudo asks for the password.
+setup_user_sudo() {
+  _tn_sudoers="/etc/sudoers.d/90-teknoir-${_FIRST_USER_NAME}"
+  if [ -n "${_FIRST_USER_PASS}" ]; then
+    $SUDO rm -f "${_tn_sudoers}"
+    return 0
+  fi
+  if [ ! -d /etc/sudoers.d ]; then
+    warn "No /etc/sudoers.d: ${_FIRST_USER_NAME} gets no passwordless sudo"
+    return 0
+  fi
+  _tn_tmp=$($SUDO mktemp /etc/sudoers.d/.teknoir.XXXXXX)
+  echo "${_FIRST_USER_NAME} ALL=(ALL:ALL) NOPASSWD: ALL" | $SUDO tee "${_tn_tmp}" > /dev/null
+  $SUDO chmod 0440 "${_tn_tmp}"
+  if command -v visudo > /dev/null 2>&1 && ! $SUDO visudo -cf "${_tn_tmp}" > /dev/null; then
+    $SUDO rm -f "${_tn_tmp}"
+    warn "The sudoers drop-in for ${_FIRST_USER_NAME} did not validate; no passwordless sudo"
+    return 0
+  fi
+  $SUDO mv -f "${_tn_tmp}" "${_tn_sudoers}"
+  info "Key-only login: ${_FIRST_USER_NAME} has passwordless sudo (${_tn_sudoers})"
 }
 
 

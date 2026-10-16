@@ -32,6 +32,11 @@ func TestGolden_Execute(t *testing.T) {
 			if err := tt.exec(&buf); err != nil {
 				t.Fatal(err)
 			}
+			if os.Getenv("UPDATE_GOLDEN") == "1" {
+				if err := os.WriteFile("testdata/"+tt.name+".golden.sh", buf.Bytes(), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if want := readGolden(t, tt.name); !bytes.Equal(buf.Bytes(), want) {
 				t.Fatalf("%s output differs from testdata/%s.golden.sh (got %d bytes, want %d)", tt.name, tt.name, buf.Len(), len(want))
 			}
