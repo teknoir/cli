@@ -20,11 +20,16 @@ func registrySecretBlock(t *testing.T, ds string) string {
 	return b.String()
 }
 
-// runRegistrySecret runs the block with a fake k3s that prints existing (or fails when empty).
-func runRegistrySecret(t *testing.T, ds, existing string) string {
+// runRegistrySecret runs the block with a fake k3s that prints the .dockerconfigjson of the
+// named secret from secrets (and fails for a secret that is not there).
+func runRegistrySecret(t *testing.T, ds string, secrets map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
-	fake := "#!/bin/sh\n[ -n \"" + existing + "\" ] || exit 1\nprintf '%s' '" + existing + "'\n"
+	fake := "#!/bin/sh\ncase \"$6\" in\n"
+	for name, v := range secrets {
+		fake += name + ") printf '%s' '" + v + "' ;;\n"
+	}
+	fake += "*) exit 1 ;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(dir, "k3s"), []byte(fake), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -39,13 +44,20 @@ func runRegistrySecret(t *testing.T, ds, existing string) string {
 }
 
 func TestRegistrySecret(t *testing.T) {
-	for _, tt := range []struct{ name, ds, existing, want string }{
-		{"given", "Z2l2ZW4=", "ZXhpc3Rpbmc=", "SECRET=Z2l2ZW4=\n"},
-		{"re-run keeps the device's", "", "ZXhpc3Rpbmc=", "SECRET=ZXhpc3Rpbmc=\n"},
-		{"first run gets a valid empty config", "", "", "SECRET=eyJhdXRocyI6e319\n"},
+	const empty = "eyJhdXRocyI6e319"
+	for _, tt := range []struct {
+		name, ds string
+		secrets  map[string]string
+		want     string
+	}{
+		{"given", "Z2l2ZW4=", map[string]string{"teknoir-registry-secret": "ZXhpc3Rpbmc="}, "SECRET=Z2l2ZW4=\n"},
+		{"re-run keeps the device's", "", map[string]string{"teknoir-registry-secret": "ZXhpc3Rpbmc="}, "SECRET=ZXhpc3Rpbmc=\n"},
+		{"re-run takes the legacy secret", "", map[string]string{"artifact-registry-secret": "bGVnYWN5"}, "SECRET=bGVnYWN5\n"},
+		{"an empty config does not hide the legacy secret", "", map[string]string{"teknoir-registry-secret": empty, "artifact-registry-secret": "bGVnYWN5"}, "SECRET=bGVnYWN5\n"},
+		{"first run gets a valid empty config", "", nil, "SECRET=" + empty + "\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if out := runRegistrySecret(t, tt.ds, tt.existing); !strings.Contains(out, tt.want) {
+			if out := runRegistrySecret(t, tt.ds, tt.secrets); !strings.Contains(out, tt.want) {
 				t.Fatalf("want %q in:\n%s", tt.want, out)
 			}
 		})
