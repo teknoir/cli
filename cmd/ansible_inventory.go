@@ -60,7 +60,13 @@ func parseAnsibleTransport(v string) (string, error) {
 
 // ansibleGroup maps a namespace or label part to an Ansible group name part.
 func ansibleGroup(s string) string {
-	return strings.NewReplacer("-", "_", ".", "_").Replace(s)
+	// Ansible group names are [A-Za-z0-9_]; label keys carry '/', '.' and '-'.
+	return strings.Map(func(r rune) rune {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '_'
+	}, s)
 }
 
 // dqQuote quotes s for use inside a double-quoted word of a POSIX shlex split

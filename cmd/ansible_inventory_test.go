@@ -325,3 +325,16 @@ func TestShlexWordRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestAnsibleGroupNamesAreValid(t *testing.T) {
+	for in, want := range map[string]string{
+		"teknoir-demo":                    "teknoir_demo",
+		"teknoir.org/device-kind_virtual": "teknoir_org_device_kind_virtual",
+		"site_karlstad":                   "site_karlstad",
+		"hw:nv jetson":                    "hw_nv_jetson",
+	} {
+		if got := ansibleGroup(in); got != want {
+			t.Errorf("ansibleGroup(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
