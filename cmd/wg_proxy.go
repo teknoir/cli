@@ -58,8 +58,8 @@ var wgProxyOpts wgProxyOptions
 // meant to be run by hand: stdin/stdout carry the raw SSH byte stream.
 var wgProxyCmd = &cobra.Command{
 	Use:           "wg-proxy",
-	Short:         "ssh ProxyCommand that reaches a device through the WireGuard tunnel (used by 'ssh --wireguard')",
-	Hidden:        true,
+	Short:         "SSH ProxyCommand over the WireGuard tunnel (used by ssh --wireguard and the Ansible inventory)",
+	Hidden:        false,
 	Args:          cobra.NoArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
