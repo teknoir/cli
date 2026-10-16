@@ -98,8 +98,6 @@ tn_inst_finish
 
 info "K3s agent node joined successfully!"
 
-warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
-
 {{template "user_setup.sh.tmpl" .}}
 
 {{template "user_invocation.sh.tmpl" .}}

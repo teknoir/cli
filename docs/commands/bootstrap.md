@@ -94,6 +94,15 @@ bootstrap_agent_mobile-01.sh joins https://orin.local:6443
    still overrides both), reads the k3s release from the server, and registers as `mobile-01-io` with the
    `io` role.
 
+**The token on re-runs.** A run generates one new token for the server script and the agent script. A
+server whose k3s has started keeps the token of its datastore: the server script takes the passphrase of
+`<data dir>/server/token` instead of the generated one (the role flags and `--tls-san` do not change
+this; only the `--token` value is replaced). On a first run the two scripts of one run share the token as
+described above. After a **re-run** of the server script, the agent script of that same run carries a
+token that the server no longer uses: join the agent with the token of the server,
+`K3S_TOKEN=$(sudo cut -d: -f4 /var/lib/rancher/k3s/server/token) sh bootstrap_agent_mobile-01.sh`
+(the environment overrides the token in the script).
+
 A robot with a single computer uses the server script only: `tnctl bootstrap vision-station-01 --robot
 vision-station-01 --role vision --label teknoir.org/gpu=nvidia`. A sensor unit such as `sensor-unit-01` is the same
 with `--role io`.

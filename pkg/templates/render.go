@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"strings"
 )
 
@@ -20,6 +21,12 @@ var allTemplatesFS embed.FS
 // values inside double-quoted and heredoc shell contexts, where these
 // characters would allow quoting breakouts or expansion.
 const unsafeChars = "\"`$\\"
+
+// loginNameRe is the device login name the scripts accept: a lowercase POSIX
+// login name (Debian's default NAME_REGEX, at most 32 characters). It keeps
+// sudoers keywords such as ALL and names with '.' (which sudo's includedir
+// skips) out of the sudoers drop-in.
+var loginNameRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
 type field struct {
 	name      string
@@ -70,6 +77,9 @@ func ValidateTemplateData(d TemplateData) error {
 		if !f.multiline && strings.ContainsAny(f.value, "\n\r") {
 			return fmt.Errorf("template data field %s must not contain a newline", f.name)
 		}
+	}
+	if d.Username != "" && (!loginNameRe.MatchString(d.Username) || d.Username == "root") {
+		return fmt.Errorf("template data field Username must be a lowercase login name (a-z, 0-9, _ and -, starting with a letter or _, at most 32 characters, not root)")
 	}
 	return nil
 }

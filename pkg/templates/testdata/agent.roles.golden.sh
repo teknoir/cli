@@ -969,8 +969,6 @@ tn_inst_finish
 
 info "K3s agent node joined successfully!"
 
-warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
-
 on_sudo() {
   $SUDO sh -- "$@"
 }
@@ -993,7 +991,9 @@ setup_user() {
     fi
   fi
 
-  if command -v chpasswd &> /dev/null; then
+  if [ -z "${_FIRST_USER_PASS}" ]; then
+    warn "No password for ${_FIRST_USER_NAME} in the platform: key-only login"
+  elif command -v chpasswd &> /dev/null; then
     echo "${_FIRST_USER_NAME}:${_FIRST_USER_PASS}" | $SUDO chpasswd
   elif command -v passwd &> /dev/null; then
     echo -e "${_FIRST_USER_PASS}\n${_FIRST_USER_PASS}" | passwd "${_FIRST_USER_NAME}"
@@ -1011,7 +1011,7 @@ cp "${CONFIG_PATH}/rsa_private.pem" "/home/${_FIRST_USER_NAME}/.ssh/id_rsa"
 ssh-keygen -y -f "${CONFIG_PATH}/rsa_private.pem" > "/home/${_FIRST_USER_NAME}/.ssh/id_rsa.pub"
 cat "/home/${_FIRST_USER_NAME}/.ssh/id_rsa.pub" > "/home/${_FIRST_USER_NAME}/.ssh/authorized_keys"
 if [ -z "\${_FIRST_USER_KEY+x}" ] || [ "\${_FIRST_USER_KEY}" = "" ]; then
-  echo "[INFO] _FIRST_USER_KEY is not set, will continue with only password auth";
+  echo "[INFO] No extra SSH key for the user in the platform; the device key authorizes logins";
 else
   echo "\${_FIRST_USER_KEY}" >> "/home/${_FIRST_USER_NAME}/.ssh/authorized_keys"
 fi
@@ -1019,12 +1019,59 @@ chmod 600 /home/${_FIRST_USER_NAME}/.ssh/*
 chmod 744 /home/${_FIRST_USER_NAME}/.ssh
 chown -R "${_FIRST_USER_NAME}:${_FIRST_USER_NAME}" "/home/${_FIRST_USER_NAME}"
 
-# Add root user to users and sudo groups
-if [ -e /etc/group ]; then
-    sed -i "/^users:/s/\(.*\)/\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
-    sed -i "/^sudo:/s/\(.*\)/\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
-fi
+# Add the user to the users and sudo groups (once: a re-run must not list it twice)
+for _tn_group in users sudo; do
+  if { getent group "\${_tn_group}" > /dev/null 2>&1 || grep -q "^\${_tn_group}:" /etc/group 2> /dev/null; } && ! id -nG "${_FIRST_USER_NAME}" | tr ' ' '\\n' | grep -qx "\${_tn_group}"; then
+    if command -v usermod > /dev/null 2>&1; then
+      usermod -aG "\${_tn_group}" "${_FIRST_USER_NAME}"
+    else
+      sed -i "/^\${_tn_group}:/s/\\(.*\\)/\\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
+    fi
+  fi
+done
 EOF
+
+  setup_user_sudo
+}
+
+# A key-only platform user (no password in the platform) cannot answer sudo's
+# password prompt, so automation over SSH (Ansible become, tnctl) could never
+# act as root. Give exactly that user passwordless sudo with a validated
+# drop-in. With a password set, the drop-in is removed again and sudo asks for
+# the password. The rule names the user by uid (#<uid>), so no user name can
+# turn into a sudoers keyword, and the file name has no '.' (sudo's includedir
+# skips such files). Drop-ins of earlier platform users are removed.
+setup_user_sudo() {
+  _tn_sudoers="/etc/sudoers.d/90-teknoir-platform-user"
+  # find, not a glob: the bootstrap scripts run with noglob
+  if [ -d /etc/sudoers.d ]; then
+    $SUDO find /etc/sudoers.d -maxdepth 1 -type f -name '90-teknoir-*' ! -name '90-teknoir-platform-user' -exec rm -f {} \;
+  fi
+  if [ -n "${_FIRST_USER_PASS}" ]; then
+    $SUDO rm -f "${_tn_sudoers}"
+    return 0
+  fi
+  if [ ! -d /etc/sudoers.d ]; then
+    warn "No /etc/sudoers.d: ${_FIRST_USER_NAME} gets no passwordless sudo"
+    return 0
+  fi
+  _tn_uid=$(id -u "${_FIRST_USER_NAME}" 2> /dev/null) || _tn_uid=""
+  case "${_tn_uid}" in
+    ''|*[!0-9]*|0)
+      warn "No usable uid for ${_FIRST_USER_NAME}: no passwordless sudo"
+      return 0
+      ;;
+  esac
+  _tn_tmp=$($SUDO mktemp /etc/sudoers.d/.teknoir.XXXXXX) || { warn "Cannot create a sudoers drop-in: no passwordless sudo for ${_FIRST_USER_NAME}"; return 0; }
+  if ! echo "#${_tn_uid} ALL=(ALL:ALL) NOPASSWD: ALL" | $SUDO tee "${_tn_tmp}" > /dev/null \
+    || ! $SUDO chmod 0440 "${_tn_tmp}" \
+    || { command -v visudo > /dev/null 2>&1 && ! $SUDO visudo -cf "${_tn_tmp}" > /dev/null; }; then
+    $SUDO rm -f "${_tn_tmp}"
+    warn "The sudoers drop-in for ${_FIRST_USER_NAME} could not be written or did not validate; no passwordless sudo"
+    return 0
+  fi
+  $SUDO mv -f "${_tn_tmp}" "${_tn_sudoers}"
+  info "Key-only login: ${_FIRST_USER_NAME} has passwordless sudo (${_tn_sudoers})"
 }
 
 
@@ -1032,6 +1079,7 @@ CREATE_USER=${CREATE_USER:-ask}
 if [ "${OS_BUILD}" ] || [ "${CREATE_USER}" = true ]; then
   setup_user
 else
+  warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
   if id -u "${_FIRST_USER_NAME}" >/dev/null 2>&1; then
     warn "The user ${_FIRST_USER_NAME} already exist! This operation will change the password and OVERWRITE ssh keys for this users."
   fi

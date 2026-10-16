@@ -32,6 +32,11 @@ func TestGolden_Execute(t *testing.T) {
 			if err := tt.exec(&buf); err != nil {
 				t.Fatal(err)
 			}
+			if os.Getenv("UPDATE_GOLDEN") == "1" {
+				if err := os.WriteFile("testdata/"+tt.name+".golden.sh", buf.Bytes(), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if want := readGolden(t, tt.name); !bytes.Equal(buf.Bytes(), want) {
 				t.Fatalf("%s output differs from testdata/%s.golden.sh (got %d bytes, want %d)", tt.name, tt.name, buf.Len(), len(want))
 			}
@@ -99,6 +104,24 @@ func TestValidateTemplateData_Rejects(t *testing.T) {
 					t.Error("RenderServer accepted unsafe data")
 				}
 			})
+		}
+	}
+}
+
+func TestValidateTemplateData_Username(t *testing.T) {
+	for _, u := range []string{"teknoir", "golden-user", "_svc", "pi", "a1_b-c"} {
+		d := goldenData()
+		d.Username = u
+		if err := ValidateTemplateData(d); err != nil {
+			t.Errorf("%q rejected: %v", u, err)
+		}
+	}
+	// ALL would be a sudoers keyword, '.' makes sudo skip the drop-in, root is never the platform user
+	for _, u := range []string{"ALL", "Teknoir", "first.last", "root", "-x", "1user", "a b", "user~", strings.Repeat("a", 33)} {
+		d := goldenData()
+		d.Username = u
+		if err := ValidateTemplateData(d); err == nil || !strings.Contains(err.Error(), "Username") {
+			t.Errorf("%q accepted or error does not name the field: %v", u, err)
 		}
 	}
 }

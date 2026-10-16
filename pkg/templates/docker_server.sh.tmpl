@@ -44,7 +44,7 @@ disable:
 node-name: ${_DEVICE_ID}
 EOL
 
-info "Install Teknoir Manifests"
+{{template "registry_secret.sh.tmpl" .}}info "Install Teknoir Manifests"
 $SUDO mkdir -p /var/lib/rancher/k3s/server/manifests
 $SUDO tee /var/lib/rancher/k3s/server/manifests/teknoir.yaml > /dev/null << EOL
 {{template "manifests.yaml.tmpl" .}}
@@ -55,8 +55,6 @@ info "Device bootstrapped successfully!"
 {{template "ascii_art.sh.tmpl" .}}
 info "Notice!"
 info "No networking or user settings has been changed to match settings in the platform."
-
-warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
 
 {{template "user_setup.sh.tmpl" .}}
 setup_user
