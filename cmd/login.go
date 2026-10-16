@@ -2,18 +2,20 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/oauth2"
 	"github.com/teknoir/cli/pkg/config"
+	"golang.org/x/oauth2"
 )
 
 var (
-	realm    string
-	clientID string
+	realm     string
+	clientID  string
+	noBrowser bool
 )
 
 // loginCmd represents the login command
@@ -30,6 +32,7 @@ func init() {
 	rootCmd.AddCommand(loginCmd)
 	loginCmd.Flags().StringVar(&realm, "realm", "master", "Keycloak realm")
 	loginCmd.Flags().StringVar(&clientID, "client-id", config.ClientID, "Keycloak client ID")
+	loginCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "Do not try to open a browser; just print the login URL and code (the default over SSH or without a display)")
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
@@ -76,19 +79,19 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to start device authorization: %w", err)
 	}
 
-	if device.VerificationURIComplete != "" {
-		fmt.Printf("Opening browser for login...\n")
-		if err := openBrowser(device.VerificationURIComplete); err != nil {
-			fmt.Printf("Could not open browser automatically: %v\n", err)
-			fmt.Printf("Please open this URL manually:\n\n%s\n\n", device.VerificationURIComplete)
-		}
-	} else {
-		fmt.Printf("Opening browser for login...\n")
-		if err := openBrowser(device.VerificationURI); err != nil {
-			fmt.Printf("Could not open browser automatically: %v\n", err)
-			fmt.Printf("Please open this URL manually:\n\n%s\n\n", device.VerificationURI)
-		}
-		fmt.Printf("Enter this code:\n\n%s\n\n", device.UserCode)
+	// Always print the URL and the code first: opening a browser is only a convenience,
+	// and on a headless host or over SSH there is none (xdg-open may even "succeed"
+	// without showing anything), so the user must never depend on it.
+	loginURL := device.VerificationURIComplete
+	if loginURL == "" {
+		loginURL = device.VerificationURI
+	}
+	fmt.Printf("To log in, open this URL in a browser (on any machine):\n\n  %s\n\n", loginURL)
+	fmt.Printf("and confirm the code:\n\n  %s\n\n", device.UserCode)
+	if noBrowser || !canOpenBrowser() {
+		fmt.Println("(Not opening a browser here: no display, SSH session or --no-browser.)")
+	} else if err := openBrowser(loginURL); err != nil {
+		fmt.Printf("(Could not open a browser automatically: %v)\n", err)
 	}
 
 	fmt.Println("Waiting for authorization...")
@@ -118,6 +121,20 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Successfully logged in! Tokens saved to configuration.")
 	return nil
+}
+
+// canOpenBrowser reports whether this session can show a browser: never over SSH, and on
+// Linux/BSD only with an X11 or Wayland display.
+func canOpenBrowser() bool {
+	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != "" {
+		return false
+	}
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return true
+	default:
+		return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+	}
 }
 
 func openBrowser(url string) error {
