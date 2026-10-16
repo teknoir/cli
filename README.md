@@ -108,6 +108,7 @@ Securely connect to your edge devices via Teknoir's proxy infrastructure.
 ```bash
 tnctl bootstrap my-device                      # writes bootstrap_{agent,server,docker_server}_my-device.sh
 tnctl bootstrap my-device --k3s-version v1.34.11+k3s1   # install another k3s release
+tnctl bootstrap my-robot --robot my-robot --role vision --agent-role io --server orin.local   # node roles: see docs/commands/bootstrap.md
 ```
 
 The scripts install a **pinned k3s release** (`v1.36.5+k3s1` by default, the `stable` channel when this

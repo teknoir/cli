@@ -33,7 +33,7 @@ jobs:
           cache: true
       - name: shellcheck
         run: |
-          shellcheck -s sh -S warning pkg/templates/scripts/tn-k3s-ca.sh
+          shellcheck -s sh -S warning pkg/templates/scripts/tn-k3s-ca.sh pkg/templates/scripts/tn-k3s-node.sh
       - name: go test
         run: |
           go test ./test/k3s-ca/... ./cmd/... ./pkg/auth/...

@@ -52,6 +52,14 @@ type TemplateData struct {
 	K3SUpgrade bool
 	// K3SForce allows that upgrade to skip minor versions (TN_K3S_FORCE=true is the default in the script).
 	K3SForce bool
+	// Node is the role, robot, name, labels and taints of the node this script bootstraps (`tnctl
+	// bootstrap --role` and friends). The zero value changes nothing in the script.
+	Node NodeConfig
+	// Server is the address the agent script joins (`tnctl bootstrap --server`): K3S_URL=https://<Server>:6443,
+	// still overridable by K3S_URL in the environment. Empty: the script asks, as it always did.
+	Server string
+	// TLSSANs are extra --tls-san values of the server script, after the two it always adds.
+	TLSSANs []string
 }
 
 func (d TemplateData) k3sVersion() string {
@@ -103,6 +111,13 @@ var TnK3sCAScript string
 //go:embed scripts/tn-k3s-install.sh
 var TnK3sInstallScript string
 
+// TnK3sNodeScript writes the node name, labels and taints of a node (tnctl bootstrap --role) into the k3s
+// configuration, before the installer starts k3s. It is embedded in the server and the agent script as the
+// template "tn-k3s-node.sh", only when the script was generated with a node role, label, taint or name.
+//
+//go:embed scripts/tn-k3s-node.sh
+var TnK3sNodeScript string
+
 //go:embed scripts/*.sh
 var scriptsFS embed.FS
 
@@ -115,7 +130,7 @@ var (
 func init() {
 	AgentTemplate = template.Must(template.New("agent").Parse(AgentTemplateStr))
 	template.Must(AgentTemplate.ParseFS(partialsFS, "partials/*.tmpl"))
-	template.Must(AgentTemplate.ParseFS(scriptsFS, "scripts/tn-k3s-install.sh"))
+	template.Must(AgentTemplate.ParseFS(scriptsFS, "scripts/tn-k3s-install.sh", "scripts/tn-k3s-node.sh"))
 
 	ServerTemplate = template.Must(template.New("server").Parse(ServerTemplateStr))
 	template.Must(ServerTemplate.ParseFS(partialsFS, "partials/*.tmpl"))

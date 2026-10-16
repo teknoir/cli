@@ -19,6 +19,14 @@ The device may be given as an argument, via the `--device` global flag, or selec
 | `--k3s-upgrade` | `false` | Let the scripts replace an installed k3s with `--k3s-version` (sets `TN_K3S_UPGRADE=true` as the script's default). Without it a re-run **keeps** the installed k3s. See [Re-running a script](#re-running-a-script-the-installed-k3s-is-kept). |
 | `--force` | `false` | Only with `--k3s-upgrade`: allow an upgrade over more than one minor version (`TN_K3S_FORCE=true`). A downgrade is never allowed. |
 | `--docker-secret` | `""` | Contents of the `.dockerconfigjson` to embed. |
+| `--robot` | `""` | Name of the robot (the multi-computer cluster) the computers belong to. Becomes the node label `teknoir.org/robot` and, together with a role, the node name `<robot>-<role>`. See [Robots with several computers](#robots-with-several-computers). |
+| `--role` | `""` | Node role of the **server** script (a DNS label such as `vision` or `io`). Becomes the node label `teknoir.org/node-role`. |
+| `--node-name` | `""` | Node name of the server script. Default: `<robot>-<role>` with `--robot` and `--role`, otherwise `teknoir-master` as before. |
+| `--label key=value` | none | Extra node label for the server script. Repeatable. |
+| `--taint key[=value]:Effect` | none | Node taint for the server script (`NoSchedule`, `PreferNoSchedule` or `NoExecute`). Repeatable. |
+| `--agent-role`, `--agent-node-name`, `--agent-label`, `--agent-taint` | none | The same four settings for the **agent** script. The agent node name defaults to `<robot>-<agent-role>` with `--robot`, otherwise to the host name of the computer. |
+| `--server <host>` | `""` | Host name or IP address of the k3s server that the agent joins. The agent script gets `K3S_URL=https://<host>:6443` (still overridable with `K3S_URL` in the environment), and the host is added to the server certificate's TLS SANs. |
+| `--tls-san <host>` | none | Extra host name or IP address in the server certificate (k3s `--tls-san`). Repeatable. |
 
 Plus all [global flags](index.md#global-flags).
 
@@ -35,6 +43,110 @@ For the selected device, three scripts are written to the current directory:
 The scripts are rendered from templates and populated with the device's decoded settings
 (RSA keypair, username/password, public SSH key), the domain/namespace, the device ID, a freshly
 generated K3S token, and the optional Docker secret.
+
+## Robots with several computers
+
+A robot is one device in the platform (one set of device keys) that can have several computers: one k3s
+**server** and any number of k3s **agents**. The role of a computer, what it is used for, is a set of k3s
+node labels, so the platform can place workloads on it:
+
+| Role | Labels the script sets | Typical use |
+| --- | --- | --- |
+| `vision` | `teknoir.org/node-role=vision`, `teknoir.org/robot=<robot>`, plus what you add with `--label` (for example `teknoir.org/gpu=nvidia`) | GPU workloads: vision models, NVR |
+| `io` | `teknoir.org/node-role=io`, `teknoir.org/robot=<robot>`, plus `--label` | cameras, sensors, control |
+
+**The role has to be chosen when the computer is bootstrapped.** k3s applies `node-label` and `node-taint`
+only when a node registers with the cluster for the first time, so the bootstrap script writes them before
+the k3s installer starts k3s. The role names are yours to choose (a DNS label); `vision` and `io` are the
+ones the platform uses.
+
+**One `tnctl bootstrap` run per robot** writes a server script and an agent script that share the k3s
+token, the device keys and the k3s release policy. The unprefixed flags (`--role`, `--node-name`,
+`--label`, `--taint`) are for the server script; the `--agent-*` flags are for the agent script.
+`--robot`, `--server` and `--tls-san` are about the robot as a whole.
+
+Example, `mobile-01`: the Jetson Orin is the k3s server with the role `vision`, a Raspberry Pi joins it later
+as an agent with the role `io`:
+
+```bash
+tnctl bootstrap mobile-01 \
+  --robot mobile-01 \
+  --role vision --label teknoir.org/gpu=nvidia \
+  --agent-role io \
+  --server orin.local
+```
+
+```
+Successfully generated bootstrap scripts:
+- bootstrap_agent_mobile-01.sh
+- bootstrap_server_mobile-01.sh
+- bootstrap_docker_server_mobile-01.sh
+bootstrap_server_mobile-01.sh: server node mobile-01-vision, labels teknoir.org/node-role=vision,teknoir.org/robot=mobile-01,teknoir.org/gpu=nvidia
+bootstrap_agent_mobile-01.sh: agent node mobile-01-io, labels teknoir.org/node-role=io,teknoir.org/robot=mobile-01
+bootstrap_agent_mobile-01.sh joins https://orin.local:6443
+```
+
+1. Copy `bootstrap_server_mobile-01.sh` to the Orin and run it as root. The node is called
+   `mobile-01-vision` and carries the two labels and `teknoir.org/gpu=nvidia`. `orin.local` is added to
+   the server certificate (`--server` is added to the SANs automatically, `--tls-san` adds more).
+2. Later, copy `bootstrap_agent_mobile-01.sh` to the Pi and run it as root. It joins
+   `https://orin.local:6443` with the shared token (`K3S_URL=... K3S_TOKEN=... sh bootstrap_agent_...sh`
+   still overrides both), reads the k3s release from the server, and registers as `mobile-01-io` with the
+   `io` role.
+
+**The token on re-runs.** A run generates one new token for the server script and the agent script. A
+server whose k3s has started keeps the token of its datastore: the server script takes the passphrase of
+`<data dir>/server/token` instead of the generated one (the role flags and `--tls-san` do not change
+this; only the `--token` value is replaced). On a first run the two scripts of one run share the token as
+described above. After a **re-run** of the server script, the agent script of that same run carries a
+token that the server no longer uses: join the agent with the token of the server,
+`K3S_TOKEN=$(sudo cut -d: -f4 /var/lib/rancher/k3s/server/token) sh bootstrap_agent_mobile-01.sh`
+(the environment overrides the token in the script).
+
+A robot with a single computer uses the server script only: `tnctl bootstrap vision-station-01 --robot
+vision-station-01 --role vision --label teknoir.org/gpu=nvidia`. A sensor unit such as `sensor-unit-01` is the same
+with `--role io`.
+
+Rules for the values:
+
+- `--role`, `--robot`: DNS labels (lowercase letters, digits and `-`, at most 63 characters).
+  `--robot` needs a role (the node name is `<robot>-<role>`) or an explicit `--node-name`.
+- `--node-name`: a DNS name. The server and the agent must not end up with the same node name, so two
+  computers with the same role need an explicit `--agent-node-name`.
+- `--label`: Kubernetes label syntax (`key=value`, an optional DNS prefix and `/` in the key). The
+  prefixes `kubernetes.io/` and `k8s.io/` (and their subdomains) are refused, and so are
+  `teknoir.org/node-role` and `teknoir.org/robot`: they come from `--role` and `--robot`.
+- `--taint`: `key[=value]:Effect`, same key rules. A tainted node only runs workloads that tolerate the
+  taint, so use it for a node that must not run anything else.
+- `--server`, `--tls-san`: a host name or an IP address, without scheme or port (the port is 6443).
+
+What the scripts write, and what they never overwrite:
+
+| File | Content |
+| --- | --- |
+| `/etc/rancher/k3s/config.yaml` | `node-name`, added only when the file has no `node-name` already. A name that the device owner set is kept, and a different one is reported. The rest of the file is never rewritten. |
+| `/etc/rancher/k3s/config.yaml.d/98-teknoir-node.yaml` | `node-label+` and `node-taint+`. The `+` **appends** to the `node-label` and `node-taint` lists of `config.yaml` and the other drop-ins, so labels and taints of the device owner are kept. The file belongs to the script: it is replaced (atomically) when it differs and left alone when it does not, so a re-run changes nothing. |
+
+The agent script uses the same two files; `--server` only changes the `K3S_URL` it sets.
+
+!!! warning "Labels are applied when a node registers"
+    On a computer that is already part of a cluster, k3s ignores a changed `node-label` or `node-taint`.
+    The script notices that the node has registered (`<data dir>/agent/client-kubelet.crt` exists) and
+    that the labels differ, and prints the commands that apply them to the running node. Run them on the
+    k3s server:
+
+    ```bash
+    k3s kubectl label node mobile-01-io teknoir.org/node-role=io teknoir.org/robot=mobile-01 --overwrite
+    k3s kubectl taint node mobile-01-io dedicated=cameras:NoSchedule --overwrite
+    ```
+
+    A label that you removed from the script stays on the node until you remove it with
+    `k3s kubectl label node <name> <key>-`. A node that is renamed registers as a new node; the old one
+    has to be deleted (`k3s kubectl delete node <old>`).
+
+Without any of these flags the scripts are exactly what they were before (`teknoir-master` for the
+server, the host name for the agent, no labels). The docker server script (`k3s < 1.24`) does not take
+node roles.
 
 ## The k3s version
 
@@ -196,6 +308,12 @@ tnctl bootstrap --docker-secret "$(cat dockerconfig.json)"
 
 # Generate but do not upload
 tnctl bootstrap edge-01 --skip-upload
+
+# A single-computer robot with a GPU: the server script gets the role vision
+tnctl bootstrap vision-station-01 --robot vision-station-01 --role vision --label teknoir.org/gpu=nvidia
+
+# A robot with two computers: server (vision) and agent (io), see "Robots with several computers"
+tnctl bootstrap mobile-01 --robot mobile-01 --role vision --agent-role io --server orin.local
 ```
 
 !!! note
