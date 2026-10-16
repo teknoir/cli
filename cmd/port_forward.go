@@ -171,17 +171,17 @@ Example:
 
 		// Final SSH execution command using os/exec
 		// ssh -o "ProxyCommand=${PROXY_CMD}" -o 'UserKnownHostsFile=/dev/null' -o 'StrictHostKeyChecking=no' -o 'ServerAliveInterval=60' -i ${RSA_KEY_FILE} ${USERNAME}@127.0.0.1 -p ${REMOTE_ACCESS_PORT} -L ${PORT}:${TO} -N
-		sshExec := exec.Command("ssh",
-			"-o", "ProxyCommand="+proxyCommand,
-			"-o", "UserKnownHostsFile=/dev/null",
-			"-o", "StrictHostKeyChecking=no",
+		sshArgs := []string{
+			"-o", "ProxyCommand=" + proxyCommand,
 			"-o", "ServerAliveInterval=60",
 			"-i", tmpFile.Name(),
 			"-p", remoteAccessPort,
 			"-L", fmt.Sprintf("%d:%s", localPort, targetAddr),
 			"-N",
-			fmt.Sprintf("%s@127.0.0.1", username),
-		)
+		}
+		sshArgs = append(sshArgs, deviceHostKeyOpts(deviceName, namespace, domain)...)
+		sshArgs = append(sshArgs, fmt.Sprintf("%s@127.0.0.1", username))
+		sshExec := exec.Command("ssh", sshArgs...)
 
 		// Wire standard streams
 		sshExec.Stdin = os.Stdin
