@@ -16,8 +16,7 @@ One grammar: forward one of the device's **services** by its ID. The device may 
 
 `tnctl` picks the tunnel automatically (see [`ssh`](ssh.md#which-tunnel-is-used)): WireGuard when the
 device has an active WireGuard tunnel, otherwise the legacy SSH tunnel (deprecated, goes away after production
-has moved to WireGuard), otherwise the message `Tunneling is not active for <device>. Turn it on under
-Tunneling on the device page in the Teknoir console.`
+has moved to WireGuard), otherwise the message `Tunneling is not active for <device>. It turns on by itself once the device is bootstrapped and online; if it stays off, a teamspace admin turned it off or the device is flagged. See: tnctl wg status <device>`
 
 ## Over WireGuard
 
