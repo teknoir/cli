@@ -87,10 +87,20 @@ Securely connect to your edge devices via Teknoir's proxy infrastructure.
   ```bash
   tnctl port-forward [device] 8080:localhost:80
   ```
+  Or forward a device service through the WireGuard tunnel (direct to the device when possible), and check the path:
+  ```bash
+  tnctl port-forward --wireguard [device] 8080:grafana
+  tnctl wg status [device]
+  ```
 - **SOCKS5 Proxy**:
   Establish a SOCKS5 proxy to access the device's entire network:
   ```bash
   tnctl socks-proxy [device] 1080
+  ```
+- **Ansible**:
+  Use tnctl as the Ansible inventory (WireGuard where active, else the SSH tunnel), see [`docs/commands/ansible.md`](docs/commands/ansible.md):
+  ```bash
+  tnctl -d teknoir.cloud -n teknoir-demo ansible all -m ping
   ```
 
 ### 4. Bootstrap a device

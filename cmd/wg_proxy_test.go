@@ -193,8 +193,9 @@ func TestWGProxyCommandRegistration(t *testing.T) {
 	for _, c := range rootCmd.Commands() {
 		if c.Name() == "wg-proxy" {
 			found = true
-			if !c.Hidden {
-				t.Error("wg-proxy must be hidden")
+			// Visible: ssh configs and the Ansible inventory use it as their ProxyCommand.
+			if c.Hidden {
+				t.Error("wg-proxy must be visible")
 			}
 			for _, f := range []string{"namespace", "device", "port", "known-hosts-file", "turn-server", "hub-url", "direct"} {
 				if c.Flags().Lookup(f) == nil {
