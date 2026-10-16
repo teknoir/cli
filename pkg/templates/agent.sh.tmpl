@@ -23,6 +23,21 @@
 
 # The k3s release policy (a re-run keeps the installed k3s) and the cgroup v1 kubelet flag.
 {{template "tn-k3s-install.sh" .}}
+{{- if .Node.Configured}}
+
+# The node name, role labels and taints of this node (tnctl bootstrap --agent-role ...). k3s applies the
+# labels and taints only when the node registers for the first time, so they are written before the installer runs.
+{{template "tn-k3s-node.sh" .}}
+{{- if .Node.EffectiveName}}
+tn_node_name '{{.Node.EffectiveName}}'
+{{- end}}
+{{- range .Node.AllLabels}}
+tn_node_label '{{.}}'
+{{- end}}
+{{- range .Node.Taints}}
+tn_node_taint '{{.}}'
+{{- end}}
+{{- end}}
 
 {{template "keys.sh.tmpl" .}}
 
@@ -45,7 +60,9 @@ if [ "${OS_BUILD}" ]; then
     $SUDO sed -i "s#-d /run/systemd#true#g" k3s_installer.sh
 fi
 
-if [ -z "${K3S_URL}" ]; then
+{{if .Server}}# tnctl bootstrap --server: the k3s server this agent joins. K3S_URL in the environment overrides it.
+K3S_URL="${K3S_URL:-{{.ServerURL}}}"
+{{end}}if [ -z "${K3S_URL}" ]; then
     DEFAULT_K3S_URL="https://${_DEVICE_ID}.local:6443"
     read -p "Is ${DEFAULT_K3S_URL} the correct URL to the server/master node? [Y/n] " confirm
     confirm=${confirm:-"Y"}
@@ -71,7 +88,10 @@ fi
 # (the flag goes in from k3s v1.31, where the kubelet learned it). INSTALL_K3S_EXEC is final above, before
 # tn_inst_prepare reads it.
 tn_inst_prepare agent
-export INSTALL_K3S_SYMLINK=force
+{{if .Node.Configured}}# The node name, role labels and taints go into the k3s configuration before the installer starts k3s
+# (a refusal of tn_inst_prepare above has changed nothing yet).
+tn_node_apply agent
+{{end}}export INSTALL_K3S_SYMLINK=force
 $SUDO ./k3s_installer.sh
 # The kubelet flag that had to wait for the installer (an installed k3s older than v1.31 that was upgraded)
 tn_inst_finish

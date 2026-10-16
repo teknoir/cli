@@ -48,6 +48,21 @@ TN_K3S_CA_NO_MAIN=1
 {{template "tn-k3s-ca.sh" .}}
 # The k3s release policy (a re-run keeps the installed k3s) and the cgroup v1 kubelet flag.
 {{template "tn-k3s-install.sh" .}}
+{{- if .Node.Configured}}
+
+# The node name, role labels and taints of this node (tnctl bootstrap --role ...). k3s applies the labels
+# and taints only when the node registers for the first time, so they are written before the installer runs.
+{{template "tn-k3s-node.sh" .}}
+{{- if .Node.EffectiveName}}
+tn_node_name '{{.Node.EffectiveName}}'
+{{- end}}
+{{- range .Node.AllLabels}}
+tn_node_label '{{.}}'
+{{- end}}
+{{- range .Node.Taints}}
+tn_node_taint '{{.}}'
+{{- end}}
+{{- end}}
 
 {{template "k3s_version.sh.tmpl" .}}
 # Order: (0) the arguments of the k3s installer, (1) the k3s release policy and the cgroup v1 kubelet
@@ -61,7 +76,7 @@ TN_K3S_CA_NO_MAIN=1
 # it, because a k3s datastore there decides whether a k3s whose version cannot be read is installed; a
 # data dir that disagrees with config.yaml is refused here, before (1) changes anything.
 # BEGIN install-k3s-exec
-export INSTALL_K3S_EXEC="server --token ${_K3S_TOKEN} --tls-san ${_DEVICE_ID}.${_DOMAIN} --tls-san 10.0.0.10${INSTALL_K3S_EXEC:+ ${INSTALL_K3S_EXEC}}"
+export INSTALL_K3S_EXEC="server --token ${_K3S_TOKEN} --tls-san ${_DEVICE_ID}.${_DOMAIN} --tls-san 10.0.0.10{{range .TLSSANs}} --tls-san {{.}}{{end}}${INSTALL_K3S_EXEC:+ ${INSTALL_K3S_EXEC}}"
 if [ "${USE_DOCKER}" = true ]; then
     info "Use docker container-runtime for K3s"
     export INSTALL_K3S_EXEC="${INSTALL_K3S_EXEC} --docker"
@@ -79,8 +94,10 @@ $SUDO mkdir -p ${K3S_CONFIG_PATH}
 # like a kubelet-arg): the Teknoir keys are added when they are missing.
 tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml disable "disable:
   - traefik"
-tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml node-name "node-name: teknoir-master"
-# The CA above was made in ${DATA_DIR}, the data dir that k3s uses on this device. The file just
+{{if .Node.EffectiveName}}tn_node_apply server
+{{else}}tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml node-name "node-name: teknoir-master"
+{{if .Node.Configured}}tn_node_apply server
+{{end}}{{end}}# The CA above was made in ${DATA_DIR}, the data dir that k3s uses on this device. The file just
 # written and the unit that the installer writes (it has no --data-dir) must keep it there.
 if [ "${DATA_DIR}" != "/var/lib/rancher/k3s" ]; then
     tn_inst_config_ensure ${K3S_CONFIG_PATH}/config.yaml data-dir "data-dir: ${DATA_DIR}"

@@ -24,6 +24,14 @@ var bootstrapCmd = &cobra.Command{
 		if err := templates.ValidateK3SVersion(k3sVersion); err != nil {
 			return err
 		}
+		nodeOpts, err := nodeOptionsFromFlags(cmd)
+		if err != nil {
+			return err
+		}
+		nodes, err := nodeOpts.resolve()
+		if err != nil {
+			return err
+		}
 		cfg, err := config.Load()
 		if err != nil {
 			return err
@@ -128,7 +136,9 @@ var bootstrapCmd = &cobra.Command{
 			K3SForce:           force,
 		}
 
-		generate := func(tmpl *template.Template, filename string) error {
+		serverData, agentData := nodes.apply(data)
+
+		generate := func(tmpl *template.Template, filename string, data templates.TemplateData) error {
 			f, err := os.Create(filename)
 			if err != nil {
 				return err
@@ -141,13 +151,13 @@ var bootstrapCmd = &cobra.Command{
 		serverFile := fmt.Sprintf("bootstrap_server_%s.sh", deviceName)
 		dockerServerFile := fmt.Sprintf("bootstrap_docker_server_%s.sh", deviceName)
 
-		if err := generate(templates.AgentTemplate, agentFile); err != nil {
+		if err := generate(templates.AgentTemplate, agentFile, agentData); err != nil {
 			return err
 		}
-		if err := generate(templates.ServerTemplate, serverFile); err != nil {
+		if err := generate(templates.ServerTemplate, serverFile, serverData); err != nil {
 			return err
 		}
-		if err := generate(templates.DockerServerTemplate, dockerServerFile); err != nil {
+		if err := generate(templates.DockerServerTemplate, dockerServerFile, data); err != nil {
 			return err
 		}
 
@@ -155,6 +165,7 @@ var bootstrapCmd = &cobra.Command{
 		fmt.Printf("- %s\n", agentFile)
 		fmt.Printf("- %s\n", serverFile)
 		fmt.Printf("- %s\n", dockerServerFile)
+		fmt.Print(nodes.describe(agentFile, serverFile))
 
 		skipUpload, _ := cmd.Flags().GetBool("skip-upload")
 		if !skipUpload {
@@ -181,6 +192,7 @@ func init() {
 		"let the scripts replace an installed k3s with --k3s-version (TN_K3S_UPGRADE=true is the default in the scripts). Without it a re-run keeps the installed k3s; a downgrade is always refused")
 	bootstrapCmd.Flags().Bool("force", false,
 		"with --k3s-upgrade: allow an upgrade over more than one minor version (TN_K3S_FORCE=true is the default in the scripts)")
+	addNodeFlags(bootstrapCmd)
 	bootstrapCmd.Flags().String("docker-secret", "", "The contents of the .dockerconfigjson")
 	rootCmd.AddCommand(bootstrapCmd)
 }

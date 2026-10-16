@@ -32,6 +32,10 @@ type field struct {
 // newline (or carriage return) is rejected in every field except RSAPrivate
 // and RSAPublic, which are multi-line PEM material.
 //
+// The node configuration (role, robot, labels, taints, server address) is checked for the same
+// characters here; its syntax is checked by NodeConfig.Validate and ValidateHost, which `tnctl
+// bootstrap` calls before it asks the platform for the device.
+//
 // Errors name the field and the offending character class, never the value.
 func ValidateTemplateData(d TemplateData) error {
 	fields := []field{
@@ -45,6 +49,19 @@ func ValidateTemplateData(d TemplateData) error {
 		{"PublicSSHKey", d.PublicSSHKey, false},
 		{"K3SToken", d.K3SToken, false},
 		{"DockerSecret", d.DockerSecret, false},
+		{"Node.Role", d.Node.Role, false},
+		{"Node.Robot", d.Node.Robot, false},
+		{"Node.Name", d.Node.Name, false},
+		{"Server", d.Server, false},
+	}
+	for _, l := range d.Node.Labels {
+		fields = append(fields, field{"Node.Labels", l, false})
+	}
+	for _, t := range d.Node.Taints {
+		fields = append(fields, field{"Node.Taints", t, false})
+	}
+	for _, s := range d.TLSSANs {
+		fields = append(fields, field{"TLSSANs", s, false})
 	}
 	for _, f := range fields {
 		if strings.ContainsAny(f.value, unsafeChars) {
