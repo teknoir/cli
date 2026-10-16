@@ -99,8 +99,7 @@ func validLoginName(u string) error {
 	return nil
 }
 
-// runSSHWireGuard is `tnctl ssh --wireguard`: the same device login as the SSH
-// tunnel path, carried by a WireGuard session that wg-proxy brokers.
+// runSSHWireGuard is `tnctl ssh` over the WireGuard tunnel: the same device login as the legacy path, carried by a WireGuard session that wg-proxy brokers.
 func runSSHWireGuard(domain, ns, deviceName string, dev *api.BackstageDevice) error {
 	if err := validateWGTarget(ns, deviceName, 22); err != nil {
 		return err

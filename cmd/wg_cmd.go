@@ -80,7 +80,7 @@ func runPortForwardWireGuard(cmd *cobra.Command, domain, ns, dev, service string
 
 var wgCmd = &cobra.Command{
 	Use:   "wg",
-	Short: "Inspect the WireGuard (ZTNA) connection to devices",
+	Short: "Inspect the WireGuard tunnel to devices",
 }
 
 var wgStatusCmd = &cobra.Command{

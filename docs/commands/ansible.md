@@ -1,8 +1,8 @@
 # ansible
 
 Run Ansible against the devices of a namespace, with `tnctl` as the dynamic inventory. Login and domain/namespace
-selection are the same as for every other `tnctl` command, and devices are reached over WireGuard (ZTNA) where it is
-active, else through the legacy SSH tunnel.
+selection are the same as for every other `tnctl` command, and devices are reached over WireGuard where it is
+active, else through the legacy SSH tunnel (deprecated).
 
 ```bash
 tnctl ansible [args...]            # runs: ansible -i <inventory> args...
@@ -51,7 +51,7 @@ in teknoir/ansible) or `-e ansible_user=<another sudoer>` until then.
 ## synchronize (rsync)
 
 `ansible.posix.synchronize` runs its own `ssh` for rsync. Pass `use_ssh_args: true` so it uses the inventory's transport
-(the WireGuard `ProxyCommand` or the tunnel), and `verify_host: true` so it keeps the host key check: without it the
+(the WireGuard `ProxyCommand` or the legacy tunnel), and `verify_host: true` so it keeps the host key check: without it the
 module puts `StrictHostKeyChecking=no` in front of the inventory's options, and ssh uses the first value.
 
 ```bash
@@ -67,14 +67,14 @@ files `0600`) and rewritten when the catalog key changes.
 
 | Value | Behaviour |
 | --- | --- |
-| `auto` (default) | WireGuard when the device annotation `ztna.teknoir.org/wireguard` is `enabled` and its WireGuard status is `active`; otherwise the SSH tunnel when it is open. |
+| `auto` (default) | WireGuard when the device's tunnel is WireGuard-enabled and its WireGuard status is `active` (annotation `ztna.teknoir.org/wireguard` is `enabled`); otherwise the legacy SSH tunnel when it is open. The same rule as `tnctl ssh`. |
 | `wireguard` | WireGuard only; other devices get no host variables. |
-| `tunnel` | The legacy SSH tunnel only (`ncat --ssl` through `deadend-<namespace>.<domain>:2222`). |
+| `tunnel` | The legacy SSH tunnel only (`ncat --ssl` through `deadend-<namespace>.<domain>:2222`). **Deprecated:** it goes away after production has moved to WireGuard. |
 
 The chosen transport is in the host variable `ansible_teknoir_transport`.
 
 With WireGuard, `ansible_ssh_args` carries a `ProxyCommand` that runs [`tnctl wg-proxy`](wg.md) (the same one as
-`tnctl ssh --wireguard`), a per-device known_hosts file filled from the host key the hub vouches for, and
+`tnctl ssh` over WireGuard), a per-device known_hosts file filled from the host key the hub vouches for, and
 `StrictHostKeyChecking=yes`. SSH connection sharing (`ControlPersist=120s`) keeps one WireGuard session per host for a
 play. The hub URL is `https://wg.<domain>`; override it with `TNCTL_WG_HUB`, and the TURN server with
 `TNCTL_WG_TURN_SERVER`.

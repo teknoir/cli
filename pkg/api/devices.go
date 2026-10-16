@@ -45,7 +45,7 @@ type DeviceStatus struct {
 		Active bool   `json:"active"`
 		Port   string `json:"port"`
 	} `json:"remote_access"`
-	// WireGuard is the ZTNA access status; State is "active" when usable.
+	// WireGuard is the WireGuard tunnel status; State is "active" when usable.
 	WireGuard struct {
 		Enabled *bool  `json:"enabled,omitempty"`
 		State   string `json:"state"`
@@ -133,4 +133,38 @@ func FetchDeviceDetailsList(ctx context.Context, domain, namespace string, label
 	}
 
 	return items, nil
+}
+
+// WireGuardAnnotation is set to "enabled" on a device that has a WireGuard tunnel.
+const WireGuardAnnotation = "ztna.teknoir.org/wireguard"
+
+func (d *BackstageDevice) wireGuardEnabled() bool {
+	if d.Metadata.Annotations[WireGuardAnnotation] != "enabled" {
+		return false
+	}
+	wg := d.Spec.Subresources.Status.WireGuard
+	return wg.Enabled == nil || *wg.Enabled
+}
+
+// WireGuardActive reports whether the device's WireGuard tunnel is usable.
+func (d *BackstageDevice) WireGuardActive() bool {
+	return d.wireGuardEnabled() && d.Spec.Subresources.Status.WireGuard.State == "active"
+}
+
+// TunnelLabel is the value of the Tunnel column: "wireguard" when active, else
+// "legacy" when the legacy SSH tunnel is active, else the WireGuard state
+// (for example "enrolling") when it is enabled but not active, else "off".
+func (d *BackstageDevice) TunnelLabel() string {
+	switch {
+	case d.WireGuardActive():
+		return "wireguard"
+	case d.Spec.Subresources.Status.RemoteAccess.Active:
+		return "legacy"
+	case d.wireGuardEnabled():
+		if st := d.Spec.Subresources.Status.WireGuard.State; st != "" {
+			return st
+		}
+		return "enrolling"
+	}
+	return "off"
 }

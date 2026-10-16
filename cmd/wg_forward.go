@@ -21,7 +21,7 @@ import (
 // the P2P race budget plus a little slack.
 const wgPathWait = api.P2PDialRaceMillis*time.Millisecond + 300*time.Millisecond
 
-// wgForwardOptions are the settings of `tnctl port-forward --wireguard`.
+// wgForwardOptions are the settings of `tnctl port-forward` over WireGuard.
 type wgForwardOptions struct {
 	domain     string
 	namespace  string
@@ -69,7 +69,7 @@ func parseWGForwardArg(arg string) (local int, service string, err error) {
 		}
 		local, service = p, parts[1]
 	default:
-		return 0, "", fmt.Errorf("invalid forward %q: expected [local-port:]service-id (with --wireguard the target is a service ID, not host:port)", arg)
+		return 0, "", fmt.Errorf("invalid forward %q: expected [local-port:]service-id (over WireGuard the target is a service ID, not host:port)", arg)
 	}
 	if !svc.ValidID(service) {
 		return 0, "", fmt.Errorf("invalid service ID %q: expected lowercase letters, digits and '-' (list the device's services with 'tnctl wg status <device>')", service)
@@ -247,7 +247,7 @@ func describeForwardError(err error, o *wgForwardOptions) string {
 	return describeWGError(err, &po)
 }
 
-// runWGPortForward is `tnctl port-forward --wireguard`. It returns the exit code.
+// runWGPortForward is `tnctl port-forward` over WireGuard. It returns the exit code.
 func runWGPortForward(ctx context.Context, o wgForwardOptions, cred wgclient.Credential, hc *http.Client, web func(context.Context) bool, stdout, stderr io.Writer) int {
 	if err := o.validate(); err != nil {
 		wgLine(stderr, "%v", err)

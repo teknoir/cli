@@ -20,8 +20,12 @@ var (
 
 var socksProxyCmd = &cobra.Command{
 	Use:   "socks-proxy [device] [port]",
-	Short: "Establish a SOCKS5 proxy via a device",
+	Short: "Establish a SOCKS5 proxy via a device (legacy SSH tunnel only)",
 	Long: `Establish a SOCKS5 proxy via a device to access the device's network.
+
+Only available over the legacy SSH tunnel (deprecated). A device with a
+WireGuard tunnel does not offer SOCKS; forward one of its services instead:
+tnctl port-forward <device> <service-id>.
 Example:
   tnctl socks-proxy my-device 1080
   tnctl socks-proxy --port 1080`,
@@ -94,8 +98,12 @@ Example:
 			return err
 		}
 
-		if !device.Spec.Subresources.Status.RemoteAccess.Active {
-			return fmt.Errorf("remote access is not enabled for device %s. Please enable it in the Teknoir Console", deviceName)
+		kind, err := selectTunnel(device, deviceName, false, os.Stderr)
+		if err != nil {
+			return err
+		}
+		if kind == tunnelWireGuard {
+			return errSOCKSOverWireGuard(deviceName)
 		}
 
 		// Decode base64 username and private key
@@ -166,4 +174,9 @@ Example:
 func init() {
 	rootCmd.AddCommand(socksProxyCmd)
 	socksProxyCmd.Flags().IntVarP(&socksPort, "port", "p", 0, "Local port for SOCKS5 proxy")
+}
+
+// errSOCKSOverWireGuard is the refusal for socks-proxy on a WireGuard device.
+func errSOCKSOverWireGuard(deviceName string) error {
+	return fmt.Errorf("SOCKS is not available over WireGuard. Forward one of the device's services instead: tnctl port-forward %s <service-id>", deviceName)
 }

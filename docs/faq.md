@@ -22,8 +22,8 @@
     **[Configuration](configuration.md#precedence)**.
 
 ??? question "Do I need anything besides the binary for remote access?"
-    Yes — a local `ssh` client and `ncat` (from Nmap). Remote access must also be enabled per-device
-    in the Teknoir Console. See **[Remote Access](concepts/remote-access.md)**.
+    A local `ssh` client. Tunneling must be on for the device (see Tunneling on the device page in the
+    Teknoir console). Only the legacy SSH tunnel, a deprecated fallback, also needs `ncat` (from Nmap). See **[Remote Access](concepts/remote-access.md)**.
 
 ??? question "Can I script `tnctl` non-interactively?"
     Yes. Provide explicit arguments (device/namespace names) and flags to skip the interactive

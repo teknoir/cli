@@ -22,12 +22,14 @@ var (
 
 var sshCmd = &cobra.Command{
 	Use:   "ssh [device-name]",
-	Short: "SSH into a device",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if !sshWireGuard && (sshTURNServer != "" || sshWGHubURL != "" || sshNoP2P) {
-			return fmt.Errorf("--turn-server, --wg-hub-url and --no-p2p require --wireguard")
-		}
+	Short: "SSH into a device through its tunnel",
+	Long: `SSH into a device through its tunnel.
 
+The tunnel is chosen automatically: the WireGuard tunnel when the device has
+one, otherwise the legacy SSH tunnel (deprecated; it goes away once production
+has moved to WireGuard).`,
+	Example: "  tnctl ssh my-device",
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {
 			return err
@@ -73,17 +75,20 @@ var sshCmd = &cobra.Command{
 			return err
 		}
 
-		if sshWireGuard {
-			// The WireGuard path does not use the SSH tunnel's remote_access
-			// switch; access is decided by the hub (see ssh_wg.go).
+		kind, err := selectTunnel(device, deviceName, sshWireGuard, os.Stderr)
+		if err != nil {
+			return err
+		}
+		if kind == tunnelWireGuard {
+			// Access is decided by the hub (see ssh_wg.go).
 			// Errors from here on are runtime failures (a hub denial, ssh's exit
 			// status), not usage mistakes: don't print the usage text.
 			cmd.SilenceUsage = true
 			return runSSHWireGuard(domain, namespace, deviceName, device)
 		}
 
-		if !device.Spec.Subresources.Status.RemoteAccess.Active {
-			return fmt.Errorf("remote access is not enabled for device %s. Please enable it in the Teknoir Console", deviceName)
+		if sshNoP2P || sshTURNServer != "" || sshWGHubURL != "" {
+			return fmt.Errorf("--turn-server, --wg-hub-url and --no-p2p only apply to a WireGuard tunnel")
 		}
 
 		username, password, privateKey, err := decodeDeviceLogin(device)
@@ -168,11 +173,12 @@ func printRemoteShellBanner(deviceName, password string) {
 func init() {
 	rootCmd.AddCommand(sshCmd)
 	sshCmd.Flags().BoolVar(&sshWireGuard, "wireguard", false,
-		"connect through the WireGuard (ZTNA) tunnel instead of the SSH tunnel")
+		"force the WireGuard tunnel; fail instead of falling back to the legacy SSH tunnel")
+	_ = sshCmd.Flags().MarkHidden("wireguard")
 	sshCmd.Flags().BoolVar(&sshNoP2P, "no-p2p", false,
-		"with --wireguard: do not try a direct connection to the device, always go through the hub")
+		"WireGuard: do not try a direct connection to the device, always go through the hub")
 	sshCmd.Flags().StringVar(&sshTURNServer, "turn-server", "",
-		"with --wireguard: TURN server host:port overriding the hub's (env TNCTL_WG_TURN_SERVER)")
+		"WireGuard: TURN server host:port overriding the hub's (env TNCTL_WG_TURN_SERVER)")
 	sshCmd.Flags().StringVar(&sshWGHubURL, "wg-hub-url", "",
-		"with --wireguard: WireGuard hub URL (default https://wg.<domain>, env TNCTL_WG_HUB)")
+		"WireGuard: hub URL (default https://wg.<domain>, env TNCTL_WG_HUB)")
 }
