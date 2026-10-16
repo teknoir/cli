@@ -3157,8 +3157,6 @@ info ""
 info "Notice!"
 info "No networking or user settings has been changed to match settings in the platform."
 
-warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
-
 on_sudo() {
   $SUDO sh -- "$@"
 }
@@ -3257,6 +3255,7 @@ CREATE_USER=${CREATE_USER:-ask}
 if [ "${OS_BUILD}" ] || [ "${CREATE_USER}" = true ]; then
   setup_user
 else
+  warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
   if id -u "${_FIRST_USER_NAME}" >/dev/null 2>&1; then
     warn "The user ${_FIRST_USER_NAME} already exist! This operation will change the password and OVERWRITE ssh keys for this users."
   fi

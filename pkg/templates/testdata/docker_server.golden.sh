@@ -927,8 +927,6 @@ info ""
 info "Notice!"
 info "No networking or user settings has been changed to match settings in the platform."
 
-warn "To enable tunneling, the user ${_FIRST_USER_NAME} has to be created."
-
 on_sudo() {
   $SUDO sh -- "$@"
 }
