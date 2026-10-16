@@ -97,6 +97,11 @@ Securely connect to your edge devices via Teknoir's proxy infrastructure.
   ```bash
   tnctl socks-proxy [device] 1080
   ```
+- **Ansible**:
+  Use tnctl as the Ansible inventory (WireGuard where active, else the SSH tunnel), see [`docs/commands/ansible.md`](docs/commands/ansible.md):
+  ```bash
+  tnctl -d teknoir.cloud -n teknoir-demo ansible all -m ping
+  ```
 
 ### 4. Bootstrap a device
 

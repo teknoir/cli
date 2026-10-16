@@ -45,6 +45,11 @@ type DeviceStatus struct {
 		Active bool   `json:"active"`
 		Port   string `json:"port"`
 	} `json:"remote_access"`
+	// WireGuard is the ZTNA access status; State is "active" when usable.
+	WireGuard struct {
+		Enabled *bool  `json:"enabled,omitempty"`
+		State   string `json:"state"`
+	} `json:"wireguard"`
 	State DeviceState `json:"state"`
 }
 

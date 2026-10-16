@@ -16,6 +16,7 @@ usage, or follow the links below for full documentation.
 | [`ssh`](ssh.md) | | Open an interactive SSH session on a device. |
 | [`port-forward`](port-forward.md) | | Forward a local port to the device or its network. |
 | [`wg status`](wg.md) | | Show how a device is reachable through WireGuard and which services it publishes. |
+| [`ansible`](ansible.md) | | Run `ansible` / `ansible-playbook` with the devices as inventory (also `ansible-inventory`). |
 | [`socks-proxy`](socks-proxy.md) | | Establish a SOCKS5 proxy via a device. |
 | [`bootstrap`](bootstrap.md) | | Generate device provisioning scripts. |
 

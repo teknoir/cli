@@ -41,3 +41,9 @@ The exit status is 0 when a session was made and the ssh service answered, 1 oth
 | `--turn-server` | TURN `host:port` override (env `TNCTL_WG_TURN_SERVER`). |
 
 Plus all [global flags](index.md#global-flags).
+
+## wg-proxy
+
+`tnctl wg-proxy` is the SSH `ProxyCommand` behind `tnctl ssh --wireguard`. It is visible in `tnctl --help` because
+ssh configs and the [Ansible inventory](ansible.md) call it directly. It is normally not run by hand; see
+`tnctl wg-proxy --help` for its flags.
