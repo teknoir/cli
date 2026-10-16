@@ -69,8 +69,9 @@ tnctl socks-proxy my-device 1080
 
 !!! warning "Tunneling must be active"
     The `ssh`, `port-forward`, and `socks-proxy` commands need an active tunnel for the target device
-    (WireGuard, or the deprecated legacy SSH tunnel as a fallback). Turn it on under Tunneling on the device
-    page in the Teknoir console; if it is off, `tnctl` says so. `socks-proxy` works over the legacy tunnel
+    (WireGuard, or the deprecated legacy SSH tunnel as a fallback). Tunneling turns on by itself once a
+    bootstrapped device is online; a teamspace admin can turn it off on the device's Tunneling tab. If it is
+    off, `tnctl` says so (`tnctl wg status <device>` shows why). `socks-proxy` works over the legacy tunnel
     only, and `port-forward` forwards a device service (`tnctl port-forward <device>` lists them).
 
 ## A typical workflow

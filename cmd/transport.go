@@ -22,7 +22,7 @@ const (
 // errTunnelingOff is the one message every command prints when a device has no
 // usable tunnel.
 func errTunnelingOff(deviceName string) error {
-	return fmt.Errorf("Tunneling is not active for %s. Turn it on under Tunneling on the device page in the Teknoir console.", deviceName)
+	return fmt.Errorf("Tunneling is not active for %s. It turns on by itself once the device is bootstrapped and online; if it stays off, a teamspace admin turned it off or the device is flagged. See: tnctl wg status %s", deviceName, deviceName)
 }
 
 // legacyFallbackNotice is printed once on stderr when the legacy tunnel is used.
