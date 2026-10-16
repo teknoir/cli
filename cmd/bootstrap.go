@@ -134,6 +134,10 @@ var bootstrapCmd = &cobra.Command{
 			K3SForce:           force,
 		}
 
+		if err := templates.ValidateTemplateData(data); err != nil {
+			return fmt.Errorf("device %s: %w", deviceName, err)
+		}
+
 		generate := func(tmpl *template.Template, filename string) error {
 			f, err := os.Create(filename)
 			if err != nil {
