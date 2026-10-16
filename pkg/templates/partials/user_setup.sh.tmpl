@@ -72,11 +72,10 @@ EOF
 # skips such files). Drop-ins of earlier platform users are removed.
 setup_user_sudo() {
   _tn_sudoers="/etc/sudoers.d/90-teknoir-platform-user"
-  for _tn_old in /etc/sudoers.d/90-teknoir-*; do
-    if [ -e "${_tn_old}" ] && [ "${_tn_old}" != "${_tn_sudoers}" ]; then
-      $SUDO rm -f "${_tn_old}"
-    fi
-  done
+  # find, not a glob: the bootstrap scripts run with noglob
+  if [ -d /etc/sudoers.d ]; then
+    $SUDO find /etc/sudoers.d -maxdepth 1 -type f -name '90-teknoir-*' ! -name '90-teknoir-platform-user' -exec rm -f {} \;
+  fi
   if [ -n "${_FIRST_USER_PASS}" ]; then
     $SUDO rm -f "${_tn_sudoers}"
     return 0
