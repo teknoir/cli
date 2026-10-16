@@ -242,6 +242,7 @@ func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writ
 				"ansible_kubectl_namespace":    ns,
 				"ansible_teknoir_namespace":    ns,
 				"ansible_teknoir_device":       name,
+				"ansible_teknoir_login_user":   username,
 				"ansible_teknoir_domain":       o.Domain,
 				"ansible_teknoir_transport":    transportWireGuard,
 			}, password)
@@ -269,6 +270,7 @@ func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writ
 			"ansible_teknoir_tunnel_port":  portVal,
 			"ansible_teknoir_tunnel_open":  true,
 			"ansible_teknoir_device":       name,
+			"ansible_teknoir_login_user":   username,
 			"ansible_teknoir_domain":       o.Domain,
 			"ansible_teknoir_transport":    transportTunnel,
 		}, password)
@@ -281,7 +283,18 @@ func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writ
 	}
 	sort.Strings(names)
 	for _, g := range names {
-		inv[g] = map[string]interface{}{"hosts": groups[g], "vars": map[string]interface{}{}}
+		// Only hosts Ansible can reach: a device with no transport (no tunnel,
+		// no active WireGuard, no login) would be resolved by name and fail.
+		var hosts []string
+		for _, h := range groups[g] {
+			if _, ok := hostvars[h]; ok {
+				hosts = append(hosts, h)
+			}
+		}
+		if len(hosts) == 0 {
+			continue
+		}
+		inv[g] = map[string]interface{}{"hosts": hosts, "vars": map[string]interface{}{}}
 	}
 	return inv, nil
 }

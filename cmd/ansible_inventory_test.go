@@ -136,16 +136,29 @@ func TestBuildInventoryTransports(t *testing.T) {
 					t.Errorf("%s transport = %v, want %s", h, got, tr)
 				}
 			}
-			// groups: every device listed regardless of transport
+			// groups: only hosts with a transport (Ansible would try to resolve
+			// the others by name)
 			g := inv["teknoir_demo"].(map[string]interface{})["hosts"].([]string)
-			if len(g) != 5 {
-				t.Errorf("namespace group hosts = %v", g)
+			if len(g) != len(c.want) {
+				t.Errorf("namespace group hosts = %v, want %d", g, len(c.want))
 			}
-			if !reflect.DeepEqual(inv["device_group_test"].(map[string]interface{})["hosts"], []string{"wg1", "tun1"}) {
-				t.Errorf("label group = %v", inv["device_group_test"])
+			for _, h := range g {
+				if _, ok := c.want[h]; !ok {
+					t.Errorf("unreachable host %s in a group", h)
+				}
 			}
-			if _, ok := inv["site_name_a_b"]; !ok {
-				t.Errorf("sanitised label group missing: %v", inv)
+			var wantLabel []string
+			for _, h := range []string{"wg1", "tun1"} {
+				if _, ok := c.want[h]; ok {
+					wantLabel = append(wantLabel, h)
+				}
+			}
+			if !reflect.DeepEqual(inv["device_group_test"].(map[string]interface{})["hosts"], wantLabel) {
+				t.Errorf("label group = %v, want %v", inv["device_group_test"], wantLabel)
+			}
+			_, ok := inv["site_name_a_b"]
+			if _, wg1 := c.want["wg1"]; ok != wg1 {
+				t.Errorf("sanitised label group present = %v, want %v", ok, wg1)
 			}
 		})
 	}
