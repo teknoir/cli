@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -123,11 +125,20 @@ func TestBuildInventoryTransports(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.transport, func(t *testing.T) {
-			inv, err := buildInventory(devs, testOpts(t, c.transport), os.Stderr)
+			var warned bytes.Buffer
+			inv, err := buildInventory(devs, testOpts(t, c.transport), &warned)
 			if err != nil {
 				t.Fatal(err)
 			}
 			hv := hostvars(inv)
+			// every left-out device is named once on the warning stream
+			for _, d := range devs {
+				name := d.Metadata.Name
+				_, in := c.want[name]
+				if n := strings.Count(warned.String(), fmt.Sprintf("device %q", name)); (n == 1) == in {
+					t.Errorf("device %s: %d warning lines, in inventory = %v:\n%s", name, n, in, warned.String())
+				}
+			}
 			if len(hv) != len(c.want) {
 				t.Fatalf("hostvars for %d hosts, want %d: %v", len(hv), len(c.want), hv)
 			}

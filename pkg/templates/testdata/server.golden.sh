@@ -3209,7 +3209,7 @@ chown -R "${_FIRST_USER_NAME}:${_FIRST_USER_NAME}" "/home/${_FIRST_USER_NAME}"
 
 # Add the user to the users and sudo groups (once: a re-run must not list it twice)
 for _tn_group in users sudo; do
-  if getent group "\${_tn_group}" > /dev/null 2>&1 && ! id -nG "${_FIRST_USER_NAME}" | tr ' ' '\\n' | grep -qx "\${_tn_group}"; then
+  if { getent group "\${_tn_group}" > /dev/null 2>&1 || grep -q "^\${_tn_group}:" /etc/group 2> /dev/null; } && ! id -nG "${_FIRST_USER_NAME}" | tr ' ' '\\n' | grep -qx "\${_tn_group}"; then
     if command -v usermod > /dev/null 2>&1; then
       usermod -aG "\${_tn_group}" "${_FIRST_USER_NAME}"
     else
@@ -3225,11 +3225,17 @@ EOF
 # A key-only platform user (no password in the platform) cannot answer sudo's
 # password prompt, so automation over SSH (Ansible become, tnctl) could never
 # act as root. Give exactly that user passwordless sudo with a validated
-# drop-in. This is no weaker than a password: the SSH key and any password
-# live in the same platform record, and the key alone already logs in. With a
-# password set, the drop-in is removed again and sudo asks for the password.
+# drop-in. With a password set, the drop-in is removed again and sudo asks for
+# the password. The rule names the user by uid (#<uid>), so no user name can
+# turn into a sudoers keyword, and the file name has no '.' (sudo's includedir
+# skips such files). Drop-ins of earlier platform users are removed.
 setup_user_sudo() {
-  _tn_sudoers="/etc/sudoers.d/90-teknoir-${_FIRST_USER_NAME}"
+  _tn_sudoers="/etc/sudoers.d/90-teknoir-platform-user"
+  for _tn_old in /etc/sudoers.d/90-teknoir-*; do
+    if [ -e "${_tn_old}" ] && [ "${_tn_old}" != "${_tn_sudoers}" ]; then
+      $SUDO rm -f "${_tn_old}"
+    fi
+  done
   if [ -n "${_FIRST_USER_PASS}" ]; then
     $SUDO rm -f "${_tn_sudoers}"
     return 0
@@ -3238,12 +3244,19 @@ setup_user_sudo() {
     warn "No /etc/sudoers.d: ${_FIRST_USER_NAME} gets no passwordless sudo"
     return 0
   fi
-  _tn_tmp=$($SUDO mktemp /etc/sudoers.d/.teknoir.XXXXXX)
-  echo "${_FIRST_USER_NAME} ALL=(ALL:ALL) NOPASSWD: ALL" | $SUDO tee "${_tn_tmp}" > /dev/null
-  $SUDO chmod 0440 "${_tn_tmp}"
-  if command -v visudo > /dev/null 2>&1 && ! $SUDO visudo -cf "${_tn_tmp}" > /dev/null; then
+  _tn_uid=$(id -u "${_FIRST_USER_NAME}" 2> /dev/null) || _tn_uid=""
+  case "${_tn_uid}" in
+    ''|*[!0-9]*|0)
+      warn "No usable uid for ${_FIRST_USER_NAME}: no passwordless sudo"
+      return 0
+      ;;
+  esac
+  _tn_tmp=$($SUDO mktemp /etc/sudoers.d/.teknoir.XXXXXX) || { warn "Cannot create a sudoers drop-in: no passwordless sudo for ${_FIRST_USER_NAME}"; return 0; }
+  if ! echo "#${_tn_uid} ALL=(ALL:ALL) NOPASSWD: ALL" | $SUDO tee "${_tn_tmp}" > /dev/null \
+    || ! $SUDO chmod 0440 "${_tn_tmp}" \
+    || { command -v visudo > /dev/null 2>&1 && ! $SUDO visudo -cf "${_tn_tmp}" > /dev/null; }; then
     $SUDO rm -f "${_tn_tmp}"
-    warn "The sudoers drop-in for ${_FIRST_USER_NAME} did not validate; no passwordless sudo"
+    warn "The sudoers drop-in for ${_FIRST_USER_NAME} could not be written or did not validate; no passwordless sudo"
     return 0
   fi
   $SUDO mv -f "${_tn_tmp}" "${_tn_sudoers}"

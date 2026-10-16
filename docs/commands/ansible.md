@@ -11,7 +11,12 @@ tnctl ansible-inventory --list     # the inventory itself (Ansible dynamic-inven
 tnctl ansible-inventory --host <device>
 ```
 
-`ansible` / `ansible-playbook` must be installed and in `PATH`. All arguments are passed through untouched; only
+tnctl replaces the Teknoir Ansible inventory plugin (`inventory.py` and `install.sh` in
+[teknoir/ansible](https://github.com/teknoir/ansible)), which is deprecated. The playbooks in that repo run through
+`tnctl ansible-playbook`.
+
+`ansible` / `ansible-playbook` must be installed and in `PATH`. With `ansible-core` alone, also install the
+collections the Teknoir playbooks use: `ansible-galaxy collection install ansible.posix community.general`. All arguments are passed through untouched; only
 tnctl's own `-d`, `-n`, `--config` and `--debug` are accepted in front of them.
 
 ```bash
@@ -29,8 +34,29 @@ Hosts are the devices of the active domain and namespace (`-d`/`-n`, or the save
 
 A device needs a login name and a private key in the catalog. The password is optional; it only sets
 `ansible_become_pass` / `ansible_sudo_pass` (always with `ansible_become_user=root`, `ansible_become_flags=-E`).
-A device without login data, or without a usable transport (see below), stays in its groups but gets **no host
-variables**, so Ansible reports it as unreachable instead of failing the run.
+A device without login data, or without a usable transport (see below), is left out of the inventory and its groups,
+with one line on stderr per device (`tnctl: device "x" is not reachable (...)`), so a run only targets devices it can
+reach.
+
+`ansible_teknoir_login_user` holds the platform user, also when you log in as someone else with
+`-e ansible_user=...`.
+
+## Become (sudo)
+
+`-b` runs tasks as root through sudo. The device bootstrap gives the platform user passwordless sudo when the platform
+holds no password for it (key-only login, the default); otherwise the inventory supplies the device password from the
+platform. A device bootstrapped before passwordless sudo existed needs one re-bootstrap (see `playbooks/rebootstrap-device.yml`
+in teknoir/ansible) or `-e ansible_user=<another sudoer>` until then.
+
+## synchronize (rsync)
+
+`ansible.posix.synchronize` runs its own `ssh` for rsync. Pass `use_ssh_args: true` so it uses the inventory's transport
+(the WireGuard `ProxyCommand` or the tunnel), and `verify_host: true` so it keeps the host key check: without it the
+module puts `StrictHostKeyChecking=no` in front of the inventory's options, and ssh uses the first value.
+
+```bash
+tnctl ansible <device> -b -m synchronize -a "src=/var/log/syslog dest=./ mode=pull use_ssh_args=yes verify_host=yes"
+```
 
 Private keys are written to `<user cache dir>/tnctl/ansible/<domain>/<namespace>/<device>.pem` (directories `0700`,
 files `0600`) and rewritten when the catalog key changes.

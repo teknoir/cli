@@ -125,6 +125,16 @@ func deviceWireGuardActive(d *api.BackstageDevice) bool {
 	return wg.State == "active"
 }
 
+func unreachableReason(transport string) string {
+	switch transport {
+	case transportWireGuard:
+		return "WireGuard is not active"
+	case transportTunnel:
+		return "the SSH tunnel is not open"
+	}
+	return "no active WireGuard and no open SSH tunnel"
+}
+
 func withBecome(hv map[string]interface{}, password string) map[string]interface{} {
 	hv["ansible_become_user"] = "root"
 	hv["ansible_become_flags"] = "-E"
@@ -137,7 +147,8 @@ func withBecome(hv map[string]interface{}, password string) map[string]interface
 
 // buildInventory builds the Ansible dynamic inventory (--list form) for the
 // devices and writes the key files. Devices without login data or without a
-// usable transport are listed in their groups but get no host vars.
+// usable transport are left out (one line on warn each), so a run reports
+// only the devices it can reach.
 func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writer) (map[string]interface{}, error) {
 	if o.Transport == "" {
 		o.Transport = transportAuto
@@ -186,6 +197,7 @@ func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writ
 		}
 
 		if d.Spec.Settings.Username == "" || d.Spec.Settings.RSAPrivate == "" {
+			fmt.Fprintf(warn, "tnctl: device %q has no login data in the platform; left out of the inventory\n", name)
 			continue
 		}
 		username, password, key, err := decodeDeviceLogin(d)
@@ -205,6 +217,7 @@ func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writ
 		port := d.Spec.Subresources.Status.RemoteAccess.Port
 		tunnelOpen := d.Spec.Subresources.Status.RemoteAccess.Active && port != ""
 		if !useWG && !(o.Transport != transportWireGuard && tunnelOpen) {
+			fmt.Fprintf(warn, "tnctl: device %q is not reachable (%s); left out of the inventory\n", name, unreachableReason(o.Transport))
 			continue
 		}
 

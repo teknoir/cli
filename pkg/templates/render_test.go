@@ -108,6 +108,24 @@ func TestValidateTemplateData_Rejects(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateData_Username(t *testing.T) {
+	for _, u := range []string{"teknoir", "golden-user", "_svc", "pi", "a1_b-c"} {
+		d := goldenData()
+		d.Username = u
+		if err := ValidateTemplateData(d); err != nil {
+			t.Errorf("%q rejected: %v", u, err)
+		}
+	}
+	// ALL would be a sudoers keyword, '.' makes sudo skip the drop-in, root is never the platform user
+	for _, u := range []string{"ALL", "Teknoir", "first.last", "root", "-x", "1user", "a b", "user~", strings.Repeat("a", 33)} {
+		d := goldenData()
+		d.Username = u
+		if err := ValidateTemplateData(d); err == nil || !strings.Contains(err.Error(), "Username") {
+			t.Errorf("%q accepted or error does not name the field: %v", u, err)
+		}
+	}
+}
+
 func TestTemplatesSHA256(t *testing.T) {
 	a, b := TemplatesSHA256(), TemplatesSHA256()
 	if a != b || len(a) != 64 {
