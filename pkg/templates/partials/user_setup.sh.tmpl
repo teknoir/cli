@@ -40,7 +40,7 @@ cp "${CONFIG_PATH}/rsa_private.pem" "/home/${_FIRST_USER_NAME}/.ssh/id_rsa"
 ssh-keygen -y -f "${CONFIG_PATH}/rsa_private.pem" > "/home/${_FIRST_USER_NAME}/.ssh/id_rsa.pub"
 cat "/home/${_FIRST_USER_NAME}/.ssh/id_rsa.pub" > "/home/${_FIRST_USER_NAME}/.ssh/authorized_keys"
 if [ -z "\${_FIRST_USER_KEY+x}" ] || [ "\${_FIRST_USER_KEY}" = "" ]; then
-  echo "[INFO] _FIRST_USER_KEY is not set, will continue with only password auth";
+  echo "[INFO] No extra SSH key for the user in the platform; the device key authorizes logins";
 else
   echo "\${_FIRST_USER_KEY}" >> "/home/${_FIRST_USER_NAME}/.ssh/authorized_keys"
 fi
@@ -48,11 +48,16 @@ chmod 600 /home/${_FIRST_USER_NAME}/.ssh/*
 chmod 744 /home/${_FIRST_USER_NAME}/.ssh
 chown -R "${_FIRST_USER_NAME}:${_FIRST_USER_NAME}" "/home/${_FIRST_USER_NAME}"
 
-# Add root user to users and sudo groups
-if [ -e /etc/group ]; then
-    sed -i "/^users:/s/\(.*\)/\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
-    sed -i "/^sudo:/s/\(.*\)/\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
-fi
+# Add the user to the users and sudo groups (once: a re-run must not list it twice)
+for _tn_group in users sudo; do
+  if getent group "\${_tn_group}" > /dev/null 2>&1 && ! id -nG "${_FIRST_USER_NAME}" | tr ' ' '\\n' | grep -qx "\${_tn_group}"; then
+    if command -v usermod > /dev/null 2>&1; then
+      usermod -aG "\${_tn_group}" "${_FIRST_USER_NAME}"
+    else
+      sed -i "/^\${_tn_group}:/s/\\(.*\\)/\\1,${_FIRST_USER_NAME}/;s/:,/:/" /etc/group
+    fi
+  fi
+done
 EOF
 
   setup_user_sudo
