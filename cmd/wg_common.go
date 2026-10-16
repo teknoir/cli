@@ -1,14 +1,18 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 
+	"github.com/teknoir/cli/pkg/auth"
 	"github.com/teknoir/wg-tunnel/pkg/api"
 	"github.com/teknoir/wg-tunnel/pkg/knownhosts"
 )
@@ -100,4 +104,30 @@ func validateHubHost(raw, domain string) error {
 		return nil
 	}
 	return fmt.Errorf("the hub host %q is outside the logged-in domain %q; refusing to send your login token there", host, domain)
+}
+
+// newWGCredential returns the wgclient credential func: the token is read from
+// ~/.tnctl.yaml (and refreshed) on every call, never from argv or the
+// environment. Session creation may use the cached token; every renewal must
+// present a newly issued one (the hub refuses a token it has already
+// accepted), so renewals force a refresh.
+func newWGCredential(domain string) func(ctx context.Context, wgPublicKey string) (string, error) {
+	var mu sync.Mutex
+	calls := 0
+	return func(ctx context.Context, _ string) (string, error) {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			return auth.AccessToken(ctx, domain)
+		}
+		return auth.FreshAccessToken(ctx, domain)
+	}
+}
+
+// wgPosture describes this tnctl to the hub's posture check.
+func wgPosture() api.Posture {
+	host, _ := os.Hostname()
+	return api.Posture{Software: "tnctl", Version: Version, OS: runtime.GOOS, Arch: runtime.GOARCH, Hostname: host}
 }

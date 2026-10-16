@@ -45,6 +45,11 @@ type DeviceStatus struct {
 		Active bool   `json:"active"`
 		Port   string `json:"port"`
 	} `json:"remote_access"`
+	// WireGuard is the ZTNA access status; State is "active" when usable.
+	WireGuard struct {
+		Enabled *bool  `json:"enabled,omitempty"`
+		State   string `json:"state"`
+	} `json:"wireguard"`
 	State DeviceState `json:"state"`
 }
 
@@ -53,6 +58,8 @@ type BackstageDevice struct {
 		Name      string            `json:"name"`
 		Namespace string            `json:"namespace"`
 		Labels    map[string]string `json:"labels"`
+		// Annotations include ztna.teknoir.org/services (JSON list of service specs).
+		Annotations map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		Settings struct {

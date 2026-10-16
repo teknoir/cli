@@ -5,7 +5,7 @@ Open an interactive SSH session on an edge device through Teknoir's secure proxy
 ## Synopsis
 
 ```bash
-tnctl ssh [device-name] [--wireguard [--turn-server host:port] [--wg-hub-url url]]
+tnctl ssh [device-name] [--wireguard [--no-p2p] [--turn-server host:port] [--wg-hub-url url]]
 ```
 
 The device may be given as an argument, via the `--device` global flag, or selected interactively if
@@ -44,6 +44,7 @@ it works.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--wireguard` | `false` | Use the WireGuard tunnel for this connection. |
+| `--no-p2p` | `false` | Do not try a direct path to the device; always go through the hub. |
 | `--wg-hub-url` | `https://wg.<domain>` | Where to create the WireGuard session. Also `TNCTL_WG_HUB`. Must be `https`. |
 | `--turn-server` | the relay the hub hands out | `host:port` that replaces the TURN relay address (for lab networks). Also `TNCTL_WG_TURN_SERVER`. |
 
