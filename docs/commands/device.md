@@ -13,6 +13,8 @@ tnctl device [device]
 - With a device name, fetches and prints that device's status.
 - Without a name, lists devices in the namespace and opens an interactive fuzzy-finder to choose one.
 
+A device outside your organisation units, or one that does not exist, is a `404`.
+
 ## Requirements
 
 A domain and namespace must be set (via flags or config). Otherwise:

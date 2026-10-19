@@ -59,7 +59,8 @@ google-chrome --proxy-server="socks5://127.0.0.1:1080" --user-data-dir=$(mktemp 
 
 ## Requirements
 
-A set domain/namespace, an active legacy tunnel for the device, and local `ssh`/`ncat`. If the device has
+The developer role in the teamspace and permission to open terminals (the device login comes from the platform
+only to those), a set domain/namespace, an active legacy tunnel for the device, and local `ssh`/`ncat`. If the device has
 no tunnel at all, the message is `Tunneling is not active for <device>. It turns on by itself once the device is bootstrapped and online; if it stays off, a teamspace admin turned it off or the device is flagged. See: tnctl wg status <device>` See **[Remote Access](../concepts/remote-access.md)**.
 
 ## See also

@@ -32,7 +32,9 @@ Hosts are the devices of the active domain and namespace (`-d`/`-n`, or the save
 - the namespace, with `-` and `.` replaced by `_` (`teknoir-demo` is `teknoir_demo`);
 - every label as `<label>_<value>`, with `-` and `.` replaced by `_` (`device-group=test` is `device_group_test`).
 
-A device needs a login name and a private key in the catalog. The password is optional; it only sets
+A device needs a login name and a private key on the platform. `tnctl` reads the logins of the reachable devices
+from the platform in one call (at most 200 devices per call), which the platform allows only for the developer
+role with permission to open terminals; a viewer gets the platform's `403` and nothing else. The password is optional; it only sets
 `ansible_become_pass` / `ansible_sudo_pass` (always with `ansible_become_user=root`, `ansible_become_flags=-E`).
 A device without login data, or without a usable transport (see below), is left out of the inventory and its groups,
 with one line on stderr per device (`tnctl: device "x" is not reachable (...)`), so a run only targets devices it can
@@ -59,7 +61,7 @@ tnctl ansible <device> -b -m synchronize -a "src=/var/log/syslog dest=./ mode=pu
 ```
 
 Private keys are written to `<user cache dir>/tnctl/ansible/<domain>/<namespace>/<device>.pem` (directories `0700`,
-files `0600`) and rewritten when the catalog key changes.
+files `0600`) and rewritten when the key on the platform changes.
 
 ## Transports
 

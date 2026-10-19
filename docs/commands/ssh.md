@@ -38,7 +38,10 @@ omitted.
 
 - A domain and namespace must be set, and you are logged in (`tnctl login`).
 - Local `ssh` is installed.
-- Over WireGuard: edit or admin access to the device's teamspace, the device online and connected, and
+- The developer (or admin) role in the device's teamspace **and** permission to open terminals. `tnctl ssh`
+  reads the device login from the platform, which gives it only to those; a viewer is told so
+  (`The login keys of devices need the developer role in teamspace ...`). Logging in again does not change that.
+- Over WireGuard: the device online and connected, and
   a network that allows outbound HTTPS to the hub and outbound UDP to the relay (see
   [troubleshooting](#troubleshooting)). `ncat` is **not** needed.
 - Over the legacy tunnel: local `ncat` as well.
@@ -50,6 +53,7 @@ The SSH connection is carried by a short-lived, per-session WireGuard tunnel. Se
 
 | Flag | Default | Description |
 | --- | --- | --- |
+| `--show-password` | `false` | Print the device's SSH/sudo password in the banner. |
 | `--no-p2p` | `false` | Do not try a direct path to the device; always go through the hub. |
 | `--wg-hub-url` | `https://wg.<domain>` | Where to create the WireGuard session. Also `TNCTL_WG_HUB`. Must be `https`. |
 | `--turn-server` | the relay the hub hands out | `host:port` that replaces the TURN relay address (for lab networks). Also `TNCTL_WG_TURN_SERVER`. |
@@ -57,8 +61,9 @@ The SSH connection is carried by a short-lived, per-session WireGuard tunnel. Se
 A flag wins over its environment variable, which wins over the default. These flags only apply to
 a WireGuard tunnel; with the legacy tunnel they are an error.
 
-The device login is the device's username and RSA key, and the device password is printed once for
-convenience. The device's SSH host key is verified strictly against the key the device itself reported to
+The device login is the device's username and RSA key, read from the platform when the session starts. The
+device password (also the sudo password) is **not** printed by default, so it does not end up in your
+scrollback or logs; `tnctl ssh --show-password` prints it in the banner. The device's SSH host key is verified strictly against the key the device itself reported to
 the hub.
 
 ### Access is checked by the hub, continuously

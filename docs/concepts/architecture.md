@@ -15,7 +15,7 @@ flowchart TD
 
     subgraph Teknoir Cloud
         KC[Keycloak<br/>auth.&lt;domain&gt;]
-        API[Backstage / Catalog API<br/>&lt;domain&gt;]
+        API[Backstage fleet API<br/>&lt;domain&gt;/api/device/fleet]
         DE[Deadend Proxy<br/>deadend-&lt;ns&gt;.&lt;domain&gt;]
     end
 
@@ -37,7 +37,7 @@ flowchart TD
 | `cmd/root.go` | Root command, persistent flags, config initialization. |
 | `pkg/config` | Loading/saving `~/.tnctl.yaml`, domain & namespace resolution. |
 | `pkg/auth` | Token validation and refresh. |
-| `pkg/api` | HTTP client and device/namespace queries against the cloud API. |
+| `pkg/api` | HTTP client (User-Agent, 401/403 handling) and the fleet API: teamspaces, devices, device logins, robots, configuration. |
 | `pkg/templates` | Text templates for the `bootstrap` provisioning scripts. |
 | `pkg/ui` | Terminal rendering of device status and summaries. |
 

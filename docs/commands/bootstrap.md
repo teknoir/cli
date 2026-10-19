@@ -40,9 +40,12 @@ For the selected device, three scripts are written to the current directory:
 | `bootstrap_server_<device>.sh` | Provision the device as a server. |
 | `bootstrap_docker_server_<device>.sh` | Provision the device as a Docker-based server. |
 
-The scripts are rendered from templates and populated with the device's decoded settings
-(RSA keypair, username/password, public SSH key), the domain/namespace, the device ID, a freshly
-generated K3S token, and the optional Docker secret.
+The scripts are rendered from templates and populated with the device's decoded login, which `tnctl` reads from
+the platform (RSA keypair, username/password, public SSH key). The platform gives it only to the developer role
+with permission to open terminals; a viewer cannot generate scripts. A device that was created minutes ago may
+not have its key pair yet; then `tnctl` says `has no key pair yet ... run the command again shortly`.
+The scripts also get the domain/namespace, the device ID, a freshly generated K3S token, and the optional
+Docker secret.
 
 ## Robots with several computers
 

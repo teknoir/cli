@@ -59,6 +59,19 @@ go install .
 
 This installs `tnctl` into your `$GOBIN` (usually `~/go/bin`). Ensure that directory is on your `PATH`.
 
+## Older versions
+
+`tnctl` v0.1.0-beta and later talk to the platform's fleet API (teamspaces, devices and device logins limited
+to what your account may see). A platform that does not have it yet, such as production and airgapped
+installs on the classic portal, answers `this platform does not support tnctl <version> yet`. Use the last
+release for those platforms, `v0.0.9-beta`:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/teknoir/cli/main/scripts/install.sh | TNCTL_VERSION=v0.0.9-beta sh
+```
+
+or download that release from [GitHub Releases](https://github.com/teknoir/cli/releases/tag/v0.0.9-beta).
+
 ## Verify the installation
 
 ```bash

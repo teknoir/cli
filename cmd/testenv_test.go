@@ -22,6 +22,8 @@ var cliStdin io.Reader
 // rec is one request the fake platform saw.
 type rec struct {
 	Method, Path, Query, Body string
+	// Full is the whole request path; UA the User-Agent header.
+	Full, UA string
 }
 
 // fakePlatform is a fleet API for tests. Routes are matched on "METHOD /path-after-the-base".
@@ -38,7 +40,7 @@ func newFakePlatform(t *testing.T) *fakePlatform {
 	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		path := strings.TrimPrefix(r.URL.EscapedPath(), "/api/device/fleet/teknoir-demo")
-		rc := rec{r.Method, path, r.URL.RawQuery, string(b)}
+		rc := rec{Method: r.Method, Path: path, Query: r.URL.RawQuery, Body: string(b), Full: r.URL.EscapedPath(), UA: r.Header.Get("User-Agent")}
 		p.mu.Lock()
 		p.reqs = append(p.reqs, rc)
 		h := p.routes[r.Method+" "+path]
@@ -58,6 +60,16 @@ func newFakePlatform(t *testing.T) *fakePlatform {
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(p.srv.Close)
+	// tnctl talks to the fleet API only: the Backstage catalog is closed to it.
+	t.Cleanup(func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		for _, r := range p.reqs {
+			if !strings.HasPrefix(r.Full, "/api/device/fleet/") {
+				t.Errorf("request outside the fleet API: %s %s", r.Method, r.Full)
+			}
+		}
+	})
 	return p
 }
 
@@ -161,6 +173,13 @@ func testEnv(t *testing.T, p *fakePlatform, ex *fakeExec) (*cliEnv, *fakeClock) 
 				Token: func(context.Context) (string, error) { return "tok", nil },
 			}, "teknoir.cloud", "teknoir-demo", nil
 		},
+		domainFleet: func() (*api.Fleet, string, error) {
+			return &api.Fleet{
+				Base:  p.srv.URL + "/api/device/fleet/",
+				Root:  p.srv.URL + "/api/device/fleet",
+				Token: func(context.Context) (string, error) { return "tok", nil },
+			}, "teknoir.cloud", nil
+		},
 		sleep:        clk.sleep,
 		now:          clk.now,
 		pollInterval: 2 * time.Second,
@@ -179,11 +198,19 @@ func testEnv(t *testing.T, p *fakePlatform, ex *fakeExec) (*cliEnv, *fakeClock) 
 // runCLI runs a command line against env and returns stdout, stderr and the error.
 func runCLI(t *testing.T, e *cliEnv, args ...string) (string, string, error) {
 	t.Helper()
+	return runCLIWith(t, e, nil, args...)
+}
+
+// runCLIWith is runCLI with more commands under the root (the ones that are package level variables).
+func runCLIWith(t *testing.T, e *cliEnv, extra []*cobra.Command, args ...string) (string, string, error) {
+	t.Helper()
 	root := &cobra.Command{Use: "tnctl", SilenceErrors: true}
 	root.PersistentFlags().StringVarP(&outputFlag, "output", "o", "", "")
 	root.PersistentFlags().StringVar(&device, "device", "", "")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageErr("%v", err) })
-	root.AddCommand(newConfigCmd(e), newRobotsCmd(e), newRobotCmd(e), newExecCmd(e), newLogsCmd(e))
+	root.AddCommand(newConfigCmd(e), newRobotsCmd(e), newRobotCmd(e), newExecCmd(e), newLogsCmd(e),
+		newNsCmd(e), newDevicesCmd(e), newDeviceCmd(e))
+	root.AddCommand(extra...)
 	var out, errb bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&errb)
