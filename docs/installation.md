@@ -72,6 +72,10 @@ curl -sSL https://raw.githubusercontent.com/teknoir/cli/main/scripts/install.sh 
 
 or download that release from [GitHub Releases](https://github.com/teknoir/cli/releases/tag/v0.0.9-beta).
 
+A platform that has the fleet API no longer puts device logins (private key, password) into the catalog, which
+older `tnctl` read. On it, `v0.0.9-beta` cannot use `ssh`, `bootstrap`, `ansible` or the legacy port and socks
+commands any more: update `tnctl`.
+
 ## Verify the installation
 
 ```bash
