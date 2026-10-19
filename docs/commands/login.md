@@ -17,6 +17,7 @@ it prints a verification URL and a one-time code for you to enter manually.
 | --- | --- | --- |
 | `--realm` | `master` | Keycloak realm to authenticate against. |
 | `--client-id` | `teknoir-cli` | OAuth2 client ID. |
+| `--no-browser` | off | Do not try to open a browser; print the login URL and code. This is the default over SSH or without a display. Use it in agents and containers. |
 
 Plus all [global flags](index.md#global-flags) — notably `--domain`.
 

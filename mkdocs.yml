@@ -13,6 +13,7 @@ nav:
       - Architecture: concepts/architecture.md
       - Contexts (Domain & Namespace): concepts/contexts.md
       - Remote Access: concepts/remote-access.md
+      - Robot Configuration: concepts/robot-configuration.md
   - Command Reference:
       - Overview: commands/index.md
       - login: commands/login.md
