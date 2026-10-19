@@ -86,7 +86,7 @@ tnctl logs vision-station-01 HelmChart/default/notebook -f
 
 Overrides win over every git layer, need no commit and are published to the robot by the platform;
 `--wait=published|applied|ready` follows them, `-o json` and fixed exit codes make them scriptable by agents.
-See [`docs/commands/config.md`](docs/commands/config.md), [`robots`](docs/commands/robots.md),
+See [`docs/concepts/robot-configuration.md`](docs/concepts/robot-configuration.md) for the model, [`docs/commands/config.md`](docs/commands/config.md), [`robots`](docs/commands/robots.md),
 [`exec`](docs/commands/exec.md) and [`logs`](docs/commands/logs.md).
 
 ### 3. Tunneling
