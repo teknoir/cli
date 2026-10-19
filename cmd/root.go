@@ -25,6 +25,8 @@ var rootCmd = &cobra.Command{
 	Long: `tnctl (Teknoir Control) provides a command-line interface to interact with
 Teknoir's cloud platform and edge devices. It handles authentication,
 device management, and namespace-scoped operations.`,
+	// Errors are printed by Execute, which also picks the exit code.
+	SilenceErrors: true,
 	Run: func(cmd *cobra.Command, args []string) {
 		cmd.Help()
 	},
@@ -39,7 +41,14 @@ func Execute() {
 		if errors.As(err, &ee) {
 			os.Exit(ee.code)
 		}
-		os.Exit(1)
+		// cobra does not print errors (rootCmd.SilenceErrors): the exit code and the
+		// error format (-o json) are decided here.
+		writeError(os.Stderr, err, outputFlag)
+		code := exitCodeOf(err)
+		if code == codeUsage && outputFlag != "json" {
+			fmt.Fprintln(os.Stderr, "Run the command with --help for usage and examples.")
+		}
+		os.Exit(code)
 	}
 }
 
@@ -56,6 +65,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "", "Target namespace")
 	rootCmd.PersistentFlags().StringVar(&device, "device", "", "Target device ID")
 	rootCmd.PersistentFlags().BoolVar(&config.Debug, "debug", false, "Enable debug output")
+	rootCmd.PersistentFlags().StringVarP(&outputFlag, "output", "o", "", "Output format of robots, robot and config: table, json or yaml (default table). Data goes to stdout, progress to stderr")
+	rootCmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageErr("%v", err) })
 
 	// Bind flags to viper
 	viper.BindPFlag("domain", rootCmd.PersistentFlags().Lookup("domain"))

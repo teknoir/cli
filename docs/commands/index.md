@@ -13,6 +13,10 @@ usage, or follow the links below for full documentation.
 | [`ns`](ns.md) | | Select the active namespace. |
 | [`device`](device.md) | `dev` | Print detailed status for a device. |
 | [`devices`](devices.md) | `devs` | Print a summary list of devices in the namespace. |
+| [`robots`](robots.md) | | List the robots of the teamspace, or show one (`robot <name>`). |
+| [`config`](config.md) | | Read and override a robot's configuration: values, images, versions, revisions. |
+| [`exec`](exec.md) | | Run a command on a device over WireGuard and pass its exit code through. |
+| [`logs`](logs.md) | | Show the logs of a workload on a robot. |
 | [`ssh`](ssh.md) | | Open an interactive SSH session on a device through its tunnel. |
 | [`port-forward`](port-forward.md) | | Forward a local port to a service on a device (`port-forward <device>` lists its services). |
 | [`wg status`](wg.md) | | Show whether and how a device is reachable through its WireGuard tunnel, and which services it publishes. |
@@ -37,7 +41,8 @@ Every command accepts these persistent flags:
 | `--namespace` | `-n` | Target namespace. |
 | `--device` | | Target device ID. |
 | `--config` | | Path to config file (default `~/.tnctl.yaml`). |
-| `--debug` | | Enable verbose debug output. |
+| `--debug` | | Enable verbose debug output (on stderr). |
+| `--output` | `-o` | Output format of `robots`, `robot` and `config`: `table` (default), `json` or `yaml`. |
 
 ## Interactive selection
 

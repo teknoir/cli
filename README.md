@@ -69,6 +69,26 @@ tnctl login --domain teknoir.cloud
   tnctl devices env=prod region=us-east
   ```
 
+### Robots and per-robot overrides
+
+```bash
+tnctl robots [label=value...] [-o json]        # list robots
+tnctl robot vision-station-01                  # one robot
+tnctl config get vision-station-01             # effective configuration, layer by layer
+tnctl config set vision-station-01 notebook --image :pr-123 --wait   # try another image on this robot only
+tnctl config set vision-station-01 notebook replicas=2 log.level=debug --wait=applied
+tnctl config diff vision-station-01            # what differs from git
+tnctl config try vision-station-01 apps/mock-vision feature-x        # another branch of an application
+tnctl config reset vision-station-01 --all      # back to git
+tnctl exec vision-station-01 -- sudo k3s kubectl get pods -A
+tnctl logs vision-station-01 HelmChart/default/notebook -f
+```
+
+Overrides win over every git layer, need no commit and are published to the robot by the platform;
+`--wait=published|applied|ready` follows them, `-o json` and fixed exit codes make them scriptable by agents.
+See [`docs/commands/config.md`](docs/commands/config.md), [`robots`](docs/commands/robots.md),
+[`exec`](docs/commands/exec.md) and [`logs`](docs/commands/logs.md).
+
 ### 3. Tunneling
 
 Securely connect to your edge devices through their tunnel. `tnctl` picks the tunnel automatically:
@@ -127,7 +147,8 @@ These flags are available to all subcommands:
 - `-n, --namespace`: Target namespace.
 - `--device`: Target device ID.
 - `--config`: Path to a specific config file (default `~/.tnctl.yaml`).
-- `--debug`: Enable verbose debug output.
+- `--debug`: Enable verbose debug output (on stderr).
+- `-o, --output`: Output format of `robots`, `robot` and `config`: `table` (default), `json` or `yaml`.
 
 ## Configuration
 
