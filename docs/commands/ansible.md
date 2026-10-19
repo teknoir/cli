@@ -13,7 +13,8 @@ tnctl ansible-inventory --host <device>
 
 tnctl replaces the Teknoir Ansible inventory plugin (`inventory.py` and `install.sh` in
 [teknoir/ansible](https://github.com/teknoir/ansible)), which is deprecated. The playbooks in that repo run through
-`tnctl ansible-playbook`.
+`tnctl ansible-playbook`. On a platform with the fleet API the old `inventory.py` no longer finds device logins in
+the catalog and stops with an error; use tnctl.
 
 `ansible` / `ansible-playbook` must be installed and in `PATH`. With `ansible-core` alone, also install the
 collections the Teknoir playbooks use: `ansible-galaxy collection install ansible.posix community.general`. All arguments are passed through untouched; only
