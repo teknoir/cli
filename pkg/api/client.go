@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,8 @@ type Error struct {
 	// Code is the server's error code or error name when it sent one.
 	Code    string
 	Message string
+	// RetryAfter is the Retry-After header of a 429, in seconds (0: none).
+	RetryAfter int
 }
 
 // KindAuth marks an Error that needs a login (Error.Kind).
@@ -153,7 +156,25 @@ func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) 
 		return e
 	}
 	e.Code, e.Message = parseErrorBody(body)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		e.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
 	return e
+}
+
+// parseRetryAfter reads a Retry-After header: seconds, or an HTTP date.
+func parseRetryAfter(h string, now time.Time) int {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(h); err == nil {
+		return max(n, 0)
+	}
+	if t, err := http.ParseTime(h); err == nil {
+		return max(int(t.Sub(now).Seconds()+0.5), 0)
+	}
+	return 0
 }
 
 func stripQuery(u string) string {

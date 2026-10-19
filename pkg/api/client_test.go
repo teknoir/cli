@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/teknoir/cli/pkg/config"
 )
@@ -181,5 +182,27 @@ func TestRequest_SendsBearerAndJSONBody(t *testing.T) {
 	}
 	if gotAuth != "Bearer tok" || gotCT != "application/json" || gotMethod != "PATCH" || gotBody["a"] != 1.0 || !res.OK {
 		t.Errorf("auth=%q ct=%q method=%q body=%v res=%v", gotAuth, gotCT, gotMethod, gotBody, res)
+	}
+}
+
+func TestRequest_RateLimitKeepsRetryAfter(t *testing.T) {
+	for header, want := range map[string]int{"30": 30, "": 0, "soon": 0, "-5": 0} {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if header != "" {
+				w.Header().Set("Retry-After", header)
+			}
+			w.WriteHeader(429)
+			_, _ = w.Write([]byte(`{"error":{"name":"TooManyRequestsError","message":"slow down"}}`))
+		}))
+		err := Request(context.Background(), "PATCH", ts.URL+"/x", "t", nil)
+		ts.Close()
+		var ae *Error
+		if !errors.As(err, &ae) || ae.Status != 429 || ae.RetryAfter != want {
+			t.Errorf("Retry-After %q: got %+v", header, ae)
+		}
+	}
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	if got := parseRetryAfter(now.Add(42*time.Second).UTC().Format(http.TimeFormat), now); got != 42 {
+		t.Errorf("http date: %d", got)
 	}
 }

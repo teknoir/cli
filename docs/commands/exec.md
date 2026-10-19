@@ -30,11 +30,14 @@ tnctl --device vision-station-01 exec -- hostname
 
 ## Exit codes
 
-The exit status of the remote command is the exit status of `tnctl exec`, and its output goes to stdout and
-stderr as it comes. `tnctl` itself exits 1 when the device cannot be reached (no active WireGuard tunnel,
-the hub denies access, ssh cannot connect), 2 for a usage mistake (no `--`, no command), 4 on `--timeout`,
-6 when you are not logged in. An exit code of the remote command can therefore look like one of these;
-use `-o json` of the other commands, not `exec`, for machine decisions about the platform.
+The exit status of the remote command is the exit status of `tnctl exec`, whatever it is, and its output goes to
+stdout and stderr as it comes. `<device>` is a device name or a robot name; the platform says which device
+runs the command. `tnctl` itself exits 1 when the device cannot be reached (no active WireGuard tunnel, the
+hub denies access, ssh cannot connect, which ssh reports as 255; a remote command that exits 255 looks the
+same), 2 for a usage mistake (no `--`, no command), 3 for an unknown robot or device, 4 on `--timeout`, 6 when
+you are not logged in. An exit code of the remote command can therefore look like one of these (3 to 9 are
+`tnctl`'s own on the other commands); use `-o json` of the other commands, not `exec`, for machine decisions
+about the platform.
 
 Only the WireGuard tunnel is supported; a device that only has the legacy SSH tunnel is refused with the
 reason. See [`wg status`](wg.md) to check a device's tunnel.

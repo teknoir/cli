@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,6 +49,20 @@ func (f *waitFlags) add(c *cobra.Command) {
 
 func (f *waitFlags) level() (waitLevel, error) { return parseWaitLevel(f.wait) }
 
+// misplaced catches "--wait applied": a level written after a bare --wait is taken as a
+// positional argument (a key, a resource), which would be written or looked up as such.
+func (f *waitFlags) misplaced(args []string) error {
+	if f.wait != string(waitReady) {
+		return nil
+	}
+	for _, a := range args {
+		if h := lookupHint(a); h != "" {
+			return usageErr("%q looks like a --wait level, not an argument%s", a, h)
+		}
+	}
+	return nil
+}
+
 // writeInfo describes a write for the waiter.
 type writeInfo struct {
 	revision string
@@ -57,6 +73,11 @@ type writeInfo struct {
 	removed bool
 	// resources are the resource ids to verify on the device (applied, ready).
 	resources []string
+	// resourcesAfter, when set, recomputes resources from the view the platform published: a
+	// change of an application's revision can add, rename or remove its resources.
+	resourcesAfter func(v *api.ConfigTargetView) []string
+	// versionCleared: the write removed the chart version override.
+	versionCleared bool
 	// image: resource id -> the container or image path whose new image the pods must run
 	// ("" for the primary one). Absent: no image is expected.
 	image map[string]string
@@ -75,6 +96,9 @@ type waiter struct {
 	errw   io.Writer
 
 	ex        deviceExec
+	sigCtx    context.Context
+	sigStop   context.CancelFunc
+	lastView  *api.ConfigTargetView
 	baselines map[string]helmBaseline
 	lastMsg   map[string]string
 	lastLine  string
@@ -95,6 +119,21 @@ func (w *waiter) close() {
 		w.ex.Close()
 		w.ex = nil
 	}
+	if w.sigStop != nil {
+		w.sigStop()
+		w.sigStop, w.sigCtx = nil, nil
+	}
+}
+
+// interruptible returns a context that ends on SIGINT, SIGTERM or SIGHUP, so that a killed
+// tnctl returns through its deferred cleanup: the device login key is written to a temporary
+// directory while a robot is checked, and the ssh master must not outlive the command. It is
+// used from the first moment a shell to the device exists until close.
+func (w *waiter) interruptible(ctx context.Context) context.Context {
+	if w.sigCtx == nil {
+		w.sigCtx, w.sigStop = signalContext(ctx)
+	}
+	return w.sigCtx
 }
 
 // progress prints a line to stderr when it differs from the last one for the same key.
@@ -140,6 +179,7 @@ func (w *waiter) prepare(ctx context.Context, ids []string) error {
 	if w.level != waitApplied && w.level != waitReady {
 		return nil
 	}
+	ctx = w.interruptible(ctx)
 	for _, id := range ids {
 		kind, ns, name, err := checkID(id)
 		if err != nil {
@@ -153,10 +193,17 @@ func (w *waiter) prepare(ctx context.Context, ids []string) error {
 			var res execResult
 			res, err = ex.Run(ctx, remoteShell(helmProbeScript(ns, name, ns, false)))
 			if err == nil {
-				w.baselines[id] = baselineFromSnapshot(parseHelmSnapshot(res.Stdout))
+				snap := parseHelmSnapshot(res.Stdout)
+				if sudoProblem(snap.chartErr) {
+					return newErr(codeError, "cannot check the robot before the change: %s", sudoMessage(snap.chartErr))
+				}
+				w.baselines[id] = baselineFromSnapshot(snap)
 			}
 		}
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
 			return newErr(codeError, "cannot check the robot before the change (%v); --wait=%s needs WireGuard SSH to %s. Use --wait=published, or see: tnctl wg status %s", err, w.level, orDash(w.device), orDash(w.device))
 		}
 	}
@@ -168,6 +215,9 @@ func (w *waiter) wait(ctx context.Context, info writeInfo) error {
 	if w.level == waitNone {
 		return nil
 	}
+	if w.level == waitApplied || w.level == waitReady {
+		ctx = w.interruptible(ctx)
+	}
 	ctx, cancel := context.WithTimeout(ctx, w.limit)
 	defer cancel()
 	start := w.e.clock()
@@ -175,11 +225,17 @@ func (w *waiter) wait(ctx context.Context, info writeInfo) error {
 
 	w.stage = "published"
 	err := w.waitPublished(ctx, info)
+	if err == nil && info.resourcesAfter != nil && w.lastView != nil {
+		info.resources = info.resourcesAfter(w.lastView)
+	}
 	if err == nil && (w.level == waitApplied || w.level == waitReady) && len(info.resources) > 0 {
 		w.stage = string(w.level)
 		err = w.waitDevice(ctx, info)
 	}
 	if err != nil {
+		if errors.Is(err, context.Canceled) || (ctx.Err() == context.Canceled && !errors.Is(err, context.DeadlineExceeded)) {
+			return newErr(codeError, "interrupted while waiting for the change to be %s (the change itself is written)", w.stage)
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return newErr(codeTimeout, "timed out after %s waiting for the change to be %s (last state: %s)", w.limit, w.stage, orDash(w.lastLine))
 		}
@@ -216,6 +272,17 @@ func (t *transient) fail(err error) error {
 
 func (t *transient) ok() { t.n = 0 }
 
+// revisionStamp matches the time part of a revision token: 20261019T081500Z-3f9a.
+var revisionStamp = regexp.MustCompile(`^(\d{8}T\d{6}Z)-[0-9a-z]+$`)
+
+// revisionSuperseded reports whether the controller's revision was written later than ours.
+// Revisions are time-ordered tokens; within the same second the order is unknown, and revisions
+// in another format are only ever equal or not.
+func revisionSuperseded(have, written string) bool {
+	h, w := revisionStamp.FindStringSubmatch(have), revisionStamp.FindStringSubmatch(written)
+	return h != nil && w != nil && h[1] > w[1]
+}
+
 // waitPublished waits until the platform reports the change as evaluated and published:
 // the controller's revision equals the written one and the states of the targets are final.
 func (w *waiter) waitPublished(ctx context.Context, info writeInfo) error {
@@ -247,9 +314,14 @@ func (w *waiter) waitPublished(ctx context.Context, info writeInfo) error {
 // override (exit code 5).
 func (w *waiter) publishedState(v *api.ConfigTargetView, info writeInfo) (bool, error) {
 	if info.revision != "" && v.OverridesRevision != info.revision {
-		w.progress("", fmt.Sprintf("published: waiting for the controller to evaluate revision %s (it has %s)", info.revision, orDash(v.OverridesRevision)))
-		return false, nil
+		if !revisionSuperseded(v.OverridesRevision, info.revision) {
+			w.progress("", fmt.Sprintf("published: waiting for the controller to evaluate revision %s (it has %s)", info.revision, orDash(v.OverridesRevision)))
+			return false, nil
+		}
+		// Somebody else wrote after us: the controller works on their revision, which has ours in it.
+		w.progress("", fmt.Sprintf("published: revision %s was superseded by %s, following that one", info.revision, v.OverridesRevision))
 	}
+	w.lastView = v
 	if info.storage == api.StorageLocalItem {
 		return true, nil // an in-place change to a local item has no override state
 	}
@@ -301,6 +373,12 @@ func (w *waiter) waitDevice(ctx context.Context, info writeInfo) error {
 	for _, id := range info.resources {
 		c, err := w.expectation(ctx, id, info)
 		if err != nil {
+			if exitCodeOf(err) == codeNotFound {
+				// The resource is no longer in the configuration (the change removed or renamed it):
+				// there is nothing of it to find on the device.
+				w.progress(id, "no longer part of the configuration, not checked")
+				continue
+			}
 			return err
 		}
 		checks = append(checks, c)
@@ -373,6 +451,7 @@ func (w *waiter) expectation(ctx context.Context, id string, info writeInfo) (*d
 		if h.version == "" && d.Resource.Chart != nil {
 			h.version = d.Resource.Chart.Version
 		}
+		h.noVersion = info.versionCleared && h.version == ""
 		if t := digStr(d.Rendered, "spec", "targetNamespace"); t != "" {
 			h.targetNS = t
 		} else if d.Resource.Chart != nil && d.Resource.Chart.TargetNamespace != "" {
@@ -381,11 +460,18 @@ func (w *waiter) expectation(ctx context.Context, id string, info writeInfo) (*d
 		c.helm = h
 		return c, nil
 	}
-	wl := &expectedWorkload{kind: kind, images: containerImages(podSpecOf(kind, d.Rendered)), wantImage: want}
+	wl := &expectedWorkload{kind: kind, images: containerImages(podSpecOf(kind, d.Rendered))}
 	if len(wl.images) == 0 {
 		for _, im := range d.Resource.Images {
 			wl.images[im.Container] = im.Image
 		}
+	}
+	if _, ok := info.image[id]; ok {
+		// Follow the image change: the new pods run every image of the published template.
+		for _, im := range wl.images {
+			wl.wantImages = append(wl.wantImages, im)
+		}
+		sort.Strings(wl.wantImages)
 	}
 	c.wl = wl
 	return c, nil
@@ -445,6 +531,9 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 	}
 	secs := parseSections(res.Stdout)
 	o, errText := parseObj(secs["obj"])
+	if o == nil && sudoProblem(errText) {
+		return checkResult{checkFatal, sudoMessage(errText)}, nil
+	}
 	if o == nil && errText != "" {
 		return pending("cannot read %s on the device: %s", c.kind, errText), nil
 	}
@@ -463,7 +552,7 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 	switch c.kind {
 	case "Deployment", "StatefulSet", "DaemonSet":
 		o["kind"] = c.kind
-		return w.readiness(&c.stab, now, evalPodsReady([]obj{o}, pods, c.wl.wantImage)), nil
+		return w.readiness(&c.stab, now, evalPodsReady([]obj{o}, pods, c.wl.wantImages...)), nil
 	case "Pod":
 		if ok, why := podReady(o); !ok {
 			c.stab.reset()

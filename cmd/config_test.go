@@ -124,9 +124,15 @@ func TestRobots(t *testing.T) {
 	if err != nil || !strings.Contains(out, "- name: amr-02") && !strings.Contains(out, "name: amr-02") {
 		t.Errorf("yaml: %v\n%s", err, out)
 	}
-	_, _, err = runCLI(t, e, "robots", "site=nowhere")
-	if exitCodeOf(err) != codeNotFound {
-		t.Errorf("no match: %v", err)
+	// An empty list is not an error, in every format.
+	for _, args := range [][]string{{"robots", "site=nowhere"}, {"robots", "site=nowhere", "-o", "json"}, {"robots", "site=nowhere", "-o", "yaml"}} {
+		out, errs, err := runCLI(t, e, args...)
+		if err != nil || (len(args) == 2 && !strings.Contains(errs, "no robots in teamspace teknoir-demo with the specified labels")) {
+			t.Errorf("%v: %v %q", args, err, errs)
+		}
+		if strings.Contains(strings.Join(args, " "), "json") && strings.TrimSpace(out) != "[]" {
+			t.Errorf("json: %q", out)
+		}
 	}
 	_, _, err = runCLI(t, e, "robots", "site")
 	if exitCodeOf(err) != codeUsage {

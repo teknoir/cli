@@ -19,12 +19,20 @@ func chartJSON(values, version string) string {
 }
 
 func jobJSON(uid string, succeeded, failed int) string {
+	return jobWithJSON(uid, succeeded, failed, false)
+}
+
+// jobWithJSON is a helm Job; backoffExceeded adds the Failed condition.
+func jobWithJSON(uid string, succeeded, failed int, backoffExceeded bool) string {
 	st := map[string]any{}
 	if succeeded > 0 {
 		st["succeeded"] = succeeded
 	}
 	if failed > 0 {
 		st["failed"] = failed
+	}
+	if backoffExceeded {
+		st["conditions"] = []any{map[string]any{"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}}
 	}
 	return mustJSON(map[string]any{"kind": "Job", "metadata": map[string]any{"name": "helm-install-notebook", "uid": uid}, "status": st})
 }
@@ -158,7 +166,11 @@ func TestEvalHelmApplied(t *testing.T) {
 		{"arrived, no job yet", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), ""), checkPending, "create Job"},
 		{"new job running", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 0, 0)), checkPending, "is running"},
 		{"new job done", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 1, 0)), checkDone, "succeeded"},
-		{"new job failed", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 0, 2)), checkUnhealthy, "failed 2 time"},
+		{"new job failed once: helm-controller retries", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 0, 1)), checkPending, "retries it"},
+		{"new job failed twice: still retrying", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 0, 2)), checkPending, "failed 2 time"},
+		{"new job failed again and again", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 0, 3)), checkUnhealthy, "failed 3 time"},
+		{"job backoff limit used up", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobWithJSON("u2", 0, 1, true)), checkUnhealthy, "failed (1 attempt"},
+		{"sudo asks for a password", helmBaseline{}, snap("sudo: a password is required", ""), checkFatal, "passwordless sudo"},
 		{"retry then success", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 1, 1)), checkDone, "succeeded"},
 		{"nothing changed on the device: the existing job counts", helmBaseline{present: true, sig: helmSig(parseHelmSnapshot(probeOutput(map[string]string{"chart": chartJSON(want, "0.0.6")})).chart), jobUID: "u1"},
 			snap(chartJSON(want, "0.0.6"), jobJSON("u1", 1, 0)), checkDone, "succeeded"},

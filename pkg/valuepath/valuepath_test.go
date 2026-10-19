@@ -303,3 +303,61 @@ func TestStringKey(t *testing.T) {
 		t.Error("empty path")
 	}
 }
+
+func TestFlowValuesReadYAML11Booleans(t *testing.T) {
+	// yaml.v3 reads yes/on as text; Helm (YAML 1.1) reads them as booleans, like a plain k=yes.
+	a, err := ParseAssignment("a={enabled: yes, off: 'no', quoted: \"on\", list: [on, n, text], n: 3}", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"enabled": true, "off": "no", "quoted": "on", "list": []any{true, false, "text"}, "n": 3}
+	if !reflect.DeepEqual(a.Value, want) {
+		t.Errorf("got %#v", a.Value)
+	}
+	b, err := ParseAssignment("a=yes", Options{})
+	if err != nil || b.Value != true {
+		t.Errorf("plain yes: %#v %v", b.Value, err)
+	}
+}
+
+func TestApplyToYAMLKeepsWhatItDoesNotTouch(t *testing.T) {
+	in := "# values for the notebook\nenabled: yes\nmode: off\nimage:\n  tag: main  # pinned\nlist: [on, off]\n"
+	asg := func(args ...string) []Assignment {
+		var out []Assignment
+		for _, arg := range args {
+			a, err := ParseAssignment(arg, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, a)
+		}
+		return out
+	}
+	out, err := ApplyToYAML([]byte(in), asg("image.tag=pr-1", "replicas=2", "a.b.c=x", "gone=null", "debug=yes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	for _, frag := range []string{"# values for the notebook", "enabled: yes\n", "mode: off\n", "list: [on, off]", "tag: pr-1", "replicas: 2", "debug: true", "gone: null", "c: x"} {
+		if !strings.Contains(got, frag) {
+			t.Errorf("missing %q in\n%s", frag, got)
+		}
+	}
+	if strings.Contains(got, `"yes"`) || strings.Contains(got, `"off"`) {
+		t.Errorf("untouched scalars must not be quoted:\n%s", got)
+	}
+	// a scalar on the way is refused, like SetIn
+	if _, err := ApplyToYAML([]byte(in), asg("mode.x=1")); err == nil || !strings.Contains(err.Error(), "mode is a boolean, not a map") {
+		t.Errorf("error = %v", err)
+	}
+	if _, err := ApplyToYAML([]byte(in), asg("list.x=1")); err == nil || !strings.Contains(err.Error(), "a list") {
+		t.Errorf("error = %v", err)
+	}
+	// empty and comment-only documents start as an empty map
+	for _, doc := range []string{"", "# nothing yet\n", "null\n"} {
+		out, err := ApplyToYAML([]byte(doc), asg("a.b=1"))
+		if err != nil || !strings.Contains(string(out), "a:\n  b: 1") {
+			t.Errorf("%q: %v %q", doc, err, out)
+		}
+	}
+}

@@ -167,9 +167,13 @@ func unhealthy(format string, a ...any) checkResult {
 type expectedHelm struct {
 	values  obj    // parsed valuesContent; nil when not known
 	version string // chart version; "" = not set
+	// noVersion: the change removed the version override, so the device must not keep one that
+	// git does not pin (version == ""). TOE merges what it is given and may not drop the field.
+	noVersion bool
 	// targetNS is where the release's workloads run.
 	targetNS string
-	// wantImage is the image the pods must run (from --image), if any.
+	// wantImage is the image the pods must run (from --image), if any. Only the workloads whose
+	// pod template has it are held to it.
 	wantImage string
 }
 
@@ -255,6 +259,9 @@ func normalizeYAML(v any) any {
 // evalHelmApplied judges whether helm-controller applied the expected HelmChart.
 func evalHelmApplied(exp expectedHelm, base helmBaseline, s helmSnapshot, jobName string) checkResult {
 	if s.chart == nil {
+		if sudoProblem(s.chartErr) {
+			return checkResult{checkFatal, sudoMessage(s.chartErr)}
+		}
 		if strings.Contains(s.chartErr, "doesn't have a resource type") || strings.Contains(s.chartErr, "the server could not find the requested resource") {
 			return checkResult{checkFatal, "the device has no HelmChart support (is this a k3s robot?)"}
 		}
@@ -265,12 +272,15 @@ func evalHelmApplied(exp expectedHelm, base helmBaseline, s helmSnapshot, jobNam
 	}
 	if exp.values != nil {
 		have := parseValuesYAML(digStr(s.chart, "spec", "valuesContent"))
-		if !sameYAML(exp.values, have) {
+		if !sameValues(exp.values, have) {
 			return pending("the device does not have the published values yet")
 		}
 	}
 	if exp.version != "" && digStr(s.chart, "spec", "version") != exp.version {
 		return pending("the device has chart version %q, expected %q", digStr(s.chart, "spec", "version"), exp.version)
+	}
+	if exp.version == "" && exp.noVersion && digStr(s.chart, "spec", "version") != "" {
+		return pending("the device still has chart version %q although git does not pin one (the device agent may not remove a field)", digStr(s.chart, "spec", "version"))
 	}
 	if s.job == nil {
 		return pending("waiting for helm-controller to create Job %s", jobName)
@@ -283,10 +293,98 @@ func evalHelmApplied(exp expectedHelm, base helmBaseline, s helmSnapshot, jobNam
 	if digInt(s.job, "status", "succeeded") >= 1 {
 		return done("helm Job %s succeeded", jobName)
 	}
-	if n := digInt(s.job, "status", "failed"); n > 0 {
+	// helm-controller creates the Job with a backoff limit of 1000 and retries a failed install
+	// (the API or the chart server may just be slow), so one failure is not the verdict: the
+	// Job's Failed condition, or several failures in a row, is.
+	n := digInt(s.job, "status", "failed")
+	if jobFailedCondition(s.job) {
+		return unhealthy("helm Job %s failed (%d attempt(s))", jobName, max(n, 1))
+	}
+	if n >= helmJobFailedAttempts {
 		return unhealthy("helm Job %s failed %d time(s)", jobName, n)
 	}
+	if n > 0 {
+		return pending("helm Job %s failed %d time(s), helm-controller retries it", jobName, n)
+	}
 	return pending("helm Job %s is running", jobName)
+}
+
+// helmJobFailedAttempts is how many failed attempts of the helm install Job count as unhealthy.
+const helmJobFailedAttempts = 3
+
+// jobFailedCondition reports whether the Job has condition Failed=True (its backoff limit is used up).
+func jobFailedCondition(job obj) bool {
+	for _, c := range digList(job, "status", "conditions") {
+		if co, ok := c.(obj); ok && digStr(co, "type") == "Failed" && digStr(co, "status") == "True" {
+			return true
+		}
+	}
+	return false
+}
+
+// sudoProblem reports whether kubectl output is sudo refusing to run: the device login has no
+// passwordless sudo, which no amount of waiting fixes.
+func sudoProblem(out string) bool {
+	return strings.HasPrefix(strings.TrimSpace(out), "sudo:")
+}
+
+func sudoMessage(out string) string {
+	return fmt.Sprintf("cannot read the robot's k3s: %s (the device login needs passwordless sudo; use --wait=published)", firstNonEmptyLine(out))
+}
+
+// ---------- secrets ----------
+
+// hiddenValue is what the platform shows instead of a credential. The rendered item the
+// waiter compares the device with has it in place of every secret value.
+const hiddenValue = "<hidden>"
+
+// sameValues compares the expected chart values with the device's. A value the platform hid
+// cannot be compared, so such a leaf only has to exist on the device.
+func sameValues(exp, have obj) bool {
+	e, h := maskHidden(exp, have)
+	em, _ := e.(obj)
+	hm, _ := h.(obj)
+	return sameYAML(em, hm)
+}
+
+// maskHidden returns copies of exp and have in which every leaf that exp hides is replaced by
+// the same marker on both sides, when have has the key.
+func maskHidden(exp, have any) (any, any) {
+	switch e := exp.(type) {
+	case string:
+		if e == hiddenValue && have != nil {
+			return hiddenValue, hiddenValue
+		}
+	case map[string]any:
+		h, ok := have.(map[string]any)
+		if !ok {
+			return exp, have
+		}
+		oe, oh := make(map[string]any, len(e)), make(map[string]any, len(h))
+		for k, v := range e {
+			oe[k] = v
+		}
+		for k, v := range h {
+			oh[k] = v
+		}
+		for k, ev := range e {
+			if hv, present := h[k]; present {
+				oe[k], oh[k] = maskHidden(ev, hv)
+			}
+		}
+		return oe, oh
+	case []any:
+		h, ok := have.([]any)
+		if !ok || len(h) != len(e) {
+			return exp, have
+		}
+		oe, oh := make([]any, len(e)), make([]any, len(h))
+		for i := range e {
+			oe[i], oh[i] = maskHidden(e[i], h[i])
+		}
+		return oe, oh
+	}
+	return exp, have
 }
 
 // releaseWorkloads picks the workloads that belong to a Helm release.
@@ -330,8 +428,8 @@ func containerImages(spec obj) map[string]string {
 type expectedWorkload struct {
 	kind   string
 	images map[string]string
-	// wantImage: pods must run it (the override's image), if known.
-	wantImage string
+	// wantImages: pods must run them (the images of the changed workload), if known.
+	wantImages []string
 }
 
 // evalWorkloadApplied judges whether the workload has the expected images and the controller
@@ -420,19 +518,44 @@ type readyResult struct {
 	sig string
 }
 
+// templateImages is the set of images (containers and init containers) of a workload's pod template.
+func templateImages(w obj) map[string]bool {
+	m := map[string]bool{}
+	for _, im := range containerImages(podSpecOf(digStr(w, "kind"), w)) {
+		m[im] = true
+	}
+	return m
+}
+
+// wantedFor returns the wanted images that a workload's pod template has. A release can have
+// several workloads and the image belongs to some of them: the others are judged without an
+// image filter, as the pods of the old and the new template cannot be told apart there.
+func wantedFor(w obj, wantImages []string) []string {
+	var out []string
+	have := templateImages(w)
+	for _, im := range wantImages {
+		if im != "" && have[im] {
+			out = append(out, im)
+		}
+	}
+	return out
+}
+
 // evalPodsReady judges a set of workloads and their pods: rollout finished, no failing
-// containers, every pod Running and Ready, on the wanted image.
-func evalPodsReady(workloads []obj, pods []obj, wantImage string) readyResult {
+// containers, every pod Running and Ready, on the wanted images (those that a workload's pod
+// template has; none: every pod of the workload counts).
+func evalPodsReady(workloads []obj, pods []obj, wantImages ...string) readyResult {
 	var sig []string
 	var waiting []string
 	for _, w := range workloads {
 		name := digStr(w, "kind") + "/" + digStr(w, "metadata", "name")
+		wantImage := wantedFor(w, wantImages)
 		wp := podsOf(w, pods)
 		for _, p := range wp {
 			if digStr(p, "metadata", "deletionTimestamp") != "" {
 				continue
 			}
-			if wantImage != "" && !podRuns(p, wantImage) {
+			if len(wantImage) > 0 && !podRuns(p, wantImage) {
 				continue // an old pod: not ours to judge
 			}
 			for _, cs := range digList(p, "status", "containerStatuses") {
@@ -457,7 +580,7 @@ func evalPodsReady(workloads []obj, pods []obj, wantImage string) readyResult {
 		for _, p := range wp {
 			// Old pods that are going away, or run the old image, do not count; the
 			// rollout check above and the number of live pods below catch a rollout that is not done.
-			if digStr(p, "metadata", "deletionTimestamp") != "" || (wantImage != "" && !podRuns(p, wantImage)) {
+			if digStr(p, "metadata", "deletionTimestamp") != "" || (len(wantImage) > 0 && !podRuns(p, wantImage)) {
 				continue
 			}
 			if ok, why := podReady(p); !ok {
@@ -478,13 +601,18 @@ func evalPodsReady(workloads []obj, pods []obj, wantImage string) readyResult {
 	return readyResult{checkResult: done("rollout complete, %d pod(s) ready", len(sig)), sig: strings.Join(sig, ",")}
 }
 
-func podRuns(p obj, image string) bool {
-	for _, c := range digList(p, "spec", "containers") {
-		if co, ok := c.(obj); ok && digStr(co, "image") == image {
-			return true
+// podRuns reports whether the pod runs every one of the images, in a container or an init container.
+func podRuns(p obj, images []string) bool {
+	have := map[string]bool{}
+	for _, im := range containerImages(digMap(p, "spec")) {
+		have[im] = true
+	}
+	for _, im := range images {
+		if !have[im] {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func podReady(p obj) (bool, string) {

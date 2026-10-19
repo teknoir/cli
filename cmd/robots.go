@@ -56,10 +56,13 @@ Labels narrow the list (all must match). Use -o json or -o yaml for the full rec
 				return writeStructured(out, format, raw)
 			}
 			if len(robots) == 0 {
+				// Not an error, whatever the format: -o json prints [] and exits 0 as well.
 				if len(labels) > 0 {
-					return newErr(codeNotFound, "no robots in teamspace %s with the specified labels", ns)
+					fmt.Fprintf(cmd.ErrOrStderr(), "no robots in teamspace %s with the specified labels\n", ns)
+				} else {
+					fmt.Fprintf(cmd.ErrOrStderr(), "no robots in teamspace %s\n", ns)
 				}
-				return newErr(codeNotFound, "no robots in teamspace %s", ns)
+				return nil
 			}
 			printRobotTable(out, robots, e.clock())
 			return nil

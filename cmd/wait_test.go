@@ -290,11 +290,11 @@ func TestWaitAppliedFailingJobIsExit7WithLog(t *testing.T) {
 		if n == 1 {
 			return map[string]string{"chart": chartJSON("old: 1\n", "0.0.5"), "job": jobJSON("u1", 1, 0)}
 		}
-		return map[string]string{"chart": chartJSON(newValues, "0.0.5"), "job": jobJSON("u2", 0, 1)}
+		return map[string]string{"chart": chartJSON(newValues, "0.0.5"), "job": jobJSON("u2", 0, 3)}
 	}}
 	e, _ := testEnv(t, p, &fakeExec{run: dev.run})
 	_, _, err := setWait(t, e, "--wait=applied")
-	if exitCodeOf(err) != codeUnhealthy || !strings.Contains(err.Error(), "helm Job helm-install-notebook failed 1 time(s)") || !strings.Contains(err.Error(), "pull access denied") {
+	if exitCodeOf(err) != codeUnhealthy || !strings.Contains(err.Error(), "helm Job helm-install-notebook failed 3 time(s)") || !strings.Contains(err.Error(), "pull access denied") {
 		t.Errorf("exit %d: %v", exitCodeOf(err), err)
 	}
 }

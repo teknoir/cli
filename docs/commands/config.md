@@ -90,8 +90,9 @@ tnctl config set vision-station-01 Deployment/default/whoami --image traefik/who
   `container=` (a workload with several containers) to pick one. Several `--image container=repo:tag` for
   one workload are allowed with full images; a HelmChart takes one `--image` per command.
 - `-f values.yaml` replaces the value overrides of the resource with the file (`-` reads stdin). `k=v`
-  pairs are applied on top of the file. The override's version and note are kept unless you set them.
-  Cannot be combined with `--image`.
+  pairs are applied on top of the file, which is edited in place: its comments, key order and the spelling
+  of the scalars you did not touch (a plain `yes` stays `yes`) are sent as they are. The override's version
+  and note are kept unless you set them. Cannot be combined with `--image`.
 - `--note` says why; everyone who looks at the robot sees it.
 - `--dry-run` shows the before/after diff of the effective resource and writes nothing.
 - Values and `--version` apply to HelmCharts; a workload takes `--image`.
@@ -116,7 +117,7 @@ Values are read like YAML 1.1 scalars, which is how Helm reads values:
 | `null`, `~` | null: deletes the key from the git layers and the chart default |
 | `k=` | the empty string |
 | `"1.10"`, `'on'` | the text between the quotes |
-| `[a, b]`, `{x: 1}` | a list or a map (YAML flow); a list replaces the whole list |
+| `[a, b]`, `{x: 1}` | a list or a map (YAML flow, plain `yes`/`on` inside read as booleans too); a list replaces the whole list |
 | anything else | text |
 | `.nan`, `.inf` | refused |
 
@@ -156,7 +157,9 @@ if not, exit 5 and nothing changes.
 ### diff, links, promote
 
 `diff` prints what git yields against what the robot has, as a unified diff, for one resource or for every
-resource with an override. Its exit code is 0 whether or not there is a difference.
+resource with an override (also in-place changes of local items). An override whose resource git no
+longer yields is listed as `stale` with the command that removes it (`reset`), and does not fail the rest.
+Its exit code is 0 whether or not there is a difference.
 
 `links` prints the GitHub links of the file a resource comes from (view, permalink, history, edit when the
 revision is a branch) and of its chart (source, `values.yaml` at the pinned version, release).
@@ -169,21 +172,26 @@ to a file), the rest on stderr. Nothing is written to git. When it is merged, `r
 
 `--wait[=LEVEL]` on every write (and `config wait`) follows the change; without it the command returns as soon
 as the platform has stored it. A bare `--wait` means `ready`. Write `--wait=applied`; `--wait applied` makes
-`applied` an argument.
+`applied` an argument (`unset`, `delete`, `reset` and `try` refuse it with a hint instead of taking it as a key).
 
 | Level | Reached when |
 | --- | --- |
-| `published` | The platform evaluated the write (its `overridesRevision` equals the written revision) and the override's state is `active` or `redundant`. `invalid`, `no-target` or `not-applicable` ends with exit 5 and the platform's reason. |
-| `applied` | The robot has it. HelmChart: the on-device HelmChart has the published values and version and the helm Job is a new one that succeeded. Workload: the containers have the published images and the controller has seen the latest generation. |
-| `ready` | Applied, and the rollout is complete, the pods are Ready on the new image and have not restarted for 20 s. |
+| `published` | The platform evaluated the write (its `overridesRevision` equals the written revision, or a later one when somebody else wrote after you) and the override's state is `active` or `redundant`. `invalid`, `no-target` or `not-applicable` ends with exit 5 and the platform's reason. |
+| `applied` | The robot has it. HelmChart: the on-device HelmChart has the published values and version and the helm Job is a new one that succeeded. Values the platform hides (keys that look like credentials show as `<hidden>`) are only checked to be present. Workload: the containers have the published images and the controller has seen the latest generation. |
+| `ready` | Applied, and the rollout is complete, the pods are Ready on the new image and have not restarted for 20 s. With `--image` only the workloads that run the image are held to it; the other workloads of the release only have to be rolled out and Ready. |
 
 `applied` and `ready` look at the robot over WireGuard SSH (the robot's server computer, as
 [`exec`](exec.md)): `tnctl` first records what the robot has, then writes, then polls every 2 s over one
 connection. If the robot cannot be reached, the command stops before it writes anything and suggests
 `--wait=published`. `--timeout` (default 5m) bounds the wait; the change itself is written even if the
-wait times out.
+wait times out. A `tnctl` that is interrupted (Ctrl-C, SIGTERM) while waiting closes its connection and
+removes the temporary device key before it exits with 1; the change itself stays written.
 
-A failing Job (`failed > 0`, with the last 30 log lines), a pod in `CrashLoopBackOff`, `ImagePullBackOff`,
+For `try` and `untry` the resources to check are those of the new revision, read after it is published;
+a resource that is no longer part of the configuration is skipped.
+
+A failing helm Job (its Failed condition, or 3 failed attempts; helm-controller retries a Job that fails
+once, so a single failure is only reported as pending, with the last 30 log lines when it ends as failed), a pod in `CrashLoopBackOff`, `ImagePullBackOff`,
 `ErrImagePull`, `InvalidImageName` or `CreateContainerConfigError` ends with exit 7. "Published" means the
 platform sent the configuration to the robot, not that it runs; `applied` and `ready` are the checks that it
 does. A moving tag (`:latest`) does not change the spec, so nothing rolls out: use a new tag or digest.
@@ -206,12 +214,13 @@ are on stderr. Errors with `-o json` are `{"error":{"code":"timeout","message":"
 | 0 | ok |
 | 1 | error |
 | 2 | usage: bad arguments or flags, ambiguous resource name |
-| 3 | not found: no such robot, device, resource or revision |
+| 3 | not found: no such robot, device or resource |
 | 4 | timeout: `--wait` ran out of time (the change itself is written) |
-| 5 | rejected: the platform refused it (invalid values, no such target, not overridable) |
+| 5 | rejected: the platform refused it (invalid values, unknown revision, no such target, not overridable) |
 | 6 | not logged in, token rejected, or not allowed: run `tnctl login` |
 | 7 | applied but unhealthy: the helm Job failed or pods crash or cannot pull the image |
 | 8 | conflict: someone else changed the same robot's overrides at the same time; run the command again |
+| 9 | rate limited: the platform allows 60 writes a minute per user; wait the `Retry-After` time (`-o json`: `error.retryAfter`, seconds) and run it again |
 
 ## An agent's loop
 

@@ -349,18 +349,11 @@ func (e *cliEnv) fileOverride(cmd *cobra.Command, f *setFlags, cur *api.ConfigRe
 	}
 	content := string(data)
 	if len(assigns) > 0 {
-		m = valuepath.Normalize(m).(map[string]any)
-		if m == nil {
-			m = map[string]any{}
-		}
-		for _, a := range assigns {
-			if err := valuepath.SetIn(m, a.Segments, a.Value); err != nil {
-				return api.ResourceOverride{}, usageErr("%s: %v", a.Path, err)
-			}
-		}
-		b, err := yaml.Marshal(m)
+		// Edit the file's YAML in place: comments and the spelling of scalars (yes, on) are
+		// the user's, and Helm reads them as YAML 1.1.
+		b, err := valuepath.ApplyToYAML(data, assigns)
 		if err != nil {
-			return api.ResourceOverride{}, err
+			return api.ResourceOverride{}, usageErr("%s: %v", f.file, firstLine(err))
 		}
 		content = string(b)
 	}
@@ -433,6 +426,9 @@ To make a value disappear from the robot (also the chart's own default), use 'tn
 		Args: argsRange(2, -1, "unset needs a robot or device name and a resource"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target, resArg, keys := args[0], args[1], args[2:]
+			if err := f.wait.misplaced(keys); err != nil {
+				return err
+			}
 			whole := len(keys) == 0 && len(f.images) == 0 && !f.version
 			if whole && f.dryRun {
 				return usageErr("removing the whole override has no --dry-run; see what it changes with: tnctl config diff %s %s", target, resArg)
@@ -450,7 +446,7 @@ To make a value disappear from the robot (also the chart's own default), use 'tn
 			if err != nil {
 				return err
 			}
-			info := writeInfo{statusTargets: []string{id}, resources: []string{id}, removed: whole}
+			info := writeInfo{statusTargets: []string{id}, resources: []string{id}, removed: whole, versionCleared: f.version || whole}
 			w := s.waiter()
 			if err := w.prepare(ctx, []string{id}); err != nil {
 				w.close()
@@ -522,6 +518,9 @@ layer and Helm then also drops the chart's own default for it. To take back an o
 		Args: argsRange(3, -1, "delete needs a robot or device name, a resource and at least one key"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target, resArg, keys := args[0], args[1], args[2:]
+			if err := f.wait.misplaced(keys); err != nil {
+				return err
+			}
 			s, err := e.begin(cmd, target, &f.wait, f.dryRun)
 			if err != nil {
 				return err
@@ -589,6 +588,9 @@ what a reset changes.`,
 		Args: argsRange(1, 2, "reset needs a robot or device name and a resource, or --all"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := args[0]
+			if err := f.wait.misplaced(args[1:]); err != nil {
+				return err
+			}
 			if (len(args) == 2) == f.all {
 				return usageErr("reset needs either a resource or --all (it will not guess)")
 			}
@@ -597,7 +599,7 @@ what a reset changes.`,
 				return err
 			}
 			ctx := cmd.Context()
-			info := writeInfo{removed: true}
+			info := writeInfo{removed: true, versionCleared: true}
 			var res *api.OverrideWriteResult
 			var raw json.RawMessage
 			var w *waiter
@@ -674,6 +676,28 @@ func overrideTargets(v *api.ConfigTargetView) (targets, resources []string) {
 		resources = append(resources, resourcesOfApp(v, a.RepoURL, a.Path)...)
 	}
 	return targets, dedupe(resources)
+}
+
+// appResourcesAfter recomputes the resources of an application from the view published after
+// a change of its revision: the new revision may add, rename or drop manifests. Resources the
+// change started with that are still effective stay (an effective row with a resource override has
+// no application of its own, so resourcesOfApp cannot find it).
+func appResourcesAfter(repo, path string, before []string) func(*api.ConfigTargetView) []string {
+	return func(v *api.ConfigTargetView) []string {
+		ids := resourcesOfApp(v, repo, path)
+		effective := map[string]bool{}
+		for _, r := range v.Configuration.Effective {
+			effective[r.ID()] = true
+		}
+		for _, id := range before {
+			if effective[id] {
+				ids = append(ids, id)
+			}
+		}
+		out := dedupe(ids)
+		sort.Strings(out)
+		return out
+	}
 }
 
 func dedupe(in []string) []string {
@@ -817,6 +841,7 @@ if it does not, the platform rejects it (exit 5) and the robot keeps its current
 			}
 			p := normAppPath(path)
 			info := writeInfo{statusTargets: []string{appKey(repo, p)}, resources: resourcesOfApp(view, repo, p)}
+			info.resourcesAfter = appResourcesAfter(repo, p, info.resources)
 			w := s.waiter()
 			if !f.dryRun {
 				if err := w.prepare(ctx, info.resources); err != nil {
@@ -896,6 +921,7 @@ func newConfigUntryCmd(e *cliEnv) *cobra.Command {
 			}
 			a := matches[0]
 			info := writeInfo{statusTargets: []string{appKey(a.RepoURL, a.Path)}, removed: true, resources: resourcesOfApp(view, a.RepoURL, a.Path)}
+			info.resourcesAfter = appResourcesAfter(a.RepoURL, a.Path, info.resources)
 			w := s.waiter()
 			if err := w.prepare(ctx, info.resources); err != nil {
 				w.close()

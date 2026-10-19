@@ -379,12 +379,15 @@ func parseQuoted(text string) (any, string, string, error) {
 }
 
 func parseFlow(text string) (any, string, string, error) {
-	var v any
+	var doc yaml.Node
 	dec := yaml.NewDecoder(bytes.NewReader([]byte(text)))
-	if err := dec.Decode(&v); err != nil {
+	if err := dec.Decode(&doc); err != nil {
 		return nil, "", "", fmt.Errorf("cannot read %s as a YAML list or map: %s", shorten(text), firstLine(err))
 	}
-	v = Normalize(v)
+	var v any
+	if len(doc.Content) > 0 {
+		v = Normalize(nodeValue(doc.Content[0]))
+	}
 	switch v.(type) {
 	case []any:
 		return v, "list", "", nil
@@ -392,6 +395,137 @@ func parseFlow(text string) (any, string, string, error) {
 		return v, "map", "", nil
 	}
 	return nil, "", "", fmt.Errorf("%s is not a YAML list or map", shorten(text))
+}
+
+// nodeValue decodes a YAML node the way ParseValue reads a plain scalar: yaml.v3 follows
+// YAML 1.2, where yes, on and n are text; Helm (YAML 1.1) reads them as booleans, so a plain
+// scalar like that becomes a boolean here too. Quoted and explicitly tagged scalars stay as written.
+func nodeValue(n *yaml.Node) any {
+	switch n.Kind {
+	case yaml.AliasNode:
+		return nodeValue(n.Alias)
+	case yaml.MappingNode:
+		m := make(map[string]any, len(n.Content)/2)
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			m[n.Content[i].Value] = nodeValue(n.Content[i+1])
+		}
+		return m
+	case yaml.SequenceNode:
+		l := make([]any, len(n.Content))
+		for i, c := range n.Content {
+			l[i] = nodeValue(c)
+		}
+		return l
+	case yaml.ScalarNode:
+		var v any
+		if err := n.Decode(&v); err != nil {
+			return n.Value
+		}
+		if s, ok := v.(string); ok && n.Style&(yaml.DoubleQuotedStyle|yaml.SingleQuotedStyle|yaml.LiteralStyle|yaml.FoldedStyle|yaml.TaggedStyle) == 0 {
+			if b, kind := resolveScalar(s); kind == "boolean" {
+				return b
+			}
+		}
+		return v
+	}
+	return nil
+}
+
+// ApplyToYAML sets the assignments in a YAML document of chart values and returns the new
+// text. It edits the document instead of writing it again, so what it does not touch stays as
+// it was: comments, key order and the spelling of scalars (a plain yes stays yes, which Helm
+// reads as true). A null value (delete) writes null. An empty document starts as an empty map.
+func ApplyToYAML(data []byte, assigns []Assignment) ([]byte, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	var root *yaml.Node
+	if len(doc.Content) > 0 {
+		root = doc.Content[0]
+	}
+	if root == nil || (root.Kind == yaml.ScalarNode && root.Tag == "!!null") {
+		root = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{root}}
+	}
+	if root.Kind != yaml.MappingNode {
+		return nil, errors.New("the document is not a map of chart values")
+	}
+	for _, a := range assigns {
+		if len(a.Segments) == 0 {
+			continue
+		}
+		val := &yaml.Node{}
+		if a.Value == nil {
+			*val = yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"}
+		} else if err := val.Encode(a.Value); err != nil {
+			return nil, fmt.Errorf("%s: %w", a.Path, err)
+		}
+		if err := setInNode(root, a.Segments, val); err != nil {
+			return nil, err
+		}
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// setInNode sets path below the mapping node m, creating maps on the way; like SetIn it
+// refuses to replace a scalar or a list on the way.
+func setInNode(m *yaml.Node, path []string, val *yaml.Node) error {
+	cur := m
+	for i, k := range path[:len(path)-1] {
+		next := mapValue(cur, k)
+		switch {
+		case next == nil || (next.Kind == yaml.ScalarNode && next.Tag == "!!null"):
+			child := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			if next == nil {
+				cur.Content = append(cur.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: k}, child)
+			} else {
+				*next = *child
+				child = next
+			}
+			cur = child
+		case next.Kind == yaml.MappingNode:
+			cur = next
+		default:
+			return fmt.Errorf("%s is %s, not a map; cannot set %s inside it", EscapePath(path[:i+1]), nodeTypeName(next), EscapePath(path))
+		}
+	}
+	last := path[len(path)-1]
+	if old := mapValue(cur, last); old != nil {
+		*old = *val
+		return nil
+	}
+	cur.Content = append(cur.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: last}, val)
+	return nil
+}
+
+// mapValue returns the value node of key k in a mapping node, or nil.
+func mapValue(m *yaml.Node, k string) *yaml.Node {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == k {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func nodeTypeName(n *yaml.Node) string {
+	switch n.Kind {
+	case yaml.SequenceNode:
+		return "a list"
+	case yaml.ScalarNode:
+		return typeName(nodeValue(n))
+	}
+	return "something else"
 }
 
 func firstLine(err error) string {

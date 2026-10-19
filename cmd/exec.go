@@ -16,7 +16,9 @@ func newExecCmd(e *cliEnv) *cobra.Command {
 		Short:        "Run a command on a device over its WireGuard tunnel and pass its exit code through",
 		Long: `Run one command on a device (the robot's server computer) over its WireGuard tunnel and print
 its output. Not interactive: no terminal, ssh BatchMode, so it never waits for a password. The exit
-status of the command is the exit status of tnctl; if the device cannot be reached, tnctl exits 1.
+status of the command is the exit status of tnctl, whatever it is (so 3 to 9 can be the command's
+own, not tnctl's). tnctl exits 1 when the device cannot be reached, also when ssh reports it with
+255, and 3 when the robot or device is unknown.
 
 The command goes after -- . Several words are passed as separate arguments (quoted for you);
 one word is a shell command line, so pipes and && work:
@@ -54,7 +56,7 @@ The login user has passwordless sudo. The robot's k3s is 'sudo k3s kubectl'.`,
 				line = shJoin(command)
 			}
 			cmd.SilenceUsage = true
-			_, domain, ns, err := e.targetClient()
+			fl, domain, ns, err := e.targetClient()
 			if err != nil {
 				return err
 			}
@@ -64,7 +66,19 @@ The login user has passwordless sudo. The robot's k3s is 'sudo k3s kubectl'.`,
 				ctx, cancel = context.WithTimeout(ctx, timeout)
 				defer cancel()
 			}
-			ex, err := e.newExec(ctx, domain, ns, dev)
+			// Connecting writes the device key to a temporary directory: a signal must not skip the cleanup.
+			// Once the command runs, Stream forwards the signals to it instead.
+			sctx, stop := signalContext(ctx)
+			defer stop()
+			// A robot name and a device name both work: the platform says which device it is.
+			view, _, err := fl.ConfigTarget(sctx, dev)
+			if err != nil {
+				return classify(err)
+			}
+			if view.Target.Device != "" {
+				dev = view.Target.Device
+			}
+			ex, err := e.newExec(sctx, domain, ns, dev)
 			if err != nil {
 				return classify(err)
 			}
@@ -75,6 +89,9 @@ The login user has passwordless sudo. The robot's k3s is 'sudo k3s kubectl'.`,
 					return newErr(codeTimeout, "the command did not finish within %s", timeout)
 				}
 				return classify(fmt.Errorf("cannot run the command on %s: %w", dev, err))
+			}
+			if code == sshConnectFailed {
+				return newErr(codeError, "ssh could not reach %s over WireGuard, or the command itself exited 255 (see: tnctl wg status %s)", dev, dev)
 			}
 			if code != 0 {
 				return &exitError{code: code}

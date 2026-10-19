@@ -3,8 +3,10 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -56,12 +58,13 @@ Exit codes:
   0  ok
   1  error
   2  usage: bad arguments or flags, ambiguous resource name
-  3  not found: no such robot, device, resource or revision
+  3  not found: no such robot, device or resource
   4  timeout: --wait ran out of time (the change itself is written)
-  5  rejected: the platform refused it (invalid values, no such target, not overridable)
+  5  rejected: the platform refused it (invalid values, unknown revision, no such target, not overridable)
   6  not logged in, token rejected, or not allowed (run tnctl login)
   7  applied but unhealthy: the helm Job failed or pods crash or cannot pull the image
-  8  conflict: someone else changed the same thing; run the command again`
+  8  conflict: someone else changed the same thing; run the command again
+  9  rate limited: too many writes; wait the Retry-After time (-o json: error.retryAfter, seconds)`
 
 func newConfigCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
@@ -86,7 +89,14 @@ func init() { rootCmd.AddCommand(newConfigCmd(defaultEnv)) }
 func argsRange(min, max int, usage string) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
 		if len(args) < min || (max >= 0 && len(args) > max) {
-			return usageErr("%s\nusage: %s", usage, cmd.UseLine())
+			hint := ""
+			for _, a := range args {
+				if h := lookupHint(a); h != "" {
+					hint = fmt.Sprintf("\n%q: %s", a, strings.TrimPrefix(h, "; "))
+					break
+				}
+			}
+			return usageErr("%s%s\nusage: %s", usage, hint, cmd.UseLine())
 		}
 		return nil
 	}
@@ -482,10 +492,11 @@ func effectiveSummary(r *api.FleetConfigResource) string {
 }
 
 type diffEntry struct {
-	ID       string `json:"id"`
-	Diff     string `json:"diff"`
-	Changed  bool   `json:"changed"`
-	Redacted bool   `json:"-"`
+	ID      string `json:"id"`
+	Diff    string `json:"diff"`
+	Changed bool   `json:"changed"`
+	// Stale: the override is still stored, but git no longer yields the resource.
+	Stale bool `json:"stale,omitempty"`
 }
 
 func newConfigDiffCmd(e *cliEnv) *cobra.Command {
@@ -530,12 +541,36 @@ Exit code 0 whether or not there is a difference.`,
 				for id := range view.Overrides.Resources {
 					ids = append(ids, id)
 				}
+				// In-place changes of local items are overrides too, stored with the item.
+				for _, r := range view.Configuration.Effective {
+					if r.Override != nil && r.Override.Storage == api.StorageLocalItem {
+						ids = append(ids, r.ID())
+					}
+				}
+				ids = dedupe(ids)
 				sort.Strings(ids)
+			}
+			effective := map[string]bool{}
+			if view != nil {
+				for _, r := range view.Configuration.Effective {
+					effective[r.ID()] = true
+				}
 			}
 			var entries []diffEntry
 			for _, id := range ids {
+				// An override can outlive its resource (git dropped it): say so for that one and go on.
+				listing := len(args) == 1
+				if listing && !effective[id] {
+					entries = append(entries, diffEntry{ID: id, Stale: true})
+					continue
+				}
 				d, _, err := fl.ConfigResource(ctx, target, id, false)
 				if err != nil {
+					var ae *api.Error
+					if listing && errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+						entries = append(entries, diffEntry{ID: id, Stale: true})
+						continue
+					}
 					return classify(err)
 				}
 				entries = append(entries, diffEntry{ID: id, Diff: resourceDiff(d)})
@@ -557,7 +592,9 @@ Exit code 0 whether or not there is a difference.`,
 			}
 			for _, en := range entries {
 				fmt.Fprintf(out, "# %s\n", en.ID)
-				if en.Diff == "" {
+				if en.Stale {
+					fmt.Fprintf(out, "(stale override: git no longer yields this resource; remove it with: tnctl config reset %s %s)\n", target, en.ID)
+				} else if en.Diff == "" {
 					fmt.Fprintln(out, "(no difference from git)")
 				} else {
 					fmt.Fprint(out, en.Diff)

@@ -24,7 +24,7 @@ vision-station-01   vision  Online  1/1    2 (oldest 2d)        test
 amr-02              amr     Offline 0/0    -                    -
 ```
 
-With no matching robot the exit code is 3.
+With no matching robot the exit code is 0 (a note goes to stderr; `-o json` prints `[]`), in every format.
 
 ## `tnctl robot`
 
@@ -52,7 +52,7 @@ know). Data goes to stdout, everything else to stderr. With `-o json`, errors ar
 | 0 | ok |
 | 1 | error |
 | 2 | usage |
-| 3 | not found (no such robot, or no robot matches the labels) |
+| 3 | not found (`tnctl robot`: no such robot) |
 | 6 | not logged in, token rejected or not allowed: run `tnctl login` |
 
 A missing or rejected login comes back from the platform as a redirect to the login page; `tnctl` does not

@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/teknoir/cli/pkg/api"
 	"github.com/teknoir/cli/pkg/config"
@@ -32,6 +34,13 @@ type deviceExec interface {
 	// Stream runs a shell command line with the given streams and returns its exit status.
 	Stream(ctx context.Context, cmdline string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 	Close()
+}
+
+// signalContext returns a context that ends on SIGINT, SIGTERM or SIGHUP. Commands that put the
+// device login key in a temporary directory use it while they connect and poll, so that a
+// terminated tnctl returns through its deferred cleanup instead of leaving the key behind.
+func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 // sshConnectFailed is the exit status ssh itself uses when it cannot connect.

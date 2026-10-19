@@ -67,17 +67,21 @@ func (e *cliEnv) runLogs(cmd *cobra.Command, target, arg string, f *logsFlags) e
 		return err
 	}
 	ctx := cmd.Context()
-	view, _, err := fl.ConfigTarget(ctx, target)
+	// Connecting and looking up the target use the device key from a temporary directory: a
+	// signal must return through the cleanup. Streaming forwards signals to the command instead.
+	sctx, stop := signalContext(ctx)
+	defer stop()
+	view, _, err := fl.ConfigTarget(sctx, target)
 	if err != nil {
 		return classify(err)
 	}
-	ex, err := e.newExec(ctx, domain, ns, view.Target.Device)
+	ex, err := e.newExec(sctx, domain, ns, view.Target.Device)
 	if err != nil {
 		return classify(err)
 	}
 	defer ex.Close()
 
-	lt, err := resolveLogTarget(ctx, ex, view, arg)
+	lt, err := resolveLogTarget(sctx, ex, view, arg)
 	if err != nil {
 		return err
 	}
@@ -101,6 +105,9 @@ func (e *cliEnv) runLogs(cmd *cobra.Command, target, arg string, f *logsFlags) e
 	code, err := ex.Stream(ctx, line, nil, cmd.OutOrStdout(), cmd.ErrOrStderr())
 	if err != nil {
 		return classify(fmt.Errorf("cannot read the logs on %s: %w", view.Target.Device, err))
+	}
+	if code == sshConnectFailed {
+		return newErr(codeError, "ssh could not reach %s over WireGuard (see: tnctl wg status %s)", view.Target.Device, view.Target.Device)
 	}
 	if code != 0 {
 		return &exitError{code: code}

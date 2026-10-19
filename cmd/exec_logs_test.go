@@ -9,8 +9,23 @@ import (
 	"github.com/teknoir/cli/pkg/api"
 )
 
-func TestExec(t *testing.T) {
+// execPlatform resolves vision-station-01 (a robot whose device has another name) and amr-02 (a device).
+func execPlatform(t *testing.T) *fakePlatform {
 	p := newFakePlatform(t)
+	v := standardView()
+	v.Target.Device = "vision-station-01"
+	p.on("GET", "/config/vision-station-01", 200, jsonOf(t, v))
+	v2 := standardView()
+	v2.Target = api.ConfigTargetRef{Kind: "device", Name: "amr-02", Device: "amr-02"}
+	p.on("GET", "/config/amr-02", 200, jsonOf(t, v2))
+	v3 := standardView()
+	v3.Target = api.ConfigTargetRef{Kind: "robot", Name: "line-3", Device: "line-3-main", Robot: "line-3"}
+	p.on("GET", "/config/line-3", 200, jsonOf(t, v3))
+	return p
+}
+
+func TestExec(t *testing.T) {
+	p := execPlatform(t)
 	ex := &fakeExec{}
 	e, _ := testEnv(t, p, ex)
 
@@ -40,7 +55,7 @@ func TestExec(t *testing.T) {
 }
 
 func TestExecPassesExitCodeAndOutput(t *testing.T) {
-	p := newFakePlatform(t)
+	p := execPlatform(t)
 	ex := &fakeExec{
 		run:    func(string) (execResult, error) { return execResult{Stdout: "hello\n", Stderr: "warn\n"}, nil },
 		stream: func(string) int { return 3 },
@@ -60,7 +75,7 @@ func TestExecPassesExitCodeAndOutput(t *testing.T) {
 }
 
 func TestExecErrors(t *testing.T) {
-	p := newFakePlatform(t)
+	p := execPlatform(t)
 	ex := &fakeExec{}
 	e, _ := testEnv(t, p, ex)
 	cases := map[string][]string{
@@ -79,6 +94,11 @@ func TestExecErrors(t *testing.T) {
 		t.Errorf("nothing may run on usage errors: %v", ex.callList())
 	}
 
+	// an unknown name is exit 3, before anything is opened
+	n := len(ex.callList())
+	if _, _, err := runCLI(t, e, "exec", "ghost", "--", "uname"); exitCodeOf(err) != codeNotFound || len(ex.callList()) != n {
+		t.Errorf("unknown: exit %d: %v", exitCodeOf(err), err)
+	}
 	e.newExec = func(_ context.Context, _, _, _ string) (deviceExec, error) {
 		return nil, errors.New("amr-02 has no active WireGuard tunnel")
 	}
@@ -214,5 +234,26 @@ func TestLogsPassesKubectlExitCode(t *testing.T) {
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != 1 {
 		t.Errorf("%v", err)
+	}
+}
+
+// A robot name works: the platform says which device runs the command.
+func TestExecResolvesRobotToDevice(t *testing.T) {
+	p := execPlatform(t)
+	ex := &fakeExec{}
+	e, _ := testEnv(t, p, ex)
+	if _, _, err := runCLI(t, e, "exec", "line-3", "--", "hostname"); err != nil || ex.callList()[0] != "OPEN line-3-main" {
+		t.Errorf("%v %v", err, ex.callList())
+	}
+}
+
+// ssh's own exit status 255 is a failure to reach the device (exit 1), not the command's status.
+func TestExecAndLogsSSH255IsAnError(t *testing.T) {
+	p := execPlatform(t)
+	ex := &fakeExec{stream: func(string) int { return 255 }}
+	e, _ := testEnv(t, p, ex)
+	_, _, err := runCLI(t, e, "exec", "vision-station-01", "--", "uname")
+	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "could not reach vision-station-01") {
+		t.Errorf("exec: %d %v", exitCodeOf(err), err)
 	}
 }

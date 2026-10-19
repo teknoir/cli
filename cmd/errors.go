@@ -19,12 +19,13 @@ const (
 	codeOK        = 0
 	codeError     = 1 // anything else
 	codeUsage     = 2 // wrong arguments or flags, ambiguous resource name
-	codeNotFound  = 3 // robot, device, resource or revision does not exist
+	codeNotFound  = 3 // robot, device or resource does not exist
 	codeTimeout   = 4 // --wait or the request timed out
 	codeRejected  = 5 // the platform refused the change: validation, invalid, no-target
 	codeAuth      = 6 // not logged in, token rejected, or not allowed
 	codeUnhealthy = 7 // applied, but the workload fails (Job failed, CrashLoopBackOff, ImagePullBackOff)
 	codeConflict  = 8 // someone else changed the same thing; try again
+	codeRateLimit = 9 // too many requests: wait the Retry-After time and run it again
 )
 
 var codeNames = map[int]string{
@@ -36,6 +37,7 @@ var codeNames = map[int]string{
 	codeAuth:      "auth",
 	codeUnhealthy: "unhealthy",
 	codeConflict:  "conflict",
+	codeRateLimit: "rate_limited",
 }
 
 // cliError is an error with an exit code.
@@ -79,12 +81,17 @@ func classify(err error) error {
 			code = codeNotFound
 		case ae.Status == http.StatusConflict:
 			code = codeConflict
+		case ae.Status == http.StatusTooManyRequests:
+			code = codeRateLimit
 		case ae.Status == http.StatusBadRequest, ae.Status == http.StatusUnprocessableEntity:
 			code = codeRejected
 		case ae.Status == http.StatusRequestTimeout, ae.Status == http.StatusGatewayTimeout:
 			code = codeTimeout
 		}
 		return &cliError{code: code, err: err}
+	}
+	if errors.Is(err, context.Canceled) {
+		return &cliError{code: codeError, err: errors.New("interrupted")}
 	}
 	var ne net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
@@ -117,7 +124,12 @@ func writeError(w io.Writer, err error, format string) {
 		if name == "" {
 			name = "error"
 		}
-		b, _ := json.Marshal(map[string]any{"error": map[string]string{"code": name, "message": err.Error()}})
+		body := map[string]any{"code": name, "message": err.Error()}
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.RetryAfter > 0 {
+			body["retryAfter"] = ae.RetryAfter
+		}
+		b, _ := json.Marshal(map[string]any{"error": body})
 		fmt.Fprintln(w, string(b))
 		return
 	}
