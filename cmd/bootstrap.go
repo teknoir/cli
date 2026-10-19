@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -9,10 +10,8 @@ import (
 	"text/template"
 
 	"github.com/teknoir/cli/pkg/api"
-	"github.com/teknoir/cli/pkg/config"
 	"github.com/teknoir/cli/pkg/templates"
 
-	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
 )
 
@@ -32,16 +31,9 @@ var bootstrapCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		cfg, err := config.Load()
+		fl, domain, namespace, err := defaultEnv.targetClient()
 		if err != nil {
 			return err
-		}
-
-		domain := cfg.Domain
-		namespace := cfg.GetNamespace()
-
-		if domain == "" || namespace == "" {
-			return fmt.Errorf("domain and namespace are required. Please set them via flags or config")
 		}
 
 		var deviceName string
@@ -51,67 +43,16 @@ var bootstrapCmd = &cobra.Command{
 			deviceName = device
 		}
 
-		if deviceName == "" {
-			devices, err := api.FetchDevices(cmd.Context(), domain, namespace)
-			if err != nil {
-				return err
-			}
-
-			if len(devices) == 0 {
-				return fmt.Errorf("no devices found in namespace %s", namespace)
-			}
-
-			idx, err := fuzzyfinder.Find(devices, func(i int) string {
-				return devices[i]
-			})
-			if err != nil {
-				return err
-			}
-			deviceName = devices[idx]
-		}
-
-		device, err := api.FetchDeviceDetails(cmd.Context(), domain, namespace, deviceName)
+		deviceName, err = pickDevice(cmd.Context(), fl, namespace, deviceName)
 		if err != nil {
 			return err
 		}
 
-		decode := func(name, s string) (string, error) {
-			if s == "" {
-				return "", nil
-			}
-			b, err := base64.StdEncoding.DecodeString(s)
-			if err != nil {
-				return "", fmt.Errorf("failed to decode %s: %w", name, err)
-			}
-			return string(b), nil
-		}
-
-		rsaPrivate, err := decode("rsa_private", device.Spec.Settings.RSAPrivate)
+		bl, err := loadBootstrapLogin(cmd.Context(), fl, namespace, deviceName)
 		if err != nil {
 			return err
 		}
-		rsaPublic, err := decode("rsa_public", device.Spec.Settings.RSAPublic)
-		if err != nil {
-			return err
-		}
-		// The device-controller generates the key pair after the Device is created, and the
-		// Backstage catalog picks it up on its next device refresh (every few minutes). Scripts
-		// without it install empty keys and fail at the k3s CA step on the device.
-		if rsaPrivate == "" || rsaPublic == "" {
-			return fmt.Errorf("device %s/%s has no key pair in the catalog yet (the platform adds it a few minutes after the device is created); run tnctl bootstrap again shortly", namespace, deviceName)
-		}
-		username, err := decode("username", device.Spec.Settings.Username)
-		if err != nil {
-			return err
-		}
-		password, err := decode("userpassword", device.Spec.Settings.Password)
-		if err != nil {
-			return err
-		}
-		publicSSHKey, err := decode("publicsshkey", device.Spec.Settings.PublicSSHKey)
-		if err != nil {
-			return err
-		}
+		rsaPrivate, rsaPublic, username, password, publicSSHKey := bl.rsaPrivate, bl.rsaPublic, bl.username, bl.password, bl.publicSSHKey
 
 		k3sToken, err := generateK3SToken()
 		if err != nil {
@@ -184,6 +125,52 @@ var bootstrapCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+// bootstrapLogin is the decoded login of a device that the bootstrap scripts install.
+type bootstrapLogin struct {
+	rsaPrivate, rsaPublic, username, password, publicSSHKey string
+}
+
+// loadBootstrapLogin asks the platform for the login of a device and decodes it. The platform gives
+// it only to developers who may open a terminal; a viewer gets its 403 explanation.
+func loadBootstrapLogin(ctx context.Context, fl *api.Fleet, namespace, deviceName string) (*bootstrapLogin, error) {
+	c, err := loadLogin(ctx, fl, deviceName)
+	if err != nil {
+		return nil, err
+	}
+	decode := func(name, s string) (string, error) {
+		if s == "" {
+			return "", nil
+		}
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return "", fmt.Errorf("failed to decode %s: %w", name, err)
+		}
+		return string(b), nil
+	}
+	var bl bootstrapLogin
+	if bl.rsaPrivate, err = decode("rsa_private", c.RSAPrivate); err != nil {
+		return nil, err
+	}
+	if bl.rsaPublic, err = decode("rsa_public", c.RSAPublic); err != nil {
+		return nil, err
+	}
+	// The device-controller generates the key pair after the Device is created. Scripts without it
+	// install empty keys and fail at the k3s CA step on the device.
+	if bl.rsaPrivate == "" || bl.rsaPublic == "" {
+		return nil, errNoKeyPair(namespace, deviceName)
+	}
+	if bl.username, err = decode("username", c.Username); err != nil {
+		return nil, err
+	}
+	if bl.password, err = decode("userpassword", c.Password); err != nil {
+		return nil, err
+	}
+	if bl.publicSSHKey, err = decode("publicsshkey", c.PublicSSHKey); err != nil {
+		return nil, err
+	}
+	return &bl, nil
 }
 
 func generateK3SToken() (string, error) {

@@ -34,21 +34,21 @@ func legacyFallbackNotice(deviceName string) string {
 // otherwise the legacy SSH tunnel when that is active, otherwise an error.
 // forceWG (the hidden --wireguard flag) never falls back. notice is a line for
 // stderr, empty when there is nothing to say.
-func chooseTunnel(d *api.BackstageDevice, deviceName string, forceWG bool) (kind tunnelKind, notice string, err error) {
+func chooseTunnel(d *api.FleetDevice, deviceName string, forceWG bool) (kind tunnelKind, notice string, err error) {
 	if deviceWireGuardActive(d) {
 		return tunnelWireGuard, "", nil
 	}
 	if forceWG {
 		return 0, "", fmt.Errorf("--wireguard: %s has no active WireGuard tunnel (%s)", deviceName, wireGuardStateLabel(d))
 	}
-	if d.Spec.Subresources.Status.RemoteAccess.Active {
+	if d.LegacyTunnelActive() {
 		return tunnelLegacy, legacyFallbackNotice(deviceName), nil
 	}
 	return 0, "", errTunnelingOff(deviceName)
 }
 
 // selectTunnel is chooseTunnel with the notice written to stderr.
-func selectTunnel(d *api.BackstageDevice, deviceName string, forceWG bool, stderr io.Writer) (tunnelKind, error) {
+func selectTunnel(d *api.FleetDevice, deviceName string, forceWG bool, stderr io.Writer) (tunnelKind, error) {
 	kind, notice, err := chooseTunnel(d, deviceName, forceWG)
 	if notice != "" {
 		fmt.Fprintln(stderr, notice)
@@ -59,12 +59,11 @@ func selectTunnel(d *api.BackstageDevice, deviceName string, forceWG bool, stder
 // wireGuardStateLabel describes the WireGuard state of a device in one word,
 // for errors: "active", the reported state (for example "enrolling") when
 // enabled but not active, or "off".
-func wireGuardStateLabel(d *api.BackstageDevice) string {
+func wireGuardStateLabel(d *api.FleetDevice) string {
 	if d.WireGuardActive() {
 		return "active"
 	}
-	wg := d.Spec.Subresources.Status.WireGuard
-	if d.Metadata.Annotations[api.WireGuardAnnotation] == "enabled" {
+	if wg := d.Tunnel.WireGuard; wg.Enabled {
 		if wg.State != "" {
 			return wg.State
 		}

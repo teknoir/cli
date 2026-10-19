@@ -88,9 +88,15 @@ type wgExec struct {
 // newWGExec opens the WireGuard SSH channel to a device. It needs an active WireGuard
 // tunnel: the legacy SSH tunnel is not supported for exec.
 func newWGExec(ctx context.Context, domain, ns, deviceName string) (deviceExec, error) {
-	dev, err := api.FetchDeviceDetails(ctx, domain, ns, deviceName)
+	return newWGExecWith(ctx, api.NewFleet(domain, ns), domain, ns, deviceName)
+}
+
+// newWGExecWith is newWGExec with the fleet client given. It asks the platform for the device
+// first (no secrets) and for its login only when the device can be reached.
+func newWGExecWith(ctx context.Context, fl *api.Fleet, domain, ns, deviceName string) (deviceExec, error) {
+	dev, err := fl.Device(ctx, deviceName)
 	if err != nil {
-		return nil, err
+		return nil, classify(err)
 	}
 	kind, err := selectTunnel(dev, deviceName, false, os.Stderr)
 	if err != nil {
@@ -99,7 +105,11 @@ func newWGExec(ctx context.Context, domain, ns, deviceName string) (deviceExec, 
 	if kind != tunnelWireGuard {
 		return nil, fmt.Errorf("%s has no active WireGuard tunnel; running commands on a device needs it (see: tnctl wg status %s)", deviceName, deviceName)
 	}
-	sess, err := openWGSSH(domain, ns, deviceName, dev)
+	login, err := loadLogin(ctx, fl, deviceName)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := openWGSSH(domain, ns, deviceName, login)
 	if err != nil {
 		return nil, err
 	}

@@ -8,20 +8,46 @@ import (
 	wgapi "github.com/teknoir/wg-tunnel/pkg/api"
 )
 
-func testDevice(annotated bool, wgState string, legacy bool) *api.BackstageDevice {
-	d := &api.BackstageDevice{}
+// mkTunnel builds the tunnel facts of a device the way the platform derives them (backstage
+// snapshot.ts): WireGuard is enabled by the annotation and active when its state is "active";
+// "wireguard" wins over "legacy"; an enabled but not active WireGuard is "pending", labelled with its
+// state ("enrolling" when none is known); anything else is "off".
+func mkTunnel(annotated bool, wgState string, legacy bool, legacyPort string) api.FleetDeviceTunnel {
+	var t api.FleetDeviceTunnel
+	t.WireGuard.Enabled = annotated
 	if annotated {
-		d.Metadata.Annotations = map[string]string{api.WireGuardAnnotation: "enabled"}
+		t.WireGuard.Annotation = "enabled"
 	}
-	d.Spec.Subresources.Status.WireGuard.State = wgState
-	d.Spec.Subresources.Status.RemoteAccess.Active = legacy
-	return d
+	t.WireGuard.State = wgState
+	t.WireGuard.Active = annotated && wgState == "active"
+	t.Legacy.Active = legacy
+	if legacy {
+		t.Legacy.Port = legacyPort
+	}
+	switch {
+	case t.WireGuard.Active:
+		t.Kind, t.Label = "wireguard", "wireguard"
+	case legacy:
+		t.Kind, t.Label = "legacy", "legacy"
+	case annotated:
+		t.Kind, t.Label = "pending", wgState
+		if wgState == "" {
+			t.Label = "enrolling"
+		}
+	default:
+		t.Kind, t.Label = "off", "off"
+	}
+	return t
+}
+
+func testDevice(annotated bool, wgState string, legacy bool) *api.FleetDevice {
+	return &api.FleetDevice{Name: "dev1", Tunnel: mkTunnel(annotated, wgState, legacy, "40022")}
 }
 
 func TestChooseTunnel(t *testing.T) {
 	tests := []struct {
 		name       string
-		dev        *api.BackstageDevice
+		dev        *api.FleetDevice
 		force      bool
 		wantKind   tunnelKind
 		wantNotice bool
@@ -64,7 +90,7 @@ func TestChooseTunnel(t *testing.T) {
 
 func TestTunnelLabel(t *testing.T) {
 	tests := []struct {
-		dev  *api.BackstageDevice
+		dev  *api.FleetDevice
 		want string
 	}{
 		{testDevice(true, "active", false), "wireguard"},

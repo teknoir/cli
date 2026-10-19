@@ -205,9 +205,9 @@ func TestRunSSHWireGuardWithFakeSSH(t *testing.T) {
 	t.Setenv(envWGHub, "")
 	t.Setenv(envWGTurnServer, "")
 
-	dev := &api.BackstageDevice{}
-	dev.Spec.Settings.Username = base64.StdEncoding.EncodeToString([]byte("teknoir"))
-	dev.Spec.Settings.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("PRIVATE-KEY-DATA"))
+	dev := &api.FleetDeviceCredentials{}
+	dev.Username = base64.StdEncoding.EncodeToString([]byte("teknoir"))
+	dev.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("PRIVATE-KEY-DATA"))
 
 	oldTurn, oldHub := sshTURNServer, sshWGHubURL
 	sshTURNServer, sshWGHubURL = "10.1.2.3:3478", ""
@@ -259,13 +259,13 @@ func TestRunSSHWireGuardWithFakeSSH(t *testing.T) {
 }
 
 func TestRunSSHWireGuardRejectsBadInput(t *testing.T) {
-	dev := &api.BackstageDevice{}
-	dev.Spec.Settings.Username = base64.StdEncoding.EncodeToString([]byte("-oProxyCommand=x"))
-	dev.Spec.Settings.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("k"))
+	dev := &api.FleetDeviceCredentials{}
+	dev.Username = base64.StdEncoding.EncodeToString([]byte("-oProxyCommand=x"))
+	dev.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("k"))
 	if err := runSSHWireGuard("teknoir.cloud", "ns1", "dev-1", dev); err == nil {
 		t.Error("option-like login accepted")
 	}
-	dev.Spec.Settings.Username = base64.StdEncoding.EncodeToString([]byte("ok"))
+	dev.Username = base64.StdEncoding.EncodeToString([]byte("ok"))
 	if err := runSSHWireGuard("teknoir.cloud", "ns1", "-bad", dev); err == nil {
 		t.Error("bad device name accepted")
 	}
@@ -303,9 +303,9 @@ func TestValidateHubHost(t *testing.T) {
 }
 
 func TestRunSSHWireGuardRefusesForeignHub(t *testing.T) {
-	dev := &api.BackstageDevice{}
-	dev.Spec.Settings.Username = base64.StdEncoding.EncodeToString([]byte("teknoir"))
-	dev.Spec.Settings.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("k"))
+	dev := &api.FleetDeviceCredentials{}
+	dev.Username = base64.StdEncoding.EncodeToString([]byte("teknoir"))
+	dev.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("k"))
 	old := sshWGHubURL
 	sshWGHubURL = "https://wg.evil.example"
 	defer func() { sshWGHubURL = old }()
@@ -331,9 +331,9 @@ func TestRunSSHWireGuardCleansUpOnSIGTERM(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(envWGHub, "")
-	dev := &api.BackstageDevice{}
-	dev.Spec.Settings.Username = base64.StdEncoding.EncodeToString([]byte("teknoir"))
-	dev.Spec.Settings.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("PRIVATE"))
+	dev := &api.FleetDeviceCredentials{}
+	dev.Username = base64.StdEncoding.EncodeToString([]byte("teknoir"))
+	dev.RSAPrivate = base64.StdEncoding.EncodeToString([]byte("PRIVATE"))
 	old := sshWGHubURL
 	sshWGHubURL = ""
 	defer func() { sshWGHubURL = old }()

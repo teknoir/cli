@@ -1,16 +1,13 @@
 package cmd
 
 import (
-	"encoding/base64"
 	"fmt"
 	"math/rand/v2"
 	"os"
 	"os/exec"
 	"strconv"
 
-	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
-	"github.com/teknoir/cli/pkg/api"
 	"github.com/teknoir/cli/pkg/config"
 )
 
@@ -30,16 +27,9 @@ Example:
   tnctl socks-proxy my-device 1080
   tnctl socks-proxy --port 1080`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		fl, domain, namespace, err := defaultEnv.targetClient()
 		if err != nil {
 			return err
-		}
-
-		domain := cfg.Domain
-		namespace := cfg.GetNamespace()
-
-		if domain == "" || namespace == "" {
-			return fmt.Errorf("domain and namespace are required. Please set them via flags or config")
 		}
 
 		var deviceName string
@@ -57,24 +47,9 @@ Example:
 			deviceName = device
 		}
 
-		if deviceName == "" {
-			// Fetch and select device via fuzzy finder
-			devices, err := api.FetchDevices(cmd.Context(), domain, namespace)
-			if err != nil {
-				return err
-			}
-
-			if len(devices) == 0 {
-				return fmt.Errorf("no devices found in namespace %s", namespace)
-			}
-
-			idx, err := fuzzyfinder.Find(devices, func(i int) string {
-				return devices[i]
-			})
-			if err != nil {
-				return err
-			}
-			deviceName = devices[idx]
+		deviceName, err = pickDevice(cmd.Context(), fl, namespace, deviceName)
+		if err != nil {
+			return err
 		}
 
 		// Handle port from arguments if provided
@@ -92,10 +67,10 @@ Example:
 			socksPort = rand.IntN(65000-8000) + 8000
 		}
 
-		// Fetch device details from Backstage API
-		device, err := api.FetchDeviceDetails(cmd.Context(), domain, namespace, deviceName)
+		// What the platform says about the device: its tunnels. No secrets in this answer.
+		device, err := fl.Device(cmd.Context(), deviceName)
 		if err != nil {
-			return err
+			return classify(err)
 		}
 
 		kind, err := selectTunnel(device, deviceName, false, os.Stderr)
@@ -106,16 +81,15 @@ Example:
 			return errSOCKSOverWireGuard(deviceName)
 		}
 
-		// Decode base64 username and private key
-		usernameBytes, err := base64.StdEncoding.DecodeString(device.Spec.Settings.Username)
+		// The legacy tunnel needs the device login, which the platform gives only to developers who
+		// may open a terminal.
+		login, err := loadLogin(cmd.Context(), fl, deviceName)
 		if err != nil {
-			return fmt.Errorf("failed to decode username: %w", err)
+			return err
 		}
-		username := string(usernameBytes)
-
-		privateKey, err := base64.StdEncoding.DecodeString(device.Spec.Settings.RSAPrivate)
+		username, _, privateKey, err := decodeDeviceLogin(login)
 		if err != nil {
-			return fmt.Errorf("failed to decode RSA private key: %w", err)
+			return err
 		}
 
 		// Create secure temp file for private key
@@ -130,7 +104,7 @@ Example:
 		}
 
 		deadendHost := fmt.Sprintf("deadend-%s.%s", namespace, domain)
-		remoteAccessPort := device.Spec.Subresources.Status.RemoteAccess.Port
+		remoteAccessPort := device.Tunnel.Legacy.Port
 
 		fmt.Printf("\033[1;32m\n>>> SOCKS5 proxy active: 127.0.0.1:%d\033[0m\n", socksPort)
 		fmt.Printf("\033[1;36m>>> Configure your browser or application to use SOCKS5 proxy at 127.0.0.1:%d\033[0m\n", socksPort)

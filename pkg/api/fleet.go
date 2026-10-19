@@ -15,6 +15,9 @@ import (
 type Fleet struct {
 	// Base is https://<domain>/api/device/fleet/<namespace>.
 	Base string
+	// Root is https://<domain>/api/device/fleet, the base of the routes that name no teamspace
+	// (the teamspace list). Empty: Base without its last path segment.
+	Root string
 	// Token returns a valid bearer token for each request.
 	Token func(ctx context.Context) (string, error)
 }
@@ -22,8 +25,10 @@ type Fleet struct {
 // NewFleet returns the fleet client of a teamspace on a domain, authenticated with the
 // token that `tnctl login` stored.
 func NewFleet(domain, namespace string) *Fleet {
+	root := fmt.Sprintf("https://%s/api/device/fleet", domain)
 	return &Fleet{
-		Base: fmt.Sprintf("https://%s/api/device/fleet/%s", domain, url.PathEscape(namespace)),
+		Root: root,
+		Base: root + "/" + url.PathEscape(namespace),
 		Token: func(ctx context.Context) (string, error) {
 			return auth.AccessToken(ctx, domain)
 		},

@@ -71,6 +71,11 @@ func classify(err error) error {
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		return &cliError{code: codeAuth, err: errors.New("not logged in: run tnctl login")}
 	}
+	var up *api.UnsupportedPlatformError
+	if errors.As(err, &up) {
+		// not a mistake in the arguments, but the exit code scripts expect for "this cannot work as asked"
+		return &cliError{code: codeUsage, err: err}
+	}
 	var ae *api.Error
 	if errors.As(err, &ae) {
 		code := codeError

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/pterm/pterm"
@@ -14,7 +15,7 @@ func formatPercent(val float64) string {
 
 // colorTunnel renders the device's tunnel label: green when usable, yellow
 // while WireGuard is enabled but not active, red when off.
-func colorTunnel(d *api.BackstageDevice) string {
+func colorTunnel(d *api.FleetDevice) string {
 	label := d.TunnelLabel()
 	switch label {
 	case "wireguard", "legacy":
@@ -25,11 +26,10 @@ func colorTunnel(d *api.BackstageDevice) string {
 	return pterm.Yellow(label)
 }
 
-func PrintDeviceStatus(device *api.BackstageDevice) {
-	status := device.Spec.Subresources.Status
-	state := status.State
+func PrintDeviceStatus(device *api.FleetDevice) {
+	state := device.StateOrZero()
 
-	pterm.DefaultHeader.WithFullWidth().Println(fmt.Sprintf("Device: %s", device.Metadata.Name))
+	pterm.DefaultHeader.WithFullWidth().Println(fmt.Sprintf("Device: %s", device.Name))
 
 	// Top level info
 	pterm.DefaultSection.Println("Top Level Info")
@@ -37,10 +37,10 @@ func PrintDeviceStatus(device *api.BackstageDevice) {
 	tunnelStr := colorTunnel(device)
 
 	infoTable := pterm.TableData{
-		{"Namespace", device.Metadata.Namespace},
+		{"Namespace", device.Namespace},
 		{"Tunnel", tunnelStr},
-		{"Config Hash", status.Config.ActiveConfigHash},
-		{"Last Config Change", status.Config.LastConfigChange},
+		{"Config Hash", device.ConfigHash()},
+		{"Last Config Change", device.LastConfigChange()},
 	}
 	pterm.DefaultTable.WithData(infoTable).Render()
 
@@ -49,11 +49,11 @@ func PrintDeviceStatus(device *api.BackstageDevice) {
 
 	var resourceTable pterm.TableData
 	resourceTable = append(resourceTable, []string{"Resource", "Usage"})
-	resourceTable = append(resourceTable, []string{"CPU Usage", formatPercent(state.CpuUsage)})
-	resourceTable = append(resourceTable, []string{"Memory Usage", formatPercent(state.MemoryUsage)})
-	resourceTable = append(resourceTable, []string{"Storage Usage", formatPercent(state.StorageUsage)})
-	resourceTable = append(resourceTable, []string{"Net RX Rate", fmt.Sprintf("%.2f KB/s", state.NetRxRate)})
-	resourceTable = append(resourceTable, []string{"Net TX Rate", fmt.Sprintf("%.2f KB/s", state.NetTxRate)})
+	resourceTable = append(resourceTable, []string{"CPU Usage", formatPercent(state.CPU)})
+	resourceTable = append(resourceTable, []string{"Memory Usage", formatPercent(state.Memory)})
+	resourceTable = append(resourceTable, []string{"Storage Usage", formatPercent(state.Storage)})
+	resourceTable = append(resourceTable, []string{"Net RX Rate", fmt.Sprintf("%.2f KB/s", state.NetRx)})
+	resourceTable = append(resourceTable, []string{"Net TX Rate", fmt.Sprintf("%.2f KB/s", state.NetTx)})
 
 	pterm.DefaultTable.WithHasHeader().WithData(resourceTable).Render()
 
@@ -79,7 +79,13 @@ func PrintDeviceStatus(device *api.BackstageDevice) {
 		pterm.DefaultSection.Println("Applications")
 		var appsTable pterm.TableData
 		appsTable = append(appsTable, []string{"App Name", "Status", "CPU", "Memory", "Ready/Total"})
-		for appName, app := range state.Apps {
+		appNames := make([]string, 0, len(state.Apps))
+		for name := range state.Apps {
+			appNames = append(appNames, name)
+		}
+		sort.Strings(appNames)
+		for _, appName := range appNames {
+			app := state.Apps[appName]
 			appStatus := pterm.Red("Stopped")
 			if app.Running {
 				appStatus = pterm.Green("Running")
@@ -87,9 +93,9 @@ func PrintDeviceStatus(device *api.BackstageDevice) {
 			appsTable = append(appsTable, []string{
 				appName,
 				appStatus,
-				formatPercent(app.CpuUsagePct),
-				formatPercent(app.MemoryUsagePct),
-				fmt.Sprintf("%d/%d", app.ReadyContainers, app.TotalContainers),
+				formatPercent(app.CPU),
+				formatPercent(app.Memory),
+				readyOrDash(app.Ready),
 			})
 		}
 		pterm.DefaultTable.WithHasHeader().WithData(appsTable).Render()
@@ -98,22 +104,27 @@ func PrintDeviceStatus(device *api.BackstageDevice) {
 	fmt.Println()
 }
 
-func PrintDevicesSummary(devices []api.BackstageDevice) {
+// readyOrDash is the Ready/Total column; "-" when the device did not report it.
+func readyOrDash(ready string) string {
+	if ready == "" {
+		return "-"
+	}
+	return ready
+}
+
+func PrintDevicesSummary(devices []api.FleetDevice) {
 	pterm.DefaultHeader.WithFullWidth().Println("Devices Summary")
 
 	var table pterm.TableData
 	table = append(table, []string{"Device Name", "Tunnel", "CPU", "Memory", "Storage", "Alerts", "Apps", "Last Config Change"})
 
-	for _, d := range devices {
-		status := d.Spec.Subresources.Status
-		state := status.State
+	for i := range devices {
+		d := &devices[i]
+		state := d.StateOrZero()
 
-		tunnelStr := colorTunnel(&d)
+		tunnelStr := colorTunnel(d)
 
-		alertsCount := 0
-		for _, a := range state.Alerts {
-			alertsCount += a.Count
-		}
+		alertsCount := state.AlertTotal()
 		alertsStr := fmt.Sprintf("%d", alertsCount)
 		if alertsCount > 0 {
 			alertsStr = pterm.Red(alertsStr)
@@ -121,17 +132,15 @@ func PrintDevicesSummary(devices []api.BackstageDevice) {
 			alertsStr = pterm.Green(alertsStr)
 		}
 
-		appsCount := len(state.Apps)
-
 		table = append(table, []string{
-			d.Metadata.Name,
+			d.Name,
 			tunnelStr,
-			formatPercent(state.CpuUsage),
-			formatPercent(state.MemoryUsage),
-			formatPercent(state.StorageUsage),
+			formatPercent(state.CPU),
+			formatPercent(state.Memory),
+			formatPercent(state.Storage),
 			alertsStr,
-			fmt.Sprintf("%d", appsCount),
-			status.Config.LastConfigChange,
+			fmt.Sprintf("%d", state.AppTotal()),
+			d.LastConfigChange(),
 		})
 	}
 

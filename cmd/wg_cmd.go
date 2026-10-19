@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/teknoir/cli/pkg/api"
-	"github.com/teknoir/cli/pkg/config"
 	wgapi "github.com/teknoir/wg-tunnel/pkg/api"
 )
 
@@ -30,29 +28,26 @@ func hubSettings(flagHub, flagTURN, domain string) (hub, turn string) {
 	return hub, resolveWGOption(flagTURN, envWGTurnServer, "")
 }
 
-// catalogServices reads the device's published services from the Backstage
-// catalog annotation ztna.teknoir.org/services.
-func catalogServices(ctx context.Context, domain, ns, dev string) ([]wgapi.ServiceSpec, error) {
-	d, err := api.FetchDeviceDetails(ctx, domain, ns, dev)
+// fleetServices reads the device's published services (annotation ztna.teknoir.org/services) from
+// the fleet API.
+func fleetServices(ctx context.Context, fl *api.Fleet, dev string) ([]wgapi.ServiceSpec, error) {
+	d, err := fl.Device(ctx, dev)
 	if err != nil {
-		return nil, err
+		return nil, classify(err)
 	}
-	return servicesFromAnnotations(d.Metadata.Annotations)
+	return deviceServices(d)
 }
 
-func servicesFromAnnotations(ann map[string]string) ([]wgapi.ServiceSpec, error) {
-	raw := ann[wgapi.AnnotationServices]
-	if raw == "" {
-		return nil, nil
+// deviceServices are the services a device publishes. The platform parses the annotation; it
+// flags one it cannot read.
+func deviceServices(d *api.FleetDevice) ([]wgapi.ServiceSpec, error) {
+	if d.ServicesInvalid {
+		return nil, fmt.Errorf("the services annotation of the device is not valid")
 	}
-	var out []wgapi.ServiceSpec
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return nil, fmt.Errorf("the services annotation of the device is not valid: %w", err)
-	}
-	return out, nil
+	return d.Services, nil
 }
 
-func runPortForwardWireGuard(cmd *cobra.Command, domain, ns, dev, service string, local int) error {
+func runPortForwardWireGuard(cmd *cobra.Command, fl *api.Fleet, domain, ns, dev, service string, local int) error {
 	hub, turn := hubSettings(pfWGHubURL, pfTURNServer, domain)
 	o := wgForwardOptions{
 		domain: domain, namespace: ns, device: dev, service: service, localPort: local,
@@ -61,7 +56,7 @@ func runPortForwardWireGuard(cmd *cobra.Command, domain, ns, dev, service string
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	web := func(c context.Context) bool {
-		svcs, err := catalogServices(c, domain, ns, dev)
+		svcs, err := fleetServices(c, fl, dev)
 		if err != nil {
 			return false
 		}
@@ -90,13 +85,9 @@ var wgStatusCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		fl, domain, ns, err := defaultEnv.targetClient()
 		if err != nil {
 			return err
-		}
-		domain, ns := cfg.Domain, cfg.GetNamespace()
-		if domain == "" || ns == "" {
-			return fmt.Errorf("domain and namespace are required. Please set them via flags or config")
 		}
 		dev := device
 		if len(args) > 0 {
@@ -109,7 +100,7 @@ var wgStatusCmd = &cobra.Command{
 		o := wgStatusOptions{domain: domain, namespace: ns, device: dev, hubURL: hub, turnServer: turn, p2p: !wgStatusNoP2P}
 		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
 		defer stop()
-		lookup := func(c context.Context) ([]wgapi.ServiceSpec, error) { return catalogServices(c, domain, ns, dev) }
+		lookup := func(c context.Context) ([]wgapi.ServiceSpec, error) { return fleetServices(c, fl, dev) }
 		if code := runWGStatus(ctx, o, newWGCredential(domain), nil, lookup, os.Stdout, os.Stderr); code != wgExitOK {
 			return &exitError{code: code}
 		}
