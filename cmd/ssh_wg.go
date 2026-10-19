@@ -99,47 +99,58 @@ func validLoginName(u string) error {
 	return nil
 }
 
-// runSSHWireGuard is `tnctl ssh` over the WireGuard tunnel: the same device login as the legacy path, carried by a WireGuard session that wg-proxy brokers.
-func runSSHWireGuard(domain, ns, deviceName string, dev *api.BackstageDevice) error {
+// wgSSHSession is what ssh needs to reach a device over its WireGuard tunnel: the argument
+// list (ending in user@device) and a 0700 directory with the private key (0600) and the
+// known_hosts file that wg-proxy fills in. Close removes the directory.
+type wgSSHSession struct {
+	baseArgs []string
+	password string
+	tmpDir   string
+	device   string
+}
+
+// openWGSSH prepares an ssh to the device over WireGuard (the same device login as the
+// legacy path, carried by a WireGuard session that wg-proxy brokers). The caller must Close it.
+func openWGSSH(domain, ns, deviceName string, dev *api.BackstageDevice) (*wgSSHSession, error) {
 	if err := validateWGTarget(ns, deviceName, 22); err != nil {
-		return err
+		return nil, err
 	}
 	username, password, privateKey, err := decodeDeviceLogin(dev)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := validLoginName(username); err != nil {
-		return err
+		return nil, err
 	}
 
 	hubURL := resolveWGOption(sshWGHubURL, envWGHub, defaultHubURL(domain))
 	if err := validateHubURL(hubURL); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateHubHost(hubURL, domain); err != nil {
-		return err
+		return nil, err
 	}
 	turn := resolveWGOption(sshTURNServer, envWGTurnServer, "")
 
 	exe, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("cannot locate the tnctl executable: %w", err)
+		return nil, fmt.Errorf("cannot locate the tnctl executable: %w", err)
 	}
 	if exe, err = filepath.Abs(exe); err != nil {
-		return fmt.Errorf("cannot locate the tnctl executable: %w", err)
+		return nil, fmt.Errorf("cannot locate the tnctl executable: %w", err)
 	}
 
 	// 0700 directory with the private key (0600) and the known_hosts file that
 	// wg-proxy fills in; removed when ssh ends.
 	tmpDir, err := os.MkdirTemp("", "tnctl-wg-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temporary directory: %w", err)
+		return nil, fmt.Errorf("failed to create temporary directory: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
 
 	keyFile := filepath.Join(tmpDir, "id")
 	if err := os.WriteFile(keyFile, privateKey, 0600); err != nil {
-		return fmt.Errorf("failed to write private key to temporary file: %w", err)
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("failed to write private key to temporary file: %w", err)
 	}
 	knownHosts := filepath.Join(tmpDir, "known_hosts")
 
@@ -148,8 +159,26 @@ func runSSHWireGuard(domain, ns, deviceName string, dev *api.BackstageDevice) er
 		KnownHostsFile: knownHosts, TURNServer: turn, HubURL: hubURL, P2P: !sshNoP2P,
 	}, runtime.GOOS)
 
-	sshExec := exec.Command("ssh",
-		buildSSHArgs(proxy, knownHosts, wgapi.KnownHostsAlias(ns, deviceName), keyFile, username, deviceName)...)
+	return &wgSSHSession{
+		baseArgs: buildSSHArgs(proxy, knownHosts, wgapi.KnownHostsAlias(ns, deviceName), keyFile, username, deviceName),
+		password: password,
+		tmpDir:   tmpDir,
+		device:   deviceName,
+	}, nil
+}
+
+// Close removes the temporary directory.
+func (s *wgSSHSession) Close() { _ = os.RemoveAll(s.tmpDir) }
+
+// runSSHWireGuard is `tnctl ssh` over the WireGuard tunnel.
+func runSSHWireGuard(domain, ns, deviceName string, dev *api.BackstageDevice) error {
+	sess, err := openWGSSH(domain, ns, deviceName, dev)
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
+
+	sshExec := exec.Command("ssh", sess.baseArgs...)
 	sshExec.Stdin = os.Stdin
 	sshExec.Stdout = os.Stdout
 	sshExec.Stderr = os.Stderr
@@ -158,7 +187,7 @@ func runSSHWireGuard(domain, ns, deviceName string, dev *api.BackstageDevice) er
 		fmt.Printf("DEBUG: Executing command: %s %v\n", sshExec.Path, sshExec.Args)
 	}
 
-	printRemoteShellBanner(deviceName, password)
+	printRemoteShellBanner(deviceName, sess.password)
 
 	return runWithSignalForwarding(sshExec)
 }
