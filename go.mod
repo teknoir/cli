@@ -29,7 +29,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.20 // indirect
 	github.com/nsf/termbox-go v1.1.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
-	github.com/pion/dtls/v3 v3.0.10 // indirect
+	github.com/pion/dtls/v3 v3.1.4 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/stun/v3 v3.1.1 // indirect
