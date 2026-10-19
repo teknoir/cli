@@ -35,8 +35,17 @@ if [ "$OS" = "windows" ]; then
     EXT="zip"
 fi
 
-# Get latest version from GitHub
-VERSION=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+# TNCTL_VERSION installs a given release (for example v0.0.9-beta, the last one that works with
+# platforms that have no fleet API yet); without it the latest release is installed.
+VERSION="${TNCTL_VERSION:-}"
+case "$VERSION" in
+    ""|v[0-9]*) ;;
+    *) echo "TNCTL_VERSION must look like v0.1.0 or v0.1.0-beta, got: $VERSION"; exit 1 ;;
+esac
+if [ -z "$VERSION" ]; then
+    # Get latest version from GitHub
+    VERSION=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+fi
 
 if [ -z "$VERSION" ]; then
     echo "Could not find latest version for $REPO"

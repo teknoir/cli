@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,15 @@ const RequestTimeout = 30 * time.Second
 
 // maxBody caps what is read from one response.
 const maxBody = 64 << 20
+
+// Version is this tnctl's version; the command package sets it at start. It goes into the User-Agent
+// of every request, so the platform's logs show which tnctl made a call.
+var Version = "dev"
+
+// UserAgent is the User-Agent header of every API request: tnctl/<version> (<os>/<arch>).
+func UserAgent() string {
+	return fmt.Sprintf("tnctl/%s (%s/%s)", Version, runtime.GOOS, runtime.GOARCH)
+}
 
 // httpClient is shared by all API calls. It never follows redirects: behind the
 // platform gateway a missing or rejected bearer token is a 302 to /oauth2/start,
@@ -46,8 +56,19 @@ type Error struct {
 	RetryAfter int
 }
 
-// KindAuth marks an Error that needs a login (Error.Kind).
+// KindAuth marks an Error that needs a login (Error.Kind): no login, an expired or rejected token,
+// or a gateway redirect to the login page.
 const KindAuth = "auth"
+
+// KindForbidden marks a 403: the login is fine, but this account may not do this here. Logging in
+// again does not help.
+const KindForbidden = "forbidden"
+
+// Messages of the auth errors.
+const (
+	msgNotLoggedIn = "not logged in or token expired: run tnctl login"
+	msgForbidden   = "not allowed for this account or teamspace"
+)
 
 func (e *Error) Error() string {
 	if e.Message == "" {
@@ -113,6 +134,7 @@ func doRaw(ctx context.Context, method, rawURL, token string, body any) (json.Ra
 
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", UserAgent())
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -135,7 +157,11 @@ func doRaw(ctx context.Context, method, rawURL, token string, body any) (json.Ra
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 	debugf("Response Status: %s", resp.Status)
-	debugf("Response Body: %s", string(respBody))
+	if isSecretRoute(rawURL) && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		debugf("Response Body: <%d bytes, not shown: device logins>", len(respBody))
+	} else {
+		debugf("Response Body: %s", string(respBody))
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, errorFromResponse(method, rawURL, resp, respBody)
@@ -147,6 +173,12 @@ func doRaw(ctx context.Context, method, rawURL, token string, body any) (json.Ra
 		return nil, fmt.Errorf("received HTML instead of JSON. This usually means you are being redirected to a login page. Please refer to KEYCLOAK.md for infrastructure configuration")
 	}
 	return json.RawMessage(respBody), nil
+}
+
+// isSecretRoute reports whether the answer of this URL holds secrets (device logins), which debug
+// output must not show.
+func isSecretRoute(rawURL string) bool {
+	return strings.HasSuffix(stripQuery(rawURL), "/credentials")
 }
 
 // errorFromResponse builds the Error of a non-2xx response.
@@ -163,10 +195,78 @@ func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) 
 		return e
 	}
 	e.Code, e.Message = parseErrorBody(body)
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		// A bearer request the platform could not authenticate: the token is missing, expired or
+		// rejected. The challenge (WWW-Authenticate) and the JSON message say why.
+		ch := parseChallenge(resp.Header.Values("WWW-Authenticate"))
+		detail := e.Message
+		if detail == "" {
+			detail = ch["error_description"]
+		}
+		if detail == "" {
+			detail = ch["error"]
+		}
+		if e.Code == "" {
+			e.Code = ch["error"]
+		}
+		e.Kind = KindAuth
+		e.Message = msgNotLoggedIn
+		if detail != "" {
+			e.Message += " (" + detail + ")"
+		}
+	case http.StatusForbidden:
+		e.Kind = KindForbidden
+		if e.Message == "" {
+			e.Message = msgForbidden
+		} else {
+			e.Message = msgForbidden + ": " + e.Message
+		}
+	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		e.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
 	return e
+}
+
+// parseChallenge reads the parameters of a WWW-Authenticate header (`Bearer realm="x", error="invalid_token"`)
+// into a map; only the first challenge that has parameters counts. Keys are lower case.
+func parseChallenge(values []string) map[string]string {
+	out := map[string]string{}
+	for _, v := range values {
+		_, rest, _ := strings.Cut(strings.TrimSpace(v), " ")
+		for rest = strings.TrimSpace(rest); rest != ""; {
+			key, after, ok := strings.Cut(rest, "=")
+			if !ok {
+				break
+			}
+			key = strings.ToLower(strings.Trim(strings.TrimSpace(key), ","))
+			after = strings.TrimSpace(after)
+			var val string
+			if strings.HasPrefix(after, `"`) {
+				var b strings.Builder
+				i := 1
+				for ; i < len(after) && after[i] != '"'; i++ {
+					if after[i] == '\\' && i+1 < len(after) {
+						i++
+					}
+					b.WriteByte(after[i])
+				}
+				val = b.String()
+				rest = strings.TrimLeft(after[min(i+1, len(after)):], ", ")
+			} else {
+				val, rest, _ = strings.Cut(after, ",")
+				val, rest = strings.TrimSpace(val), strings.TrimSpace(rest)
+			}
+			if _, dup := out[key]; !dup && key != "" {
+				out[key] = val
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return out
 }
 
 // parseRetryAfter reads a Retry-After header: seconds, or an HTTP date.

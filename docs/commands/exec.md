@@ -13,6 +13,9 @@ Not interactive: no terminal, `ssh` runs in BatchMode and never waits for a pass
   arrive as typed.
 - One word is a shell command line, so pipes and `&&` work: `tnctl exec vision-station-01 -- 'df -h / | tail -1'`.
 
+`exec` needs the developer role in the teamspace and permission to open terminals: it reads the device login from
+the platform, which gives it only to those (a viewer gets `not allowed for this account or teamspace`, exit 6).
+
 The device is the robot's server computer. The login user has passwordless sudo, and the robot's k3s is
 `sudo k3s kubectl`.
 

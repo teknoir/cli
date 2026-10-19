@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,7 +20,6 @@ import (
 
 const (
 	envAnsibleTransport = "TNCTL_ANSIBLE_TRANSPORT"
-	wgAnnotation        = "ztna.teknoir.org/wireguard"
 
 	transportAuto      = "auto"
 	transportWireGuard = "wireguard"
@@ -114,7 +114,39 @@ func writeFileIfDifferent(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-func deviceWireGuardActive(d *api.BackstageDevice) bool { return d.WireGuardActive() }
+func deviceWireGuardActive(d *api.FleetDevice) bool { return d.WireGuardActive() }
+
+// inventoryNeedsLogin reports whether the inventory can reach the device with this transport, which
+// is when its login is worth asking the platform for.
+func inventoryNeedsLogin(d *api.FleetDevice, transport string) bool {
+	wg := transport != transportTunnel && deviceWireGuardActive(d)
+	tunnel := transport != transportWireGuard && d.LegacyTunnelActive() && d.Tunnel.Legacy.Port != ""
+	return wg || tunnel
+}
+
+// inventoryLogins asks the platform for the logins of the devices the inventory can reach, in bulk
+// (calls of at most 200 devices). Devices the caller may not see are left out of the answer; a
+// caller who may not read device logins gets the platform's 403 explanation.
+func inventoryLogins(ctx context.Context, fl *api.Fleet, devices []api.FleetDevice, transport string) (map[string]api.FleetDeviceCredentials, error) {
+	var names []string
+	for i := range devices {
+		if devices[i].Name != "" && inventoryNeedsLogin(&devices[i], transport) {
+			names = append(names, devices[i].Name)
+		}
+	}
+	logins := map[string]api.FleetDeviceCredentials{}
+	if len(names) == 0 {
+		return logins, nil
+	}
+	res, err := fl.CredentialsBulk(ctx, names)
+	if err != nil {
+		return nil, classify(err)
+	}
+	for _, c := range res.Devices {
+		logins[c.Name] = c
+	}
+	return logins, nil
+}
 
 func unreachableReason(transport string) string {
 	switch transport {
@@ -140,7 +172,7 @@ func withBecome(hv map[string]interface{}, password string) map[string]interface
 // devices and writes the key files. Devices without login data or without a
 // usable transport are left out (one line on warn each), so a run reports
 // only the devices it can reach.
-func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writer) (map[string]interface{}, error) {
+func buildInventory(devices []api.FleetDevice, logins map[string]api.FleetDeviceCredentials, o inventoryOpts, warn io.Writer) (map[string]interface{}, error) {
 	if o.Transport == "" {
 		o.Transport = transportAuto
 	}
@@ -170,8 +202,8 @@ func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writ
 
 	for i := range devices {
 		d := &devices[i]
-		name := d.Metadata.Name
-		ns := d.Metadata.Namespace
+		name := d.Name
+		ns := d.Namespace
 		if ns == "" {
 			ns = o.Namespace
 		}
@@ -183,15 +215,24 @@ func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writ
 			continue
 		}
 		add(ansibleGroup(ns), name)
-		for k, v := range d.Metadata.Labels {
+		for k, v := range d.Labels {
 			add(ansibleGroup(k)+"_"+ansibleGroup(v), name)
 		}
 
-		if d.Spec.Settings.Username == "" || d.Spec.Settings.RSAPrivate == "" {
+		useWG := o.Transport != transportTunnel && hubErr == nil && deviceWireGuardActive(d)
+		port := d.Tunnel.Legacy.Port
+		tunnelOpen := d.LegacyTunnelActive() && port != ""
+		if !useWG && !(o.Transport != transportWireGuard && tunnelOpen) {
+			fmt.Fprintf(warn, "tnctl: device %q is not reachable (%s); left out of the inventory\n", name, unreachableReason(o.Transport))
+			continue
+		}
+
+		login, ok := logins[name]
+		if !ok || login.Username == "" || login.RSAPrivate == "" {
 			fmt.Fprintf(warn, "tnctl: device %q has no login data in the platform; left out of the inventory\n", name)
 			continue
 		}
-		username, password, key, err := decodeDeviceLogin(d)
+		username, password, key, err := decodeDeviceLogin(&login)
 		if err != nil {
 			fmt.Fprintf(warn, "tnctl: device %q: %v\n", name, err)
 			continue
@@ -201,14 +242,6 @@ func buildInventory(devices []api.BackstageDevice, o inventoryOpts, warn io.Writ
 		}
 		if err := validLoginName(username); err != nil {
 			fmt.Fprintf(warn, "tnctl: device %q: %v\n", name, err)
-			continue
-		}
-
-		useWG := o.Transport != transportTunnel && hubErr == nil && deviceWireGuardActive(d)
-		port := d.Spec.Subresources.Status.RemoteAccess.Port
-		tunnelOpen := d.Spec.Subresources.Status.RemoteAccess.Active && port != ""
-		if !useWG && !(o.Transport != transportWireGuard && tunnelOpen) {
-			fmt.Fprintf(warn, "tnctl: device %q is not reachable (%s); left out of the inventory\n", name, unreachableReason(o.Transport))
 			continue
 		}
 
@@ -349,7 +382,7 @@ executable. See docs/commands/ansible.md.`,
 		if err != nil {
 			return err
 		}
-		dom, ns, err := resolveCommon()
+		fl, dom, ns, err := defaultEnv.targetClient()
 		if err != nil {
 			return err
 		}
@@ -361,11 +394,15 @@ executable. See docs/commands/ansible.md.`,
 		if err != nil {
 			return err
 		}
-		devices, err := api.FetchDeviceDetailsList(cmd.Context(), dom, ns, nil)
+		devices, err := fl.Devices(cmd.Context(), nil)
 		if err != nil {
-			return fmt.Errorf("failed to fetch devices: %w", err)
+			return fmt.Errorf("failed to fetch devices: %w", classify(err))
 		}
-		inv, err := buildInventory(devices, inventoryOpts{
+		logins, err := inventoryLogins(cmd.Context(), fl, devices, transport)
+		if err != nil {
+			return fmt.Errorf("failed to fetch the device logins: %w", err)
+		}
+		inv, err := buildInventory(devices, logins, inventoryOpts{
 			Domain: dom, Namespace: ns, Transport: transport, Exe: exe, ConfigFile: cfgFile,
 			CacheDir: cache, HubURL: resolveWGOption("", envWGHub, defaultHubURL(dom)),
 			TURNServer: resolveWGOption("", envWGTurnServer, ""), P2P: true,

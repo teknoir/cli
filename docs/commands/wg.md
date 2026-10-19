@@ -32,7 +32,7 @@ Services       ssh (external, tcp)
 | `Path` | `direct (LAN)`, `direct` or `via hub`; see [`port-forward`](port-forward.md#over-wireguard). |
 | `Candidates` | Addresses the device offered for the direct path. |
 | `RTT` | Time to open a TCP connection to the device's ssh service over that path. |
-| `Services` | The services published for the device, read from the catalog annotation `ztna.teknoir.org/services`. |
+| `Services` | The services published for the device, read from the platform (the device's annotation `ztna.teknoir.org/services`). |
 
 The exit status is 0 when a session was made and the ssh service answered, 1 otherwise.
 

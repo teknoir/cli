@@ -72,27 +72,42 @@ func shlexSplit(s string) ([]string, bool) {
 
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
-func mkDevice(name, ns string, labels map[string]string, user, pass, key string, wg bool, tunnelPort string) api.BackstageDevice {
-	var d api.BackstageDevice
-	d.Metadata.Name, d.Metadata.Namespace, d.Metadata.Labels = name, ns, labels
+// mkDevice returns a device as the platform lists it and its login as the credentials route answers.
+func mkDevice(name, ns string, labels map[string]string, user, pass, key string, wg bool, tunnelPort string) (api.FleetDevice, api.FleetDeviceCredentials) {
+	d := api.FleetDevice{Name: name, Namespace: ns, Labels: labels}
+	d.Tunnel = mkTunnel(wg, map[bool]string{true: "active", false: ""}[wg], tunnelPort != "", tunnelPort)
+	c := api.FleetDeviceCredentials{Name: name, Namespace: ns}
 	if user != "" {
-		d.Spec.Settings.Username = b64(user)
+		c.Username = b64(user)
 	}
 	if pass != "" {
-		d.Spec.Settings.Password = b64(pass)
+		c.Password = b64(pass)
 	}
 	if key != "" {
-		d.Spec.Settings.RSAPrivate = b64(key)
+		c.RSAPrivate = b64(key)
 	}
-	if wg {
-		d.Metadata.Annotations = map[string]string{wgAnnotation: "enabled"}
-		d.Spec.Subresources.Status.WireGuard.State = "active"
+	return d, c
+}
+
+// mkFleet builds devices and their logins from mkDevice results.
+type mkResult struct {
+	d api.FleetDevice
+	c api.FleetDeviceCredentials
+}
+
+func mk(name, ns string, labels map[string]string, user, pass, key string, wg bool, tunnelPort string) mkResult {
+	d, c := mkDevice(name, ns, labels, user, pass, key, wg, tunnelPort)
+	return mkResult{d, c}
+}
+
+func fleetOf(rs ...mkResult) ([]api.FleetDevice, map[string]api.FleetDeviceCredentials) {
+	var devs []api.FleetDevice
+	logins := map[string]api.FleetDeviceCredentials{}
+	for _, r := range rs {
+		devs = append(devs, r.d)
+		logins[r.d.Name] = r.c
 	}
-	if tunnelPort != "" {
-		d.Spec.Subresources.Status.RemoteAccess.Active = true
-		d.Spec.Subresources.Status.RemoteAccess.Port = tunnelPort
-	}
-	return d
+	return devs, logins
 }
 
 func testOpts(t *testing.T, transport string) inventoryOpts {
@@ -108,13 +123,13 @@ func hostvars(inv map[string]interface{}) map[string]interface{} {
 }
 
 func TestBuildInventoryTransports(t *testing.T) {
-	devs := []api.BackstageDevice{
-		mkDevice("wg1", "teknoir-demo", map[string]string{"device-group": "test", "site.name": "a-b"}, "u", "pw", "KEY1", true, ""),
-		mkDevice("tun1", "teknoir-demo", map[string]string{"device-group": "test"}, "u", "", "KEY2", false, "40022"),
-		mkDevice("both", "teknoir-demo", nil, "u", "", "KEY3", true, "40023"),
-		mkDevice("none", "teknoir-demo", nil, "u", "", "KEY4", false, ""),
-		mkDevice("nokey", "teknoir-demo", nil, "u", "", "", true, ""),
-	}
+	devs, logins := fleetOf(
+		mk("wg1", "teknoir-demo", map[string]string{"device-group": "test", "site.name": "a-b"}, "u", "pw", "KEY1", true, ""),
+		mk("tun1", "teknoir-demo", map[string]string{"device-group": "test"}, "u", "", "KEY2", false, "40022"),
+		mk("both", "teknoir-demo", nil, "u", "", "KEY3", true, "40023"),
+		mk("none", "teknoir-demo", nil, "u", "", "KEY4", false, ""),
+		mk("nokey", "teknoir-demo", nil, "u", "", "", true, ""),
+	)
 	cases := []struct {
 		transport string
 		want      map[string]string // host -> transport; absent = no hostvars
@@ -126,14 +141,14 @@ func TestBuildInventoryTransports(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.transport, func(t *testing.T) {
 			var warned bytes.Buffer
-			inv, err := buildInventory(devs, testOpts(t, c.transport), &warned)
+			inv, err := buildInventory(devs, logins, testOpts(t, c.transport), &warned)
 			if err != nil {
 				t.Fatal(err)
 			}
 			hv := hostvars(inv)
 			// every left-out device is named once on the warning stream
 			for _, d := range devs {
-				name := d.Metadata.Name
+				name := d.Name
 				_, in := c.want[name]
 				if n := strings.Count(warned.String(), fmt.Sprintf("device %q", name)); (n == 1) == in {
 					t.Errorf("device %s: %d warning lines, in inventory = %v:\n%s", name, n, in, warned.String())
@@ -179,9 +194,8 @@ func TestWireGuardHostVars(t *testing.T) {
 	o := testOpts(t, "auto")
 	o.ConfigFile = "/home/u/my cfg.yaml"
 	o.TURNServer = "turn.example.com:3478"
-	inv, err := buildInventory([]api.BackstageDevice{
-		mkDevice("wg1", "teknoir-demo", nil, "ubuntu", "pw", "KEY1", true, ""),
-	}, o, os.Stderr)
+	devs, logins := fleetOf(mk("wg1", "teknoir-demo", nil, "ubuntu", "pw", "KEY1", true, ""))
+	inv, err := buildInventory(devs, logins, o, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,8 +256,8 @@ func hostKeyAliasFor(ns, dev string) string { return wgapi.KnownHostsAlias(ns, d
 
 func TestPasswordOptionalAndKeyFile(t *testing.T) {
 	o := testOpts(t, "auto")
-	devs := []api.BackstageDevice{mkDevice("wg1", "teknoir-demo", nil, "u", "", "KEY-A", true, "")}
-	inv, err := buildInventory(devs, o, os.Stderr)
+	devs, logins := fleetOf(mk("wg1", "teknoir-demo", nil, "u", "", "KEY-A", true, ""))
+	inv, err := buildInventory(devs, logins, o, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,8 +283,10 @@ func TestPasswordOptionalAndKeyFile(t *testing.T) {
 	}
 	chk("KEY-A")
 	// stale key is replaced
-	devs[0].Spec.Settings.RSAPrivate = b64("KEY-B")
-	if _, err := buildInventory(devs, o, os.Stderr); err != nil {
+	l := logins["wg1"]
+	l.RSAPrivate = b64("KEY-B")
+	logins["wg1"] = l
+	if _, err := buildInventory(devs, logins, o, os.Stderr); err != nil {
 		t.Fatal(err)
 	}
 	chk("KEY-B")
@@ -278,7 +294,8 @@ func TestPasswordOptionalAndKeyFile(t *testing.T) {
 
 func TestTunnelHostVars(t *testing.T) {
 	o := testOpts(t, "tunnel")
-	inv, err := buildInventory([]api.BackstageDevice{mkDevice("tun1", "teknoir-demo", nil, "u", "pw", "K", false, "40022")}, o, os.Stderr)
+	devs, logins := fleetOf(mk("tun1", "teknoir-demo", nil, "u", "pw", "K", false, "40022"))
+	inv, err := buildInventory(devs, logins, o, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,13 +313,13 @@ func TestTunnelHostVars(t *testing.T) {
 func TestInvalidHubFallsBackOrFails(t *testing.T) {
 	o := testOpts(t, "auto")
 	o.HubURL = "http://wg.teknoir.cloud"
-	devs := []api.BackstageDevice{mkDevice("d", "teknoir-demo", nil, "u", "", "K", true, "40022")}
-	inv, err := buildInventory(devs, o, os.Stderr)
+	devs, logins := fleetOf(mk("d", "teknoir-demo", nil, "u", "", "K", true, "40022"))
+	inv, err := buildInventory(devs, logins, o, os.Stderr)
 	if err != nil || hostvars(inv)["d"].(map[string]interface{})["ansible_teknoir_transport"] != "tunnel" {
 		t.Fatalf("auto should fall back to the tunnel: %v %v", inv, err)
 	}
 	o.Transport = "wireguard"
-	if _, err := buildInventory(devs, o, os.Stderr); err == nil {
+	if _, err := buildInventory(devs, logins, o, os.Stderr); err == nil {
 		t.Fatal("wireguard with a bad hub URL must fail")
 	}
 }

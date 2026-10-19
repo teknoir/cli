@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -204,5 +205,154 @@ func TestRequest_RateLimitKeepsRetryAfter(t *testing.T) {
 	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 	if got := parseRetryAfter(now.Add(42*time.Second).UTC().Format(http.TimeFormat), now); got != 42 {
 		t.Errorf("http date: %d", got)
+	}
+}
+
+func TestRequest_SendsUserAgent(t *testing.T) {
+	var ua string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ua = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer ts.Close()
+	Version = "v0.1.0-beta"
+	defer func() { Version = "dev" }()
+	if err := Request(context.Background(), "GET", ts.URL, "t", nil); err != nil {
+		t.Fatal(err)
+	}
+	want := "tnctl/v0.1.0-beta (" + runtime.GOOS + "/" + runtime.GOARCH + ")"
+	if ua != want {
+		t.Errorf("User-Agent %q, want %q", ua, want)
+	}
+}
+
+func TestRequest_401IsALoginProblem(t *testing.T) {
+	cases := []struct {
+		name      string
+		challenge string
+		body      string
+		code      string
+		contains  []string
+	}{
+		{"json message", `Bearer realm="backstage"`, `{"error":{"name":"AuthenticationError","message":"Invalid token"}}`, "AuthenticationError",
+			[]string{"not logged in or token expired: run tnctl login", "Invalid token"}},
+		{"challenge only", `Bearer realm="teknoir", error="invalid_token", error_description="The access token expired"`, ``, "invalid_token",
+			[]string{"run tnctl login", "The access token expired"}},
+		{"challenge error without description", `Bearer error=invalid_token`, ``, "invalid_token", []string{"run tnctl login", "(invalid_token)"}},
+		{"nothing", ``, ``, "", []string{"not logged in or token expired: run tnctl login"}},
+		{"html", ``, `<html>login</html>`, "", []string{"run tnctl login"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if c.challenge != "" {
+					w.Header().Set("WWW-Authenticate", c.challenge)
+				}
+				w.WriteHeader(401)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer ts.Close()
+			err := Request(context.Background(), "GET", ts.URL+"/x", "bad", nil)
+			var ae *Error
+			if !errors.As(err, &ae) {
+				t.Fatalf("want *Error, got %T", err)
+			}
+			if ae.Status != 401 || ae.Kind != KindAuth || !ae.IsAuth() || ae.Code != c.code {
+				t.Errorf("got %+v", ae)
+			}
+			for _, want := range c.contains {
+				if !strings.Contains(ae.Error(), want) {
+					t.Errorf("message lacks %q: %s", want, ae.Error())
+				}
+			}
+			if strings.Contains(ae.Error(), "<html>") {
+				t.Errorf("HTML in the message: %s", ae.Error())
+			}
+		})
+	}
+}
+
+func TestRequest_403IsNotALoginProblem(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"json", `{"error":{"name":"NotAllowedError","message":"You do not have access to devices in teamspace acme"}}`,
+			"not allowed for this account or teamspace: You do not have access to devices in teamspace acme"},
+		{"fleet code", `{"code":"no_exec","message":"You may not open terminals here.","error":{"name":"X","message":"y"}}`,
+			"not allowed for this account or teamspace: You may not open terminals here."},
+		{"html", `<html><body>Forbidden</body></html>`, "not allowed for this account or teamspace"},
+		{"empty", ``, "not allowed for this account or teamspace"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(403)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer ts.Close()
+			err := Request(context.Background(), "GET", ts.URL+"/x", "tok", nil)
+			var ae *Error
+			if !errors.As(err, &ae) {
+				t.Fatalf("want *Error, got %T", err)
+			}
+			if ae.Status != 403 || ae.Kind != KindForbidden || !ae.IsAuth() {
+				t.Errorf("got %+v", ae)
+			}
+			if !strings.Contains(ae.Error(), c.want) || !strings.Contains(ae.Error(), "HTTP 403") {
+				t.Errorf("message %q, want %q", ae.Error(), c.want)
+			}
+			if strings.Contains(ae.Error(), "tnctl login") || strings.Contains(ae.Error(), "<html>") {
+				t.Errorf("message %q", ae.Error())
+			}
+		})
+	}
+}
+
+func TestRequest_302StillMeansLoginForGatewaysNotYetChanged(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://teknoir.online/oauth2/start?rd=%2Fapi")
+		w.WriteHeader(302)
+		// the gateway's body does not match its Content-Length: it must not be read
+		w.Header().Set("Content-Length", "9999")
+	}))
+	defer ts.Close()
+	err := Request(context.Background(), "GET", ts.URL+"/x", "tok", nil)
+	var ae *Error
+	if !errors.As(err, &ae) || ae.Status != 302 || ae.Kind != KindAuth || !ae.IsAuth() {
+		t.Fatalf("got %T %+v", err, err)
+	}
+	for _, want := range []string{"run tnctl login", "if that does not help, ask a teamspace owner for access"} {
+		if !strings.Contains(ae.Error(), want) {
+			t.Errorf("message lacks %q: %s", want, ae.Error())
+		}
+	}
+	// a redirect elsewhere is not a login problem
+	ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere", http.StatusMovedPermanently)
+	}))
+	defer ts2.Close()
+	err = Request(context.Background(), "GET", ts2.URL, "tok", nil)
+	if !errors.As(err, &ae) || ae.Kind == KindAuth || !strings.Contains(ae.Error(), "unexpected redirect") {
+		t.Errorf("got %+v", err)
+	}
+}
+
+func TestParseChallenge(t *testing.T) {
+	got := parseChallenge([]string{`Bearer realm="a \"b\"", error="invalid_token", error_description="expired, sorry", scope=openid`})
+	want := map[string]string{"realm": `a "b"`, "error": "invalid_token", "error_description": "expired, sorry", "scope": "openid"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+	if g := parseChallenge([]string{"Bearer", ``, "Basic"}); len(g) != 0 {
+		t.Errorf("no parameters: %v", g)
+	}
+	// the first challenge that carries parameters wins
+	if g := parseChallenge([]string{"Negotiate", `Bearer error="invalid_token"`}); g["error"] != "invalid_token" {
+		t.Errorf("%v", g)
 	}
 }

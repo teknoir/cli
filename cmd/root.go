@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/teknoir/cli/pkg/api"
 	"github.com/teknoir/cli/pkg/config"
 )
 
@@ -35,6 +36,7 @@ device management, and namespace-scoped operations.`,
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
+	api.Version = Version
 	err := rootCmd.Execute()
 	if err != nil {
 		var ee *exitError
@@ -45,7 +47,8 @@ func Execute() {
 		// error format (-o json) are decided here.
 		writeError(os.Stderr, err, outputFlag)
 		code := exitCodeOf(err)
-		if code == codeUsage && outputFlag != "json" {
+		var unsupported *api.UnsupportedPlatformError
+		if code == codeUsage && outputFlag != "json" && !errors.As(err, &unsupported) {
 			fmt.Fprintln(os.Stderr, "Run the command with --help for usage and examples.")
 		}
 		os.Exit(code)

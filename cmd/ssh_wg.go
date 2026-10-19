@@ -111,11 +111,11 @@ type wgSSHSession struct {
 
 // openWGSSH prepares an ssh to the device over WireGuard (the same device login as the
 // legacy path, carried by a WireGuard session that wg-proxy brokers). The caller must Close it.
-func openWGSSH(domain, ns, deviceName string, dev *api.BackstageDevice) (*wgSSHSession, error) {
+func openWGSSH(domain, ns, deviceName string, login *api.FleetDeviceCredentials) (*wgSSHSession, error) {
 	if err := validateWGTarget(ns, deviceName, 22); err != nil {
 		return nil, err
 	}
-	username, password, privateKey, err := decodeDeviceLogin(dev)
+	username, password, privateKey, err := decodeDeviceLogin(login)
 	if err != nil {
 		return nil, err
 	}
@@ -171,8 +171,8 @@ func openWGSSH(domain, ns, deviceName string, dev *api.BackstageDevice) (*wgSSHS
 func (s *wgSSHSession) Close() { _ = os.RemoveAll(s.tmpDir) }
 
 // runSSHWireGuard is `tnctl ssh` over the WireGuard tunnel.
-func runSSHWireGuard(domain, ns, deviceName string, dev *api.BackstageDevice) error {
-	sess, err := openWGSSH(domain, ns, deviceName, dev)
+func runSSHWireGuard(domain, ns, deviceName string, login *api.FleetDeviceCredentials) error {
+	sess, err := openWGSSH(domain, ns, deviceName, login)
 	if err != nil {
 		return err
 	}

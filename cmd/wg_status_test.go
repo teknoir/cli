@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	capi "github.com/teknoir/cli/pkg/api"
 	"github.com/teknoir/wg-tunnel/pkg/api"
 )
 
@@ -42,9 +43,9 @@ func TestFormatWGStatus(t *testing.T) {
 func TestFormatWGStatusProblem(t *testing.T) {
 	got := formatWGStatus(wgStatusReport{
 		Device: "ns1/dev-1", Hub: "https://wg.x", HubReachable: true, DeviceOnline: "no",
-		Problem: "device_offline: the device agent is not connected", ServicesNote: "none published (catalog)",
+		Problem: "device_offline: the device agent is not connected", ServicesNote: "none published",
 	})
-	for _, want := range []string{"Device online  no", "Problem        device_offline: the device agent is not connected", "Services       none published (catalog)"} {
+	for _, want := range []string{"Device online  no", "Problem        device_offline: the device agent is not connected", "Services       none published"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
@@ -100,16 +101,16 @@ func TestRunWGStatusHubUnreachable(t *testing.T) {
 	}
 }
 
-func TestServicesFromAnnotations(t *testing.T) {
-	ann := map[string]string{api.AnnotationServices: `[{"id":"ssh","kind":"external","protocol":"tcp"},{"id":"ui","protocol":"http","web":true}]`}
-	s, err := servicesFromAnnotations(ann)
+func TestDeviceServices(t *testing.T) {
+	d := &capi.FleetDevice{Services: []api.ServiceSpec{{ID: "ssh", Kind: "external", Protocol: "tcp"}, {ID: "ui", Protocol: "http", Web: true}}}
+	s, err := deviceServices(d)
 	if err != nil || len(s) != 2 || !s[1].Web {
 		t.Fatalf("%v %v", s, err)
 	}
-	if s, err := servicesFromAnnotations(nil); err != nil || s != nil {
+	if s, err := deviceServices(&capi.FleetDevice{}); err != nil || s != nil {
 		t.Errorf("empty: %v %v", s, err)
 	}
-	if _, err := servicesFromAnnotations(map[string]string{api.AnnotationServices: "{"}); err == nil {
-		t.Error("bad JSON accepted")
+	if _, err := deviceServices(&capi.FleetDevice{ServicesInvalid: true}); err == nil || !strings.Contains(err.Error(), "services annotation of the device is not valid") {
+		t.Errorf("invalid annotation accepted: %v", err)
 	}
 }

@@ -12,6 +12,13 @@ tnctl devices [metadata labels...]
 
 Each label is a `key=value` pair; multiple labels narrow the results (AND semantics).
 
+The platform filters: you see the devices of your organisation units in the teamspace, and the label filter is
+applied by the platform too (at most 20 labels).
+
+The columns come from the platform: `Tunnel` is `wireguard`, `legacy`, `off` or the WireGuard state while it is
+being set up (for example `enrolling`), `CPU`, `Memory` and `Storage` are what the device last reported, `Alerts`
+and `Apps` are counts.
+
 ## Requirements
 
 A domain and namespace must be set (via flags or config), otherwise the command errors out asking you

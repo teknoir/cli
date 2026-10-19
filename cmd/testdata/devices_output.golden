@@ -1,0 +1,55 @@
+Devices SummaryDevice Name | Tunnel    | CPU    | Memory | Storage | Alerts | Apps | Last Config Change  
+vision-01   | wireguard | 25.00% | 50.00% | 75.00%  | 3      | 2    | 2026-10-19T08:00:00Z
+legacy-02   | legacy    | 1.23%  | 0.00%  | 0.00%   | 0      | 0    |                     
+new-03      | enrolling | 0.00%  | 0.00%  | 0.00%   | 0      | 0    |                     
+
+Device: vision-01
+# Top Level Info
+
+Namespace          | teknoir-demo        
+Tunnel             | wireguard           
+Config Hash        | abc123              
+Last Config Change | 2026-10-19T08:00:00Z
+
+
+# Device Resources
+
+Resource      | Usage    
+CPU Usage     | 25.00%   
+Memory Usage  | 50.00%   
+Storage Usage | 75.00%   
+Net RX Rate   | 1.50 KB/s
+Net TX Rate   | 2.50 KB/s
+
+
+# Device Alerts
+
+Alert Name | State   | Count
+HighCPU    | firing  | 2    
+DiskFull   | pending | 1    
+
+
+# Applications
+
+App Name | Status  | CPU    | Memory | Ready/Total
+alpha    | Stopped | 0.00%  | 5.00%  | 0/1        
+grafana  | Running | 10.00% | 20.00% | 1/2        
+
+Device: new-03
+# Top Level Info
+
+Namespace          | teknoir-demo
+Tunnel             | enrolling   
+Config Hash        |             
+Last Config Change |             
+
+
+# Device Resources
+
+Resource      | Usage    
+CPU Usage     | 0.00%    
+Memory Usage  | 0.00%    
+Storage Usage | 0.00%    
+Net RX Rate   | 0.00 KB/s
+Net TX Rate   | 0.00 KB/s
+

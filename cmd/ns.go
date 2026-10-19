@@ -1,105 +1,81 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
-	"time"
-
-	"github.com/teknoir/cli/pkg/api"
-	authPkg "github.com/teknoir/cli/pkg/auth"
-	"github.com/teknoir/cli/pkg/config"
+	"text/tabwriter"
 
 	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
+	"github.com/teknoir/cli/pkg/config"
 )
 
-var nsCmd = &cobra.Command{
-	Use:   "ns [namespace]",
-	Short: "Select active namespace",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
-		if err != nil {
-			return err
-		}
+// newNsCmd is `tnctl ns`: it selects the active namespace (teamspace) from the ones the platform
+// says the account can work with.
+func newNsCmd(e *cliEnv) *cobra.Command {
+	var list bool
+	c := &cobra.Command{
+		Use:   "ns [namespace]",
+		Short: "Select active namespace",
+		Long: `Select the active namespace (teamspace).
 
-		if len(args) > 0 {
-			cfg.SetNamespace(args[0])
-			return cfg.Save()
-		}
+With a name, sets it. Without one, lists the teamspaces your account has access to and lets you
+pick one. --list only prints them (name, your access, display name).`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && !list {
+				cfg, err := config.Load()
+				if err != nil {
+					return err
+				}
+				cfg.SetNamespace(args[0])
+				return cfg.Save()
+			}
 
-		// Fetch real namespaces
-		namespaces, err := fetchNamespaces(cmd.Context(), cfg)
-		if err != nil {
-			return err
-		}
+			fl, _, err := e.domainFleet()
+			if err != nil {
+				return classify(err)
+			}
+			teamspaces, err := fl.Teamspaces(cmd.Context())
+			if err != nil {
+				return classify(err)
+			}
+			if len(teamspaces) == 0 {
+				return fmt.Errorf("no namespaces found: your account has no access to a teamspace yet, ask a teamspace admin")
+			}
 
-		if len(namespaces) == 0 {
-			return fmt.Errorf("no namespaces found")
-		}
+			if list {
+				tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+				fmt.Fprintln(tw, "NAME\tACCESS\tDISPLAY NAME")
+				for _, t := range teamspaces {
+					fmt.Fprintf(tw, "%s\t%s\t%s\n", t.Name, t.Access, t.DisplayName)
+				}
+				return tw.Flush()
+			}
 
-		idx, err := fuzzyfinder.Find(namespaces, func(i int) string {
-			return namespaces[i]
-		})
-		if err != nil {
-			return err
-		}
+			idx, err := fuzzyfinder.Find(teamspaces, func(i int) string {
+				return teamspaces[i].Name
+			})
+			if err != nil {
+				return err
+			}
 
-		selected := namespaces[idx]
-		cfg.SetNamespace(selected)
-		if err := cfg.Save(); err != nil {
-			return err
-		}
-		fmt.Printf("Switched to namespace: %s\n", selected)
-		return nil
-	},
-}
-
-type APIResponse struct {
-	Items []struct {
-		Metadata struct {
-			Name string `json:"name"`
-		} `json:"metadata"`
-	} `json:"items"`
-}
-
-func fetchNamespaces(ctx context.Context, cfg *config.Config) ([]string, error) {
-	domain := cfg.Domain
-	auth, exists := cfg.Auths[config.SanitizeDomain(domain)]
-	if !exists || auth.AccessToken == "" {
-		return nil, fmt.Errorf("no credentials found for domain %s. Please log in first", domain)
+			selected := teamspaces[idx].Name
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			cfg.SetNamespace(selected)
+			if err := cfg.Save(); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Switched to namespace: %s\n", selected)
+			return nil
+		},
 	}
-
-	token, err := authPkg.GetValidToken(ctx, domain, auth)
-	if err != nil {
-		return nil, err
-	}
-
-	// Update config with new token if refreshed
-	if token.AccessToken != auth.AccessToken || token.RefreshToken != auth.RefreshToken {
-		auth.AccessToken = token.AccessToken
-		auth.RefreshToken = token.RefreshToken
-		auth.Expiry = token.Expiry.Format(time.RFC3339)
-		cfg.Auths[config.SanitizeDomain(domain)] = auth
-		if err := cfg.Save(); err != nil {
-			return nil, fmt.Errorf("failed to save refreshed token: %w", err)
-		}
-	}
-
-	url := fmt.Sprintf("https://%s/api/catalog/entities/by-query?fields=metadata.name&filter=kind%%3Dsystem%%2Cmetadata.annotations.backstage.io%%2Fmanaged-by-location%%3Dprofile-provider%%3Ak8s", domain)
-
-	var apiResp APIResponse
-	if err := api.Request(ctx, "GET", url, token.AccessToken, &apiResp); err != nil {
-		return nil, err
-	}
-
-	var namespaces []string
-	for _, item := range apiResp.Items {
-		namespaces = append(namespaces, item.Metadata.Name)
-	}
-
-	return namespaces, nil
+	c.Flags().BoolVar(&list, "list", false, "only print the teamspaces you have access to")
+	return c
 }
 
 func init() {
-	rootCmd.AddCommand(nsCmd)
+	rootCmd.AddCommand(newNsCmd(defaultEnv))
 }

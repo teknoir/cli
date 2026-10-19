@@ -20,6 +20,30 @@ including resolved URLs and the exact `ssh` invocation used.
     `tnctl` refreshes access tokens automatically using the stored refresh token. If refresh fails
     (e.g. the refresh token was revoked), simply run `tnctl login` again.
 
+??? failure "`not logged in or token expired: run tnctl login`"
+    The platform answered 401: there is no token, or it was rejected or has expired. Run `tnctl login`.
+    The message adds the platform's reason in brackets when it gave one.
+
+??? failure "`not allowed for this account or teamspace: ...`"
+    The platform answered 403: you are logged in, but your account may not do this in this teamspace. The text
+    after the colon is the platform's reason, for example `The login keys of devices need the developer role in
+    teamspace <ns>` (a viewer ran `ssh`, `bootstrap` or `ansible`), or that you may not open terminals.
+    **Logging in again does not help.** Ask a teamspace admin for the role the message names. See
+    [who may do what](commands/index.md#who-may-do-what).
+
+??? failure "`the platform refused the request: not logged in, the token was rejected, or your account may not do this here`"
+    An older gateway turns both 401 and 403 into a redirect to the login page, so `tnctl` cannot tell them
+    apart. Run `tnctl login` first; if the message stays, you are missing a role: ask a teamspace owner.
+
+??? failure "`this platform does not support tnctl <version> yet`"
+    The platform has no fleet API (`/api/device/fleet/teamspaces` answers 404): production and airgapped
+    installs on the classic portal. Install `tnctl v0.0.9-beta` for them (see
+    [Installation](installation.md#older-versions)) or ask your platform admin to update the platform.
+
+??? failure "`too many requests` when reading device logins (HTTP 429)"
+    The platform allows 30 device-login calls per minute and user; `ansible-inventory` makes one call per
+    200 devices. Wait the number of seconds in `Retry-After` and run the command again.
+
 ## Context
 
 ??? failure "`domain and namespace are required. Please set them via flags or config`"

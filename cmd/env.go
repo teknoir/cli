@@ -9,11 +9,14 @@ import (
 	"github.com/teknoir/cli/pkg/config"
 )
 
-// cliEnv is what the robots, config, exec and logs commands reach the outside world
+// cliEnv is what the robots, config, exec, logs, ns, devices and device commands reach the outside world
 // through, so tests can replace it: the fleet API, the device shell, time.
 type cliEnv struct {
 	// fleet returns the fleet API client plus the domain and namespace it talks to.
 	fleet func() (client *api.Fleet, domain, namespace string, err error)
+	// domainFleet returns a fleet API client for the routes that name no teamspace (the teamspace
+	// list), so `tnctl ns` works before a namespace is chosen.
+	domainFleet func() (client *api.Fleet, domain string, err error)
 	// newExec opens a shell channel to a device (WireGuard SSH).
 	newExec func(ctx context.Context, domain, namespace, device string) (deviceExec, error)
 	// sleep waits d or until ctx ends.
@@ -46,6 +49,16 @@ var defaultEnv = &cliEnv{
 			return nil, "", "", fmt.Errorf("domain and namespace are required. Please set them via flags or config")
 		}
 		return api.NewFleet(domain, ns), domain, ns, nil
+	},
+	domainFleet: func() (*api.Fleet, string, error) {
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, "", err
+		}
+		if cfg.Domain == "" {
+			return nil, "", fmt.Errorf("a domain is required. Please set it via flag or config")
+		}
+		return api.NewFleet(cfg.Domain, ""), cfg.Domain, nil
 	},
 	newExec:      newWGExec,
 	sleep:        realSleep,

@@ -199,9 +199,9 @@ func runWGStatus(ctx context.Context, o wgStatusOptions, cred wgclient.Credentia
 		lc()
 		switch {
 		case lerr != nil:
-			rep.ServicesNote = "unknown (catalog: " + oneLine(lerr.Error()) + ")"
+			rep.ServicesNote = "unknown (platform: " + oneLine(lerr.Error()) + ")"
 		case len(svcs) == 0:
-			rep.ServicesNote = "none published (catalog)"
+			rep.ServicesNote = "none published"
 		default:
 			rep.Services = svcs
 		}

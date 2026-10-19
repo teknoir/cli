@@ -1,15 +1,12 @@
 package cmd
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
 
-	"github.com/teknoir/cli/pkg/api"
 	"github.com/teknoir/cli/pkg/config"
 
-	"github.com/ktr0731/go-fuzzyfinder"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +15,8 @@ var (
 	sshTURNServer string
 	sshWGHubURL   string
 	sshNoP2P      bool
+	// sshShowPassword prints the device's (sudo) password in the banner.
+	sshShowPassword bool
 )
 
 var sshCmd = &cobra.Command{
@@ -30,68 +29,47 @@ one, otherwise the legacy SSH tunnel (deprecated; it goes away once production
 has moved to WireGuard).`,
 	Example: "  tnctl ssh my-device",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		fl, domain, namespace, err := defaultEnv.targetClient()
+		if err != nil {
+			return err
+		}
+		ctx := cmd.Context()
+
+		deviceName, err := pickDevice(ctx, fl, namespace, presetDevice(args))
 		if err != nil {
 			return err
 		}
 
-		domain := cfg.Domain
-		namespace := cfg.GetNamespace()
-
-		if domain == "" || namespace == "" {
-			return fmt.Errorf("domain and namespace are required. Please set them via flags or config")
-		}
-
-		var deviceName string
-		if len(args) > 0 {
-			deviceName = args[0]
-		} else if device != "" {
-			deviceName = device
-		}
-
-		if deviceName == "" {
-			// Fetch and select device via fuzzy finder
-			devices, err := api.FetchDevices(cmd.Context(), domain, namespace)
-			if err != nil {
-				return err
-			}
-
-			if len(devices) == 0 {
-				return fmt.Errorf("no devices found in namespace %s", namespace)
-			}
-
-			idx, err := fuzzyfinder.Find(devices, func(i int) string {
-				return devices[i]
-			})
-			if err != nil {
-				return err
-			}
-			deviceName = devices[idx]
-		}
-
-		// Fetch device details from Backstage API
-		device, err := api.FetchDeviceDetails(cmd.Context(), domain, namespace, deviceName)
+		// What the platform says about the device: its tunnels. No secrets in this answer.
+		device, err := fl.Device(ctx, deviceName)
 		if err != nil {
-			return err
+			return classify(err)
 		}
 
 		kind, err := selectTunnel(device, deviceName, sshWireGuard, os.Stderr)
 		if err != nil {
 			return err
 		}
+		if kind != tunnelWireGuard && (sshNoP2P || sshTURNServer != "" || sshWGHubURL != "") {
+			return fmt.Errorf("--turn-server, --wg-hub-url and --no-p2p only apply to a WireGuard tunnel")
+		}
+
+		// The device login comes from the platform's credentials route, which only developers who
+		// may open a terminal can use. Both tunnels need it (the hub only carries the connection).
+		login, err := loadLogin(ctx, fl, deviceName)
+		if err != nil {
+			return err
+		}
+
 		if kind == tunnelWireGuard {
 			// Access is decided by the hub (see ssh_wg.go).
 			// Errors from here on are runtime failures (a hub denial, ssh's exit
 			// status), not usage mistakes: don't print the usage text.
 			cmd.SilenceUsage = true
-			return runSSHWireGuard(domain, namespace, deviceName, device)
+			return runSSHWireGuard(domain, namespace, deviceName, login)
 		}
 
-		if sshNoP2P || sshTURNServer != "" || sshWGHubURL != "" {
-			return fmt.Errorf("--turn-server, --wg-hub-url and --no-p2p only apply to a WireGuard tunnel")
-		}
-
-		username, password, privateKey, err := decodeDeviceLogin(device)
+		username, password, privateKey, err := decodeDeviceLogin(login)
 		if err != nil {
 			return err
 		}
@@ -108,7 +86,7 @@ has moved to WireGuard).`,
 		}
 
 		deadendHost := fmt.Sprintf("deadend-%s.%s", namespace, domain)
-		remoteAccessPort := device.Spec.Subresources.Status.RemoteAccess.Port
+		remoteAccessPort := device.Tunnel.Legacy.Port
 
 		// Construct ProxyCommand as specified in the requirements
 		// Replicating the exact proxy chaining structure found in legacy ssh_device.sh
@@ -136,36 +114,16 @@ has moved to WireGuard).`,
 	},
 }
 
-// decodeDeviceLogin decodes the base64 username, password and RSA private key
-// from the device details. password is empty when the device has none.
-func decodeDeviceLogin(device *api.BackstageDevice) (username, password string, privateKey []byte, err error) {
-	usernameBytes, err := base64.StdEncoding.DecodeString(device.Spec.Settings.Username)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to decode username: %w", err)
-	}
-	username = string(usernameBytes)
-
-	if device.Spec.Settings.Password != "" {
-		passwordBytes, err := base64.StdEncoding.DecodeString(device.Spec.Settings.Password)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("failed to decode password: %w", err)
-		}
-		password = string(passwordBytes)
-	}
-
-	privateKey, err = base64.StdEncoding.DecodeString(device.Spec.Settings.RSAPrivate)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to decode RSA private key: %w", err)
-	}
-	return username, password, privateKey, nil
-}
-
-// printRemoteShellBanner prints the colorful message and the device password.
+// printRemoteShellBanner prints the colorful message. The device password (the sudo password) is
+// only printed with --show-password: it would otherwise end up in every scrollback and log.
 func printRemoteShellBanner(deviceName, password string) {
 	fmt.Printf("\033[1;32m\n>>> You are now using a remote shell on device: %s\033[0m\n", deviceName)
-	if password != "" {
+	switch {
+	case password != "" && sshShowPassword:
 		fmt.Printf("\033[1;36m>>> SSH Password: %s\033[0m\n\n", password)
-	} else {
+	case password != "":
+		fmt.Printf("\033[1;36m>>> The device password is not shown; tnctl ssh --show-password prints it\033[0m\n\n")
+	default:
 		fmt.Println()
 	}
 }
@@ -175,6 +133,8 @@ func init() {
 	sshCmd.Flags().BoolVar(&sshWireGuard, "wireguard", false,
 		"force the WireGuard tunnel; fail instead of falling back to the legacy SSH tunnel")
 	_ = sshCmd.Flags().MarkHidden("wireguard")
+	sshCmd.Flags().BoolVar(&sshShowPassword, "show-password", false,
+		"print the device's SSH/sudo password in the banner (it is not shown by default)")
 	sshCmd.Flags().BoolVar(&sshNoP2P, "no-p2p", false,
 		"WireGuard: do not try a direct connection to the device, always go through the hub")
 	sshCmd.Flags().StringVar(&sshTURNServer, "turn-server", "",
