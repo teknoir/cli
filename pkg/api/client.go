@@ -123,6 +123,13 @@ func doRaw(ctx context.Context, method, rawURL, token string, body any) (json.Ra
 	}
 	defer resp.Body.Close()
 
+	// The gateway answers a refused request (no or bad token, but also a 401/403 from the backend) with a 302 to
+	// /oauth2/start and a body that does not match its Content-Length, so a redirect is decided before reading it.
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		debugf("Response Status: %s (Location %s)", resp.Status, resp.Header.Get("Location"))
+		return nil, errorFromResponse(method, rawURL, resp, nil)
+	}
+
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
@@ -149,7 +156,7 @@ func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) 
 		loc := resp.Header.Get("Location")
 		if strings.Contains(loc, "/oauth2/") {
 			e.Kind = KindAuth
-			e.Message = "not logged in or token rejected: run tnctl login"
+			e.Message = "the platform refused the request: not logged in, the token was rejected, or your account may not do this here (the gateway answers all of these with a login redirect): run tnctl login, and if that does not help, ask a teamspace owner for access"
 			return e
 		}
 		e.Message = "unexpected redirect from the platform (HTTP " + fmt.Sprint(resp.StatusCode) + ")"
