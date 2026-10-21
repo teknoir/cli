@@ -1089,4 +1089,14 @@ func TestPrintIssuesInFileOrder(t *testing.T) {
 	if b.String() != want {
 		t.Errorf("got\n%swant\n%s", b.String(), want)
 	}
+	if v.Issues[0].Message != "c" {
+		t.Error("the platform's answer (-o json) must keep its order")
+	}
+	// a later document of the file: lines move by its start, a first-line column by the "--- " prefix
+	b.Reset()
+	v = api.LocalValidation{Issues: []api.LocalValidationIssue{{Severity: "error", Message: "y", Line: 3, Column: 2}, {Severity: "error", Message: "x", Line: 1, Column: 1}}}
+	printIssues(&b, "f.yaml", localDoc{line: 5, index: 2, prefix: 4}, true, v)
+	if want := "f.yaml:5:5: error: x\nf.yaml:7:2: error: y\n"; b.String() != want {
+		t.Errorf("got\n%swant\n%s", b.String(), want)
+	}
 }
