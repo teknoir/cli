@@ -45,7 +45,7 @@ tnctl config remove vision-station-01 HelmChart/default/local-llm --dry-run   # 
 tnctl config remove vision-station-01 local-llm --wait=applied                # remove, wait until it is gone
 ```
 
-The robot deletes the object; a HelmChart's release is uninstalled. The tool that wrote the item may write it again. Items from git are removed in git, in the robot's apps, a fleet or the robot type; `remove` on such an item exits 8 and names the place. `--wait=applied` checks over WireGuard SSH that the object (and a HelmChart's release) is gone, and prints the manual `kubectl delete` if it is not.
+The robot deletes the object; a HelmChart's release is uninstalled. If git has a copy with the same identity, that copy applies again and nothing is uninstalled (the answer says so, and what happens to an override on this robot). The tool that wrote the item may write it again. Items from git are removed in git, in the robot's apps, a fleet or the robot type; `remove` on such an item exits 8 and names the place. `--wait=published` waits for device-controller to publish a new config (its hash changes). `--wait=applied` also checks over WireGuard SSH that the object (and a HelmChart's release) is gone, and prints the manual `kubectl delete` if it is not; when a git copy took over it checks nothing on the robot and prints no delete command.
 
 ## Published, applied, ready
 

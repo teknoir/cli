@@ -96,7 +96,7 @@ func TestFleetRemoveLocalItem(t *testing.T) {
 	if !r.DryRun || r.Owner != "devstudio" || !r.HadOverride || r.Removed["kind"] != "HelmChart" || len(r.Warnings) != 1 || len(raw) == 0 {
 		t.Errorf("%+v", r)
 	}
-	f.RemoveLocalItem(ctx, "vs", "HelmChart/default/local-llm", false)
+	_, _, _ = f.RemoveLocalItem(ctx, "vs", "HelmChart/default/local-llm", false)
 	if s.query != "id=HelmChart%2Fdefault%2Flocal-llm" {
 		t.Errorf("query %q", s.query)
 	}

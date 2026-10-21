@@ -229,7 +229,7 @@ func (w *waiter) wait(ctx context.Context, info writeInfo) error {
 	var err error
 	if info.gone != nil {
 		err = w.waitGonePublished(ctx, info.gone)
-		if err == nil && (w.level == waitApplied || w.level == waitReady) {
+		if err == nil && (w.level == waitApplied || w.level == waitReady) && info.gone.revertsTo == "" {
 			w.stage = string(w.level)
 			err = w.waitGoneDevice(ctx, info.gone)
 		}

@@ -158,12 +158,26 @@ Items that come from git are not removed with `remove`. Asking for one gives exi
 to remove it: git, the robot's apps, a fleet or the robot type. Overrides are not removed here either: use
 `unset` or `reset`.
 
-`--wait=published` waits until the platform's configuration of the robot no longer has the item in its local layer.
-`--wait=applied` (a bare `--wait` is the same for `remove`) also looks at the robot over WireGuard SSH, as for the
-other writes, and waits until `k3s kubectl get <kind> <name>` finds nothing; for a HelmChart also until no helm
-release secret (`owner=helm,name=<name>`, in the chart's target namespace) is left. The robot has to be
-reachable before anything is removed. If the item stays after `--timeout` the command exits 4 and prints how to
-delete it by hand: `tnctl exec <target> -- sudo k3s kubectl -n <ns> delete <kind> <name>`.
+If git has a copy of the item with the same identity (a fleet, the robot type, ...), that copy takes over: the
+answer says `The fleet gpu-nvidia version (git) applies again.` and nothing is uninstalled. An override of the
+item on this robot is either removed with it (`Its override on this robot was removed too.`) or stays and
+applies to the git version (`This robot's override stays and applies to the git version.`). A removal that
+finds nothing to remove (someone else was first) prints `... was already gone` and waits for nothing; a 404
+says the item may already have been removed.
+
+`--wait=published` waits until device-controller has published a new config without the item: the config hash
+that `config get` shows as `Published:` differs from the one before the removal, and the item is no longer in
+the local layer. If that does not happen the command exits 4 with `device-controller has not published a new
+config for <device> yet`. `--wait=applied` (a bare `--wait` is the same for `remove`) also looks at the robot
+over WireGuard SSH, as for the other writes, and waits until `k3s kubectl get <kind> <name>` finds nothing;
+for a HelmChart also until no helm release secret (`owner=helm,name=<name>`, in the chart's target namespace)
+is left. The robot has to be reachable before anything is removed. If the item stays after `--timeout` the
+command exits 4 and prints how to delete it by hand: `tnctl exec <target> -- sudo k3s kubectl -n <ns> delete
+<kind> <name>`.
+
+When a git copy takes over, `--wait=applied` never probes the robot for the object to be gone (the object stays,
+managed by git) and never prints the manual delete command; `published` already means that the git copy wins in
+the robot's configuration, and `applied` is reported at the same point, once the published hash changed.
 
 ### try and untry
 

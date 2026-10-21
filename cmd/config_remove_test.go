@@ -18,6 +18,10 @@ const (
 // localView is the standard view plus a local-llm HelmChart written by Devstudio; gone drops it.
 func localView(gone bool) *api.ConfigTargetView {
 	v := standardView()
+	v.Published = &api.PublishedInfo{Hash: "h1"}
+	if gone {
+		v.Published.Hash = "h2"
+	}
 	if !gone {
 		llm := helmResource("local-llm", api.LayerLocal, "devstudio", "1.2.0", nil)
 		v.Configuration.Resources = append(v.Configuration.Resources, llm)
@@ -187,23 +191,23 @@ func TestConfigRemoveNoop(t *testing.T) {
 func TestConfigRemoveWaitPublished(t *testing.T) {
 	p := newFakePlatform(t)
 	p.on("DELETE", removePath, 200, removedBody(llmID, false, ""))
-	polls := sequence(t, p, localView(false), localView(false), localView(true))
+	polls := sequence(t, p, localView(false), localView(false), localView(false), localView(true))
 	e, clk := testEnv(t, p, nil)
 	t0 := clk.now()
 	out, errs, err := runCLI(t, e, "config", "remove", "vision-station-01", llmID, "--wait=published")
 	if err != nil {
 		t.Fatalf("%v\n%s", err, errs)
 	}
-	if *polls != 3 || clk.now().Sub(t0) != 2*e.pollInterval {
+	if *polls != 4 || clk.now().Sub(t0) != 2*e.pollInterval {
 		t.Errorf("polls %d, waited %s", *polls, clk.now().Sub(t0))
 	}
-	if !strings.Contains(errs, "is still in the robot's local configuration") || !strings.Contains(errs, "published after") || strings.Contains(out, "published after") {
+	if !strings.Contains(errs, "waiting for device-controller to publish a new config (still h1)") || !strings.Contains(errs, "published after") || strings.Contains(out, "published after") {
 		t.Errorf("stderr:\n%s\nstdout:\n%s", errs, out)
 	}
 	// json carries the wait object
 	p2 := newFakePlatform(t)
 	p2.on("DELETE", removePath, 200, removedBody(llmID, false, ""))
-	sequence(t, p2, localView(true))
+	sequence(t, p2, localView(false), localView(true))
 	e2, _ := testEnv(t, p2, nil)
 	out, _, err = runCLI(t, e2, "config", "remove", "vision-station-01", llmID, "--wait=published", "-o", "json")
 	if err != nil || !strings.Contains(out, `"reached": true`) || !strings.Contains(out, `"level": "published"`) {
@@ -217,7 +221,7 @@ func TestConfigRemoveWaitPublishedTimeout(t *testing.T) {
 	sequence(t, p, localView(false))
 	e, _ := testEnv(t, p, nil)
 	_, _, err := runCLI(t, e, "config", "remove", "vision-station-01", llmID, "--wait=published", "--timeout", "10s")
-	if exitCodeOf(err) != codeTimeout || !strings.Contains(err.Error(), "waiting for the change to be published") {
+	if exitCodeOf(err) != codeTimeout || !strings.Contains(err.Error(), "device-controller has not published a new config for vision-station-01 yet") {
 		t.Errorf("exit %d: %v", exitCodeOf(err), err)
 	}
 }
@@ -247,7 +251,7 @@ func (d *goneDevice) run(script string) (execResult, error) {
 func removeAppliedPlatform(t *testing.T) *fakePlatform {
 	p := newFakePlatform(t)
 	p.on("DELETE", removePath, 200, removedBody(llmID, false, ""))
-	sequence(t, p, localView(true))
+	sequence(t, p, localView(false), localView(true))
 	return p
 }
 
@@ -291,7 +295,7 @@ func TestConfigRemoveWaitAppliedWorkload(t *testing.T) {
 	dep := deployResource("whoami", "whoami", "traefik/whoami:v1.10.4")
 	dep.Layer = api.LayerLocal
 	v.Configuration.Effective = append(v.Configuration.Effective, dep)
-	sequence(t, p, v, standardView())
+	sequence(t, p, v, localView(true))
 	p.on("DELETE", removePath, 200, `{"id":"Deployment/default/whoami","dryRun":false,"hadOverride":false,"warnings":[],"removed":{"kind":"Deployment"}}`)
 	dev := &goneDevice{step: func(n int) (string, string) {
 		if n == 1 {
@@ -354,8 +358,10 @@ func TestConfigRemoveWaitAppliedNeedsTheDeviceBeforeDeleting(t *testing.T) {
 	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "cannot check the robot before the change") || !strings.Contains(err.Error(), "--wait=published") {
 		t.Errorf("exit %d: %v", exitCodeOf(err), err)
 	}
-	if len(p.seen("DELETE", removePath)) != 0 {
-		t.Error("nothing may be removed when the device cannot be checked")
+	for _, r := range p.seen("DELETE", removePath) {
+		if !strings.Contains(r.Query, "dryRun=1") {
+			t.Error("nothing may be removed when the device cannot be checked")
+		}
 	}
 }
 
@@ -391,5 +397,109 @@ func TestEvalGone(t *testing.T) {
 		if r := evalGone(g, c.out); r.state != c.want {
 			t.Errorf("%q: state %d (%s), want %d", c.out, r.state, r.msg, c.want)
 		}
+	}
+}
+
+// ---------- a git copy takes over ----------
+
+func revertBody(dry bool, extra string) string {
+	d := "false"
+	if dry {
+		d = "true"
+	}
+	return `{"id":"` + llmID + `","dryRun":` + d + `,"hadOverride":true,"revertsTo":{"layer":"fleet","source":"gpu-nvidia"}` + extra +
+		`,"removed":{"kind":"HelmChart","spec":{"chart":"llm"}},"warnings":[]}`
+}
+
+// revertView has the item in the fleet layer (git) with the given published hash; winner local keeps the local copy.
+func revertView(hash, winner string) *api.ConfigTargetView {
+	v := standardView()
+	v.Published = &api.PublishedInfo{Hash: hash}
+	llm := helmResource("local-llm", winner, "x", "1.2.0", nil)
+	v.Configuration.Effective = append(v.Configuration.Effective, llm)
+	return v
+}
+
+func TestConfigRemoveRevertsToGitHumanOutput(t *testing.T) {
+	for _, c := range []struct {
+		extra string
+		dry   bool
+		want  []string
+	}{
+		{`,"overrideRemoved":true`, false, []string{"Removed HelmChart/default/local-llm from vision-station-01.", "The fleet gpu-nvidia version (git) applies again.", "Its override on this robot was removed too."}},
+		{`,"keptOverride":true`, false, []string{"The fleet gpu-nvidia version (git) applies again.", "This robot's override stays and applies to the git version."}},
+		{`,"overrideRemoved":true`, true, []string{"Would remove HelmChart/default/local-llm", "The fleet gpu-nvidia version (git) would apply again.", "would be removed too"}},
+	} {
+		p := localPlatform(t)
+		p.on("DELETE", removePath, 200, revertBody(c.dry, c.extra))
+		e, _ := testEnv(t, p, nil)
+		args := []string{"config", "remove", "vision-station-01", llmID}
+		if c.dry {
+			args = append(args, "--dry-run")
+		}
+		out, _, err := runCLI(t, e, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range c.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("output lacks %q:\n%s", w, out)
+			}
+		}
+		if strings.Contains(out, "It also had an override") {
+			t.Errorf("the generic override line must not repeat the specific one:\n%s", out)
+		}
+	}
+}
+
+func TestConfigRemoveRevertWaitAppliedNeverProbesOrHints(t *testing.T) {
+	p := newFakePlatform(t)
+	p.on("DELETE", removePath, 200, revertBody(false, ""))
+	// baseline, hash unchanged, hash changed but the local copy still wins, another layer wins, done
+	sequence(t, p, revertView("h1", "local"), revertView("h1", "local"), revertView("h2", "local"), revertView("h2", "type"), revertView("h2", "fleet"))
+	ex := &fakeExec{run: func(s string) (execResult, error) { return execResult{}, errors.New("no probe expected: " + s) }}
+	e, _ := testEnv(t, p, ex)
+	_, errs, err := runCLI(t, e, "config", "remove", "vision-station-01", llmID, "--wait=applied")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if calls := ex.callList(); len(calls) != 0 {
+		t.Errorf("the robot must not be touched when a git copy takes over: %v", calls)
+	}
+	for _, frag := range []string{"waiting for device-controller to publish a new config", "is still in the robot's local configuration", "waiting for the fleet copy of " + llmID + " to win (it is type)", "applied after"} {
+		if !strings.Contains(errs, frag) {
+			t.Errorf("progress lacks %q:\n%s", frag, errs)
+		}
+	}
+}
+
+func TestConfigRemoveRevertTimeoutHasNoDeleteHint(t *testing.T) {
+	p := newFakePlatform(t)
+	p.on("DELETE", removePath, 200, revertBody(false, ""))
+	sequence(t, p, revertView("h1", "local"), revertView("h2", "local"))
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "remove", "vision-station-01", llmID, "--wait=applied", "--timeout", "10s")
+	if exitCodeOf(err) != codeTimeout || strings.Contains(err.Error(), "kubectl") || strings.Contains(err.Error(), "delete") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestConfigRemoveNotFoundAfterConcurrentRemoval(t *testing.T) {
+	p := localPlatform(t)
+	p.on("DELETE", removePath, 404, `{"error":{"name":"NotFoundError","message":"No local item HelmChart/default/local-llm on vision-station-01."}}`)
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "remove", "vision-station-01", llmID)
+	if exitCodeOf(err) != codeNotFound || !strings.Contains(err.Error(), "No local item") || !strings.Contains(err.Error(), "may already have been removed: tnctl config get vision-station-01") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestConfigRemoveNoopSkipsTheWait(t *testing.T) {
+	p := newFakePlatform(t)
+	p.on("DELETE", removePath, 200, `{"id":"`+llmID+`","dryRun":false,"noop":true,"hadOverride":false,"warnings":[]}`)
+	sequence(t, p, localView(true)) // the hash never changes: waiting would time out
+	e, _ := testEnv(t, p, nil)
+	if _, _, err := runCLI(t, e, "config", "remove", "vision-station-01", llmID, "--wait=published"); err != nil {
+		t.Errorf("a removal that did nothing has nothing to wait for: %v", err)
 	}
 }

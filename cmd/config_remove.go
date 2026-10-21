@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -28,7 +29,9 @@ wrote straight to the device's manifest, not through git; 'tnctl config get <tar
 "local" layer.
 
 The robot deletes the item: a Deployment, Service or other object is deleted, and a HelmChart's release
-is uninstalled. The tool that wrote the item may write it again (a running Devstudio, for example).
+is uninstalled. If git has a copy with the same identity (a fleet, the robot type, ...), that copy applies
+again instead and nothing is uninstalled; the command says so, and says what happens to an override of the
+item on this robot. The tool that wrote the item may write it again (a running Devstudio, for example).
 
 Items that come from git are not removed here: remove them in git, or from the robot's apps, a fleet or
 the robot type, whichever the platform names when you try (it answers with exit 8 and says where).
@@ -36,9 +39,12 @@ Overrides are removed with 'tnctl config unset' and 'tnctl config reset', not wi
 
   <resource>      Kind/namespace/name, Kind/name or a unique name, as in the other config commands
   --dry-run       show what would be removed, remove nothing
-  --wait=LEVEL    published: the robot's published configuration no longer has the item
-                  applied: the object is gone on the robot, and for a HelmChart its release is
+  --wait=LEVEL    published: device-controller published a new config (its hash changed) without
+                  the item
+                  applied: also the object is gone on the robot, and for a HelmChart its release is
                   uninstalled (checked over WireGuard SSH). Write --wait=applied, not --wait applied.
+                  When a git copy takes over (the answer says "applies again"), nothing is deleted:
+                  published already means the git copy wins, and applied needs no check on the robot.
   --timeout T     how long --wait may take (default 5m; exit code 4 when it runs out)
 
 Exit 8 also means the item is not local, so it cannot be removed here; the message says where to remove it.`,
@@ -64,14 +70,17 @@ Exit 8 also means the item is not local, so it cannot be removed here; the messa
 				return err
 			}
 			w := s.waiter()
-			if err := w.prepareRemove(ctx); err != nil {
-				w.close()
-				return err
+			gone := &goneItem{id: id, kind: kind, ns: ns, name: name}
+			if !f.dryRun && s.level != waitNone {
+				if err := w.prepareRemove(ctx, target, id, gone); err != nil {
+					w.close()
+					return err
+				}
 			}
 			res, raw, err := s.fl.RemoveLocalItem(ctx, target, id, f.dryRun)
 			if err != nil {
 				w.close()
-				return classify(err)
+				return classify(removeNotFoundHint(err, target))
 			}
 			out, errw := cmd.OutOrStdout(), cmd.ErrOrStderr()
 			for _, wn := range res.Warnings {
@@ -83,10 +92,15 @@ Exit 8 also means the item is not local, so it cannot be removed here; the messa
 			waiting := !f.dryRun && s.level != waitNone
 			var werr error
 			start := e.clock()
-			if waiting {
+			switch {
+			case waiting && !res.Noop:
 				defer w.close()
-				werr = w.wait(ctx, writeInfo{gone: &goneItem{id: id, kind: kind, ns: ns, name: name, targetNS: removedTargetNS(res, ns)}})
-			} else {
+				gone.targetNS = removedTargetNS(res, ns)
+				if res.RevertsTo != nil {
+					gone.revertsTo = res.RevertsTo.Layer
+				}
+				werr = w.wait(ctx, writeInfo{gone: gone})
+			default:
 				w.close()
 			}
 			if s.format != "table" {
@@ -158,10 +172,37 @@ func itemSummary(res *api.LocalRemoveResult) []string {
 		}
 		lines = append(lines, "images: "+strings.Join(parts, ", "))
 	}
-	if res.HadOverride {
-		lines = append(lines, "it also had an override on this robot")
+	if rt := res.RevertsTo; rt != nil {
+		what := rt.Layer
+		if rt.Source != "" {
+			what += " " + rt.Source
+		}
+		verb := "applies again"
+		if res.DryRun {
+			verb = "would apply again"
+		}
+		lines = append(lines, fmt.Sprintf("The %s version (git) %s.", what, verb))
+	}
+	switch {
+	case res.OverrideRemoved && res.DryRun:
+		lines = append(lines, "Its override on this robot would be removed too.")
+	case res.OverrideRemoved:
+		lines = append(lines, "Its override on this robot was removed too.")
+	case res.KeptOverride:
+		lines = append(lines, "This robot's override stays and applies to the git version.")
+	case res.HadOverride:
+		lines = append(lines, "It also had an override on this robot.")
 	}
 	return lines
+}
+
+// removeNotFoundHint says, for a 404, that a concurrent removal may have beaten us to it.
+func removeNotFoundHint(err error, target string) error {
+	var ae *api.Error
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+		return fmt.Errorf("%w (it may already have been removed: tnctl config get %s)", err, target)
+	}
+	return err
 }
 
 // removedTargetNS is the namespace a HelmChart's release lives in: spec.targetNamespace of the
@@ -180,17 +221,38 @@ type goneItem struct {
 	id, kind, ns, name string
 	// targetNS is where a HelmChart's release secrets live.
 	targetNS string
+	// hash is the config hash device-controller had published before the delete; device is the device's name.
+	hash, device string
+	// revertsTo is the layer of the git copy that takes over; "" when the item is just gone.
+	revertsTo string
 }
 
-// stillThereError ends --wait=applied of a removal that ran out of time with the item still on the robot.
+// stillThereError ends --wait of a removal that ran out of time: the config was not published, or the
+// item is still on the robot.
 type stillThereError struct{ msg string }
 
 func (e *stillThereError) Error() string { return e.msg }
 
-// prepareRemove runs before the delete: applied needs the robot, and it must be reachable before
-// anything is removed.
-func (w *waiter) prepareRemove(ctx context.Context) error {
+// prepareRemove runs before the delete. It records the config hash device-controller has published,
+// and for applied it makes sure the robot is reachable before anything is removed. A removal that
+// hands the item to a git copy (a dry run says so) needs no robot, it is followed in the published view.
+func (w *waiter) prepareRemove(ctx context.Context, target, id string, g *goneItem) error {
+	v, _, err := w.fl.ConfigTarget(ctx, target)
+	if err != nil {
+		return classify(err)
+	}
+	g.device, w.device = v.Target.Device, v.Target.Device
+	if v.Published != nil {
+		g.hash = v.Published.Hash
+	}
 	if w.level != waitApplied && w.level != waitReady {
+		return nil
+	}
+	pre, _, err := w.fl.RemoveLocalItem(ctx, target, id, true)
+	if err != nil {
+		return classify(removeNotFoundHint(err, target))
+	}
+	if pre.RevertsTo != nil || pre.Noop {
 		return nil
 	}
 	ctx = w.interruptible(ctx)
@@ -215,26 +277,56 @@ func stillLocal(v *api.ConfigTargetView, id string) bool {
 	return false
 }
 
-// waitGonePublished waits until the platform's configuration of the target no longer has the item
-// in its local layer.
+// winnerLayer is the layer of the effective resource id, "" when it is not effective.
+func winnerLayer(v *api.ConfigTargetView, id string) string {
+	for _, r := range v.Configuration.Effective {
+		if r.ID() == id {
+			return r.Layer
+		}
+	}
+	return ""
+}
+
+// waitGonePublished waits until device-controller has published a new config without the item: the
+// published hash differs from the one before the delete, and the item is no longer in the local
+// layer (with a git copy taking over, its layer wins).
 func (w *waiter) waitGonePublished(ctx context.Context, g *goneItem) error {
+	timeout := func() error {
+		return &stillThereError{fmt.Sprintf("device-controller has not published a new config for %s yet (after %s; last state: %s)", orDash(g.device), w.limit, orDash(w.lastLine))}
+	}
 	var tr transient
 	for {
 		v, _, err := w.fl.ConfigTarget(ctx, w.target)
 		if err != nil {
 			if ferr := tr.fail(err); ferr != nil {
+				if errors.Is(ferr, context.DeadlineExceeded) {
+					return timeout()
+				}
 				return ferr
 			}
 			w.progress("", "published: retrying after "+err.Error())
 		} else {
 			tr.ok()
 			w.lastView = v
-			if !stillLocal(v, g.id) {
+			hash := ""
+			if v.Published != nil {
+				hash = v.Published.Hash
+			}
+			switch {
+			case hash == g.hash:
+				w.progress("", "published: waiting for device-controller to publish a new config (still "+orDash(hash)+")")
+			case stillLocal(v, g.id):
+				w.progress("", "published: "+g.id+" is still in the robot's local configuration")
+			case g.revertsTo != "" && winnerLayer(v, g.id) != g.revertsTo:
+				w.progress("", fmt.Sprintf("published: waiting for the %s copy of %s to win (it is %s)", g.revertsTo, g.id, orDash(winnerLayer(v, g.id))))
+			default:
 				return nil
 			}
-			w.progress("", "published: "+g.id+" is still in the robot's local configuration")
 		}
 		if err := w.pause(ctx); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return timeout()
+			}
 			return err
 		}
 	}
