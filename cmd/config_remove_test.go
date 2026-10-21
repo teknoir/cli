@@ -683,9 +683,18 @@ func TestShownID(t *testing.T) {
 		"Deployment/default/whoami":     "Deployment/default/whoami",
 		"HelmChart/kube-system/traefik": "HelmChart/kube-system/traefik",
 		"whoami":                        "whoami",
+		"ClusterRole//x":                "ClusterRole//x",
+		"app:https://host#":             "app:https://host#",
 	} {
 		if got := shownID(in); got != want {
 			t.Errorf("shownID(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// what is printed is what config remove and edit accept
+	known := []string{"Namespace/default/la-test", "Namespace/default/la", "ConfigMap/la-test/settings"}
+	for _, id := range known {
+		if got, err := resolveResourceArg(shownID(id), known); err != nil || got != id {
+			t.Errorf("%s printed as %s resolves to %q, %v", id, shownID(id), got, err)
 		}
 	}
 }

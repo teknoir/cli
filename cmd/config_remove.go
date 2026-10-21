@@ -364,9 +364,9 @@ func (w *waiter) waitGonePublished(ctx context.Context, g *goneItem) error {
 			case hash == g.hash:
 				w.progress("", "published: waiting for device-controller to publish a new config (still "+orDash(hash)+")")
 			case stillLocal(v, g.id):
-				w.progress("", "published: "+g.id+" is still in the robot's local configuration")
+				w.progress("", "published: "+shownID(g.id)+" is still in the robot's local configuration")
 			case g.revertsTo != "" && winnerLayer(v, g.id) != g.revertsTo:
-				w.progress("", fmt.Sprintf("published: waiting for the %s copy of %s to win (it is %s)", g.revertsTo, g.id, orDash(winnerLayer(v, g.id))))
+				w.progress("", fmt.Sprintf("published: waiting for the %s copy of %s to win (it is %s)", g.revertsTo, shownID(g.id), orDash(winnerLayer(v, g.id))))
 			default:
 				return nil
 			}
@@ -450,7 +450,7 @@ func (w *waiter) waitGoneDevice(ctx context.Context, g *goneItem) error {
 				w.progress(g.id, r.msg)
 				return nil
 			case checkFatal:
-				return newErr(codeError, "%s: %s", g.id, r.msg)
+				return newErr(codeError, "%s: %s", shownID(g.id), r.msg)
 			}
 			w.progress(g.id, r.msg)
 		} else {

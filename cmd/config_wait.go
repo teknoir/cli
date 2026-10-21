@@ -436,9 +436,9 @@ func (w *waiter) waitDevice(ctx context.Context, info writeInfo) error {
 				c.finished = true
 				w.progress(c.id, res.msg)
 			case checkUnhealthy:
-				return newErr(codeUnhealthy, "%s: %s", c.id, res.msg)
+				return newErr(codeUnhealthy, "%s: %s", shownID(c.id), res.msg)
 			case checkFatal:
-				return newErr(codeError, "%s: %s", c.id, res.msg)
+				return newErr(codeError, "%s: %s", shownID(c.id), res.msg)
 			default:
 				w.progress(c.id, res.msg)
 				remaining++

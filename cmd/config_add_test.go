@@ -1002,6 +1002,7 @@ func TestDropPendingNamespaceIssuesReadsCodeAndText(t *testing.T) {
 		"a code-aware platform without the code": {Severity: "error", Path: "metadata.namespace", Code: "other", Message: known},
 		"too late":                               {Severity: "error", Path: "metadata.namespace", Message: "Namespace 'la-test' is not known to exist on this robot, and a Namespace item added for it would come too late"},
 		"another namespace":                      {Severity: "error", Path: "metadata.namespace", Message: strings.ReplaceAll(known, "la-test", "other")},
+		"a namespace that starts with this one":  {Severity: "error", Path: "metadata.namespace", Message: strings.ReplaceAll(known, "la-test", "la-test-2")},
 		"another field":                          {Severity: "error", Path: "metadata.name", Code: api.IssueNamespaceUnknown, Message: known},
 	} {
 		if res := run(is); len(res.Validation.Issues) != 1 || res.Validation.Verdict != api.VerdictInvalid {
@@ -1024,6 +1025,23 @@ func TestConfigAddDryRunOnAPlatformWithoutIssueCodes(t *testing.T) {
 	out, errs, err := runCLI(t, e, "config", "add", "vision-station-01", "--dry-run", "-f", tempFile(t, "a.yaml", deployIn("llm-ns")+"---\n"+nsYAML))
 	if err != nil || strings.Contains(errs, "error:") || !strings.Contains(out, "would add Deployment/llm-ns/llm") || strings.Contains(out, "unchanged") {
 		t.Errorf("%v\n%s\n%s", err, out, errs)
+	}
+}
+
+func TestDropPendingNamespaceIssuesKeepsAValidUnchanged(t *testing.T) {
+	// only a warning about the namespace: the verdict was valid and the item really is unchanged
+	d := localDoc{kind: "ConfigMap", ns: "la", name: "settings"}
+	res := &api.LocalWriteResult{Action: api.LocalActionUnchanged, Validation: api.LocalValidation{Verdict: api.VerdictValid},
+		Warnings: []string{"Nothing in this robot's configuration creates the namespace la. Add a Namespace item for it unless it already exists on the robot."}}
+	if got := dropPendingNamespaceIssues(res, d, map[string]bool{"la": true}); len(got) != 1 || len(res.Warnings) != 0 || res.Action != api.LocalActionUnchanged {
+		t.Errorf("%v %+v", got, res)
+	}
+	// a finding about la-test is not one about la
+	if namespaceMissing("Namespace 'la-test' is not known to exist on this robot.", "la") {
+		t.Error("la matched la-test")
+	}
+	if !namespaceMissing("Namespace 'la' is not known to exist on this robot.", "la") || !namespaceMissing("namespace la does not exist", "la") {
+		t.Error("la must match its own finding")
 	}
 }
 
