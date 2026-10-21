@@ -146,7 +146,7 @@ func (f *Fleet) DeleteAllOverrides(ctx context.Context, target string) (*Overrid
 // removed; the result says what would be.
 func (f *Fleet) RemoveLocalItem(ctx context.Context, target, id string, dryRun bool) (*LocalRemoveResult, json.RawMessage, error) {
 	r, raw, err := decode[LocalRemoveResult](f.Do(ctx, "DELETE", configPath(target, "local"), writeQuery(id, dryRun), nil))
-	return &r, raw, err
+	return &r, raw, noLocalAPI(err, featureLocalRemove)
 }
 
 // Promote returns the overlay YAML and GitHub links to commit a resource's override to git.

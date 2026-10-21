@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -112,5 +113,49 @@ func TestIsSecretRequest(t *testing.T) {
 		if got := isSecretRequest(c.method, c.url); got != c.want {
 			t.Errorf("%s %s: %v", c.method, c.url, got)
 		}
+	}
+}
+
+func TestFleetLocalOnOlderPlatform(t *testing.T) {
+	ctx := context.Background()
+	unsupported := func(t *testing.T, what string, err error, feature string) {
+		t.Helper()
+		var up *UnsupportedPlatformError
+		if !errors.As(err, &up) || up.Feature != feature || !strings.Contains(err.Error(), "this platform cannot "+feature+" yet") {
+			t.Errorf("%s: want *UnsupportedPlatformError for %q, got %T %v", what, feature, err, err)
+		}
+	}
+	// a device backend without the local routes answers a bare 404: empty, or Express' HTML page
+	for _, body := range []string{"", "<!DOCTYPE html><pre>Cannot PUT /api/device/fleet/x</pre>"} {
+		f, _ := fleetServer(t, 404, body)
+		_, _, err := f.LocalKinds(ctx)
+		unsupported(t, "kinds", err, featureLocalAdd)
+		_, _, err = f.LocalItem(ctx, "vs", "ConfigMap/default/x")
+		unsupported(t, "item", err, featureLocalAdd)
+		_, _, err = f.PutLocalItem(ctx, "vs", LocalWriteRequest{Manifest: "x"}, false)
+		unsupported(t, "put", err, featureLocalAdd)
+		_, _, err = f.RemoveLocalItem(ctx, "vs", "ConfigMap/default/x", false)
+		unsupported(t, "remove", err, featureLocalRemove)
+	}
+	// the platform's own 404 (an unknown robot or item) keeps its message
+	f, _ := fleetServer(t, 404, `{"error":{"name":"NotFoundError","message":"no robot or device vs"}}`)
+	for what, call := range map[string]func() error{
+		"item": func() error { _, _, err := f.LocalItem(ctx, "vs", "ConfigMap/default/x"); return err },
+		"put": func() error {
+			_, _, err := f.PutLocalItem(ctx, "vs", LocalWriteRequest{Manifest: "x"}, false)
+			return err
+		},
+		"remove": func() error { _, _, err := f.RemoveLocalItem(ctx, "vs", "ConfigMap/default/x", false); return err },
+	} {
+		var ae *Error
+		if err := call(); !errors.As(err, &ae) || ae.Status != 404 || !strings.Contains(err.Error(), "no robot or device vs") {
+			t.Errorf("%s own 404: %T %v", what, err, err)
+		}
+	}
+	// other bare errors stay what they are
+	f, _ = fleetServer(t, 500, "")
+	var ae *Error
+	if _, _, err := f.LocalKinds(ctx); !errors.As(err, &ae) || ae.Status != 500 {
+		t.Errorf("500: %T %v", err, err)
 	}
 }
