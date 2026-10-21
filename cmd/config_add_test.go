@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1069,5 +1070,23 @@ func TestConfigAddFailureNamesTheNamespaceThatWasWritten(t *testing.T) {
 	_, _, err := runCLI(t, e, "config", "add", "vision-station-01", "-f", tempFile(t, "s.yaml", in))
 	if exitCodeOf(err) != codeConflict || !strings.Contains(err.Error(), "document 1 (line 1, Deployment/llm)") || !strings.Contains(err.Error(), "written before it: Namespace/llm-ns") {
 		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestPrintIssuesInFileOrder(t *testing.T) {
+	var b bytes.Buffer
+	v := api.LocalValidation{Verdict: api.VerdictInvalid, Issues: []api.LocalValidationIssue{
+		{Severity: "error", Message: "c", Line: 19, Column: 11},
+		{Severity: "error", Message: "a", Line: 7, Column: 13},
+		{Severity: "error", Message: "whole document"},
+		{Severity: "error", Message: "b", Line: 17, Column: 17},
+		{Severity: "error", Message: "b0", Line: 17, Column: 3},
+	}}
+	if n := printIssues(&b, "f.yaml", localDoc{line: 1, index: 1}, false, v); n != 5 {
+		t.Fatalf("errors %d", n)
+	}
+	want := "f.yaml: error: whole document\nf.yaml:7:13: error: a\nf.yaml:17:3: error: b0\nf.yaml:17:17: error: b\nf.yaml:19:11: error: c\n"
+	if b.String() != want {
+		t.Errorf("got\n%swant\n%s", b.String(), want)
 	}
 }

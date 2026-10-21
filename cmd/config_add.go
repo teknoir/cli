@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -527,7 +528,7 @@ func localResultLine(res *api.LocalWriteResult, d localDoc, target string) strin
 // line translated from the document to the file. It returns the number of errors.
 func printIssues(w io.Writer, file string, d localDoc, multi bool, v api.LocalValidation) int {
 	errs := 0
-	for _, is := range v.Issues {
+	for _, is := range byPosition(v.Issues) {
 		if is.Severity != "warning" {
 			errs++
 		}
@@ -538,6 +539,19 @@ func printIssues(w io.Writer, file string, d localDoc, multi bool, v api.LocalVa
 		fmt.Fprintln(w, formatIssue(file, d.line-1, multi, d.index, is))
 	}
 	return errs
+}
+
+// byPosition returns the findings in the order of the file (line, then column), the way a compiler
+// lists them; findings without a position come first, in the platform's order.
+func byPosition(issues []api.LocalValidationIssue) []api.LocalValidationIssue {
+	out := append([]api.LocalValidationIssue(nil), issues...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Line != out[j].Line {
+			return out[i].Line < out[j].Line
+		}
+		return out[i].Column < out[j].Column
+	})
+	return out
 }
 
 // formatIssue renders one finding. offset is added to the line the platform reported.
