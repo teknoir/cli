@@ -33,7 +33,9 @@ Typical loop for developing on one robot:
   tnctl config set vision-station-01 notebook replicas=2 log.level=debug --wait=applied
   tnctl config diff vision-station-01                                   what differs from git
   tnctl config reset vision-station-01 --all                            back to git
-  tnctl config remove vision-station-01 local-llm                       delete a local item (written by Devstudio)
+  tnctl config add vision-station-01 -f whoami.yaml --wait=applied      add a local resource (any supported kind)
+  tnctl config edit vision-station-01 Deployment/default/whoami         edit a local item in $EDITOR, checked
+  tnctl config remove vision-station-01 local-llm                       delete a local item
   tnctl config promote vision-station-01 notebook                       the YAML to commit when it works
 
 --wait[=LEVEL] on a write follows the change; without it the command returns as soon as the
@@ -61,10 +63,11 @@ Exit codes:
   2  usage: bad arguments or flags, ambiguous resource name
   3  not found: no such robot, device or resource
   4  timeout: --wait ran out of time (the change itself is written)
-  5  rejected: the platform refused it (invalid values, unknown revision, no such target, not overridable)
+  5  rejected: the platform refused it (invalid values or manifest, unknown revision, no such target, not overridable)
   6  not logged in, token rejected, or not allowed (run tnctl login)
   7  applied but unhealthy: the helm Job failed or pods crash or cannot pull the image
-  8  conflict: someone else changed the same thing; run the command again
+  8  conflict: someone else changed the same thing (run the command again), or the item exists already,
+     or it is not local ('add', 'edit', 'remove')
   9  rate limited: too many writes; wait the Retry-After time (-o json: error.retryAfter, seconds)`
 
 func newConfigCmd(e *cliEnv) *cobra.Command {
@@ -78,7 +81,7 @@ func newConfigCmd(e *cliEnv) *cobra.Command {
 	}
 	c.AddCommand(
 		newConfigGetCmd(e), newConfigSetCmd(e), newConfigUnsetCmd(e), newConfigDeleteCmd(e),
-		newConfigResetCmd(e), newConfigRemoveCmd(e), newConfigTryCmd(e), newConfigUntryCmd(e), newConfigDiffCmd(e),
+		newConfigResetCmd(e), newConfigAddCmd(e), newConfigEditCmd(e), newConfigKindsCmd(e), newConfigRemoveCmd(e), newConfigTryCmd(e), newConfigUntryCmd(e), newConfigDiffCmd(e),
 		newConfigWaitCmd(e), newConfigLinksCmd(e), newConfigPromoteCmd(e),
 	)
 	return c
@@ -106,7 +109,7 @@ func argsRange(min, max int, usage string) cobra.PositionalArgs {
 // ---------- config get ----------
 
 type getFlags struct {
-	layers, provenance, rendered, overrides, defaults bool
+	layers, provenance, rendered, overrides, defaults, manifest bool
 }
 
 func newConfigGetCmd(e *cliEnv) *cobra.Command {
@@ -123,12 +126,16 @@ With a resource: its merged values, chart, images, links and override.
   --rendered     (resource) the item exactly as published to the device
   --overrides    only the overrides of the target (and the state the platform reports for them)
   --defaults     (resource) include the chart's own defaults at the pinned version
+  --manifest     (resource) the stored YAML of a local item, ready to edit and 'tnctl config add --replace'
+                 (or 'tnctl config edit'). Only local items have one: for an item from git the answer is
+                 exit 8 with a hint how to make a local copy.
 
 -o json prints the platform's full answer, which includes everything above.`,
 		Example: `  tnctl config get vision-station-01
   tnctl config get vision-station-01 --overrides
   tnctl config get vision-station-01 HelmChart/default/notebook --provenance
   tnctl config get vision-station-01 notebook --rendered
+  tnctl config get vision-station-01 Deployment/default/whoami --manifest > whoami.yaml
   tnctl config get vision-station-01 notebook -o json`,
 		Args: argsRange(1, 2, "get needs a robot or device name and optionally a resource, for example: tnctl config get vision-station-01 notebook"),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -136,8 +143,11 @@ With a resource: its merged values, chart, images, links and override.
 			if err != nil {
 				return err
 			}
-			if len(args) == 1 && (f.provenance || f.rendered || f.defaults) {
-				return usageErr("--provenance, --rendered and --defaults need a resource: tnctl config get %s <resource>", args[0])
+			if len(args) == 1 && (f.provenance || f.rendered || f.defaults || f.manifest) {
+				return usageErr("--provenance, --rendered, --defaults and --manifest need a resource: tnctl config get %s <resource>", args[0])
+			}
+			if f.manifest && (f.layers || f.provenance || f.rendered || f.overrides || f.defaults) {
+				return usageErr("--manifest prints the stored item and cannot be combined with the other views")
 			}
 			cmd.SilenceUsage = true
 			fl, _, _, err := e.targetClient()
@@ -162,6 +172,9 @@ With a resource: its merged values, chart, images, links and override.
 			if err != nil {
 				return classify(err)
 			}
+			if f.manifest {
+				return printManifest(cmd, fl, format, target, id, args[1])
+			}
 			d, raw, err := fl.ConfigResource(ctx, target, id, f.defaults)
 			if err != nil {
 				return classify(err)
@@ -177,6 +190,7 @@ With a resource: its merged values, chart, images, links and override.
 	c.Flags().BoolVar(&f.rendered, "rendered", false, "(resource) show the item as published to the device")
 	c.Flags().BoolVar(&f.overrides, "overrides", false, "show only the overrides")
 	c.Flags().BoolVar(&f.defaults, "defaults", false, "(resource) include the chart's defaults")
+	c.Flags().BoolVar(&f.manifest, "manifest", false, "(resource) the stored YAML of a local item, ready to edit")
 	return c
 }
 

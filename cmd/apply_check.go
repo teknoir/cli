@@ -122,7 +122,13 @@ func helmJobLogScript(ns, name string) string {
 }
 
 // kubectlResource is the kubectl resource name of a kind.
-func kubectlResource(kind string) string { return strings.ToLower(kind) }
+func kubectlResource(kind string) string {
+	switch kind {
+	case "HelmChart", "HelmChartConfig":
+		return strings.ToLower(kind) + "s.helm.cattle.io"
+	}
+	return strings.ToLower(kind)
+}
 
 func workloadProbeScript(kind, ns, name string) string {
 	var b strings.Builder

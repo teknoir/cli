@@ -54,6 +54,9 @@ type Error struct {
 	Message string
 	// RetryAfter is the Retry-After header of a 429, in seconds (0: none).
 	RetryAfter int
+	// Body is the response body of the failed request (at most the size the client reads), for
+	// callers that know a richer error shape, such as a 422 that carries a validation result.
+	Body []byte
 }
 
 // KindAuth marks an Error that needs a login (Error.Kind): no login, an expired or rejected token,
@@ -183,7 +186,7 @@ func isSecretRoute(rawURL string) bool {
 
 // errorFromResponse builds the Error of a non-2xx response.
 func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) *Error {
-	e := &Error{Method: method, URL: stripQuery(rawURL), Status: resp.StatusCode}
+	e := &Error{Method: method, URL: stripQuery(rawURL), Status: resp.StatusCode, Body: body}
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		loc := resp.Header.Get("Location")
 		if strings.Contains(loc, "/oauth2/") {
