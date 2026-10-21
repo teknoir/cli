@@ -53,7 +53,7 @@ func runPortForwardWireGuard(cmd *cobra.Command, fl *api.Fleet, domain, ns, dev,
 		domain: domain, namespace: ns, device: dev, service: service, localPort: local,
 		hubURL: hub, turnServer: turn, p2p: !pfNoP2P,
 	}
-	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer stop()
 	web := func(c context.Context) bool {
 		svcs, err := fleetServices(c, fl, dev)
@@ -98,7 +98,7 @@ var wgStatusCmd = &cobra.Command{
 		}
 		hub, turn := hubSettings(wgStatusHubURL, wgStatusTURNServer, domain)
 		o := wgStatusOptions{domain: domain, namespace: ns, device: dev, hubURL: hub, turnServer: turn, p2p: !wgStatusNoP2P}
-		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 		defer stop()
 		lookup := func(c context.Context) ([]wgapi.ServiceSpec, error) { return fleetServices(c, fl, dev) }
 		if code := runWGStatus(ctx, o, newWGCredential(domain), nil, lookup, os.Stdout, os.Stderr); code != wgExitOK {
