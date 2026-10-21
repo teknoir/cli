@@ -237,7 +237,7 @@ func (e *cliEnv) runEdit(cmd *cobra.Command, target, resArg string, wf *waitFlag
 		}
 		var problems []api.LocalValidationIssue
 		var extra []string
-		for _, is := range res.Validation.Issues {
+		for _, is := range byPosition(res.Validation.Issues) {
 			if is.Severity != "warning" {
 				problems = append(problems, is)
 			}
