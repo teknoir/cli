@@ -114,3 +114,23 @@ func TestIsSecretRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestFleetLocalOnOlderPlatform(t *testing.T) {
+	ctx := context.Background()
+	// a device backend without the local routes answers a bare 404
+	f, _ := fleetServer(t, 404, "")
+	if _, _, err := f.LocalKinds(ctx); err == nil || !strings.Contains(err.Error(), "device backend is older than this tnctl") {
+		t.Errorf("kinds: %v", err)
+	}
+	if _, _, err := f.LocalItem(ctx, "vs", "ConfigMap/default/x"); err == nil || !strings.Contains(err.Error(), "older than this tnctl") {
+		t.Errorf("item: %v", err)
+	}
+	if _, _, err := f.PutLocalItem(ctx, "vs", LocalWriteRequest{Manifest: "x"}, true); err == nil || !strings.Contains(err.Error(), "older than this tnctl") {
+		t.Errorf("put: %v", err)
+	}
+	// the platform's own 404 (an unknown robot) keeps its message
+	f, _ = fleetServer(t, 404, `{"error":{"name":"NotFoundError","message":"no robot or device vs"}}`)
+	if _, _, err := f.LocalItem(ctx, "vs", "ConfigMap/default/x"); err == nil || !strings.Contains(err.Error(), "no robot or device vs") || strings.Contains(err.Error(), "older") {
+		t.Errorf("own 404: %v", err)
+	}
+}
