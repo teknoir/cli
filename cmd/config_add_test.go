@@ -337,9 +337,21 @@ func TestConfigAddDryRun(t *testing.T) {
 	if out != "would leave Deployment/default/whoami unchanged on vision-station-01 (already as given)\n" {
 		t.Errorf("%q", out)
 	}
+	// without --replace, a dry run that answers "replace" is the 409 a real write would get: exit 8
+	p.on("PUT", addPath, 200, writeResult(whoamiID, "replace", true, nil, nil, "A local Deployment default/whoami already exists on vision-station-01; saving replaces it."))
+	out, errs, err := runCLI(t, e, "config", "add", "vision-station-01", "-f", f, "--dry-run")
+	if exitCodeOf(err) != codeConflict || out != "would replace Deployment/default/whoami on vision-station-01\n" ||
+		err.Error() != f+": an item with this identity exists; use --replace to replace it" || !strings.Contains(errs, "warning: A local Deployment") {
+		t.Errorf("exit %d err %v\nout %q\n%s", exitCodeOf(err), err, out, errs)
+	}
+	// with --replace the same answer is fine
+	out, _, err = runCLI(t, e, "config", "add", "vision-station-01", "-f", f, "--dry-run", "--replace")
+	if err != nil || out != "would replace Deployment/default/whoami on vision-station-01\n" {
+		t.Errorf("%v %q", err, out)
+	}
 	// a dry run always answers 200; an invalid verdict is still a failure (exit 5)
 	p.on("PUT", addPath, 200, writeResult(whoamiID, "create", true, nil, []issue{{Severity: "error", Message: "bad", Line: 1, Column: 1}}))
-	_, errs, err := runCLI(t, e, "config", "add", "vision-station-01", "-f", f, "--dry-run")
+	_, errs, err = runCLI(t, e, "config", "add", "vision-station-01", "-f", f, "--dry-run")
 	if exitCodeOf(err) != codeRejected || !strings.Contains(errs, f+":1:1: error: bad") {
 		t.Errorf("exit %d\n%s", exitCodeOf(err), errs)
 	}
@@ -775,4 +787,31 @@ func TestFormatIssue(t *testing.T) {
 		t.Error(got)
 	}
 	_ = fmt.Sprint
+}
+
+func TestConfigAddColumnsOnDocumentMarkerLine(t *testing.T) {
+	// "--- kind: x" puts the document's first line after the marker: columns on that line shift by the marker
+	p := newFakePlatform(t)
+	p.on("PUT", addPath, 422, writeResult("ConfigMap/default/cfg", "create", true, nil, []issue{
+		{Severity: "error", Message: "kind: bad", Line: 1, Column: 7},
+		{Severity: "error", Message: "second line", Line: 2, Column: 3},
+	}))
+	e, _ := testEnv(t, p, nil)
+	f := tempFile(t, "m.yaml", "# top\n---  kind: ConfigMap\nmetadata:\n  name: cfg\n")
+	_, errs, err := runCLI(t, e, "config", "add", "vision-station-01", "-f", f, "--dry-run")
+	if exitCodeOf(err) != codeRejected {
+		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+	}
+	// "---  " is 5 characters; the first line is file line 2
+	for _, frag := range []string{f + ":2:12: error: kind: bad", f + ":3:3: error: second line"} {
+		if !strings.Contains(errs, frag) {
+			t.Errorf("stderr lacks %q:\n%s", frag, errs)
+		}
+	}
+	if d := splitDocs("--- kind: x\n"); len(d) != 1 || d[0].prefix != 4 {
+		t.Errorf("prefix: %+v", d)
+	}
+	if d := splitDocs("--- # c\nkind: x\n"); len(d) != 1 || d[0].prefix != 0 {
+		t.Errorf("comment marker: %+v", d)
+	}
 }

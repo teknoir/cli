@@ -79,7 +79,10 @@ type localDoc struct {
 	index int
 	// line is the line of the input where the text starts, from 1.
 	line int
-	text string
+	// prefix is the number of characters before the text on its first line: the "--- " of a
+	// "--- kind: x" line. Columns the platform reports on the first line are shifted by it.
+	prefix int
+	text   string
 	// kind, ns and name are read from the text without the platform (empty when it does not parse).
 	kind, ns, name string
 }
@@ -95,13 +98,14 @@ func splitDocs(data string) []localDoc {
 	var docs []localDoc
 	var buf strings.Builder
 	start := 1
+	prefix := 0
 	flush := func() {
 		text := buf.String()
 		buf.Reset()
 		if !hasContent(text) {
 			return
 		}
-		d := localDoc{index: len(docs) + 1, line: start, text: text}
+		d := localDoc{index: len(docs) + 1, line: start, prefix: prefix, text: text}
 		d.kind, d.ns, d.name = docIdentity(text)
 		docs = append(docs, d)
 	}
@@ -110,10 +114,13 @@ func splitDocs(data string) []localDoc {
 		if m := docSeparator.FindStringSubmatch(strings.TrimRight(line, "\r\n")); m != nil {
 			flush()
 			start = i + 2
+			prefix = 0
 			// Content after the --- belongs to the new document and starts on this very line.
 			if rest := strings.TrimSpace(m[1]); rest != "" && !strings.HasPrefix(rest, "#") {
 				start = i + 1
-				buf.WriteString(strings.TrimLeft(m[1], " \t") + lineEnd(line))
+				content := strings.TrimLeft(m[1], " \t")
+				prefix = len("---") + len(m[1]) - len(content)
+				buf.WriteString(content + lineEnd(line))
 			}
 			continue
 		}
@@ -301,6 +308,15 @@ func (s *session) putLocal(ctx context.Context, file string, docs []localDoc, re
 		if s.format == "table" {
 			fmt.Fprintln(s.cmd.OutOrStdout(), localResultLine(res, d, s.target))
 		}
+		if s.dryRun && !replace && res.Action == api.LocalActionReplace {
+			// The same write without --replace would be refused (409), so say so now.
+			msg := file + ": "
+			if len(docs) > 1 {
+				msg += d.where() + ": "
+			}
+			run.err = newErr(codeConflict, "%san item with this identity exists; use --replace to replace it", msg)
+			return run
+		}
 		if !s.dryRun {
 			a, err := newAddedItem(res, d)
 			if err != nil {
@@ -382,6 +398,10 @@ func printIssues(w io.Writer, file string, d localDoc, multi bool, v api.LocalVa
 	for _, is := range v.Issues {
 		if is.Severity != "warning" {
 			errs++
+		}
+		is := is
+		if is.Line == 1 && is.Column > 0 {
+			is.Column += d.prefix
 		}
 		fmt.Fprintln(w, formatIssue(file, d.line-1, multi, d.index, is))
 	}
