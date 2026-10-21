@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/teknoir/cli/pkg/auth"
@@ -242,5 +244,25 @@ func TestWGProxyRefusesForeignHubAndBadConfig(t *testing.T) {
 	o = goodOpts("http://127.0.0.1:9", t.TempDir())
 	if err := o.validate(); err != nil {
 		t.Fatalf("loopback refused: %v", err)
+	}
+}
+
+func TestWGSignalsKeepNohup(t *testing.T) {
+	has := func(sigs []os.Signal, s os.Signal) bool {
+		for _, x := range sigs {
+			if x == s {
+				return true
+			}
+		}
+		return false
+	}
+	if s := wgSignals(); !has(s, syscall.SIGINT) || !has(s, syscall.SIGTERM) || !has(s, syscall.SIGHUP) {
+		t.Fatalf("a closed terminal must end the command cleanly: %v", s)
+	}
+	// under nohup SIGHUP is ignored, and port-forward must keep running
+	signal.Ignore(syscall.SIGHUP)
+	defer signal.Reset(syscall.SIGHUP)
+	if s := wgSignals(); has(s, syscall.SIGHUP) {
+		t.Errorf("an ignored SIGHUP must stay ignored: %v", s)
 	}
 }

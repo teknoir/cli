@@ -53,7 +53,7 @@ func runPortForwardWireGuard(cmd *cobra.Command, fl *api.Fleet, domain, ns, dev,
 		domain: domain, namespace: ns, device: dev, service: service, localPort: local,
 		hubURL: hub, turnServer: turn, p2p: !pfNoP2P,
 	}
-	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+	ctx, stop := signal.NotifyContext(cmd.Context(), wgSignals()...)
 	defer stop()
 	web := func(c context.Context) bool {
 		svcs, err := fleetServices(c, fl, dev)
@@ -98,7 +98,7 @@ var wgStatusCmd = &cobra.Command{
 		}
 		hub, turn := hubSettings(wgStatusHubURL, wgStatusTURNServer, domain)
 		o := wgStatusOptions{domain: domain, namespace: ns, device: dev, hubURL: hub, turnServer: turn, p2p: !wgStatusNoP2P}
-		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+		ctx, stop := signal.NotifyContext(cmd.Context(), wgSignals()...)
 		defer stop()
 		lookup := func(c context.Context) ([]wgapi.ServiceSpec, error) { return fleetServices(c, fl, dev) }
 		if code := runWGStatus(ctx, o, newWGCredential(domain), nil, lookup, os.Stdout, os.Stderr); code != wgExitOK {
@@ -115,4 +115,15 @@ func init() {
 	f.BoolVar(&wgStatusNoP2P, "no-p2p", false, "skip the direct-path attempt")
 	f.StringVar(&wgStatusTURNServer, "turn-server", "", "TURN server host:port overriding the hub's (env TNCTL_WG_TURN_SERVER)")
 	f.StringVar(&wgStatusHubURL, "wg-hub-url", "", "WireGuard hub URL (default https://wg.<domain>, env TNCTL_WG_HUB)")
+}
+
+// wgSignals are the signals that end a WireGuard command cleanly (closing its hub session): SIGINT,
+// SIGTERM, and SIGHUP (the terminal closed) unless it is ignored, so that 'nohup tnctl port-forward'
+// keeps running.
+func wgSignals() []os.Signal {
+	sigs := []os.Signal{syscall.SIGTERM, syscall.SIGINT}
+	if !signal.Ignored(syscall.SIGHUP) {
+		sigs = append(sigs, syscall.SIGHUP)
+	}
+	return sigs
 }

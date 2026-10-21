@@ -82,7 +82,15 @@ var wgProxyCmd = &cobra.Command{
 			o.hubURL = defaultHubURL(o.domain)
 		}
 
-		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+		// ssh ends its ProxyCommand with SIGHUP when the connection closes. Caught, it ends the
+		// relay and the deferred Close tells the hub; uncaught, the process dies first and the
+		// hub keeps the session until it expires, so a few quick ssh/exec calls in a row hit the
+		// per-device session limit. A write to stdout after ssh has gone must not kill it
+		// either: with SIGPIPE ignored the write fails and the relay ends normally. (A hangup
+		// before the tunnel's handshake still leaves the session to expire: the hub cannot be
+		// told without the tunnel.)
+		signal.Ignore(syscall.SIGPIPE)
+		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 		defer stop()
 
 		// The token is read from ~/.tnctl.yaml (and refreshed) on every call,
