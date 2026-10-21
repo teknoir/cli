@@ -505,6 +505,7 @@ func localResultLine(res *api.LocalWriteResult, d localDoc, target string) strin
 	if id == "" {
 		id = d.label()
 	}
+	id = shownID(id)
 	switch {
 	case res.Action == api.LocalActionUnchanged && res.DryRun:
 		return fmt.Sprintf("would leave %s unchanged on %s (already as given)", id, target)

@@ -154,7 +154,7 @@ func (w *waiter) progress(key, msg string) {
 		fmt.Fprintf(w.errw, "  %s\n", msg)
 		return
 	}
-	fmt.Fprintf(w.errw, "  %s: %s\n", key, msg)
+	fmt.Fprintf(w.errw, "  %s: %s\n", shownID(key), msg)
 }
 
 func (w *waiter) shell(ctx context.Context) (deviceExec, error) {

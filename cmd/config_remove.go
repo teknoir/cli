@@ -170,8 +170,9 @@ func (e *cliEnv) confirmNamespaceRemoval(cmd *cobra.Command, s *session, target,
 // printRemoveResult is the table-mode answer of a removal.
 func printRemoveResult(out io.Writer, res *api.LocalRemoveResult, id, target string) {
 	if res.ID != "" {
-		id = res.ID // the platform's spelling, Namespace//name for a cluster-scoped item
+		id = res.ID
 	}
+	id = shownID(id)
 	switch {
 	case res.Noop && res.DryRun:
 		fmt.Fprintf(out, "Nothing to remove: %s is not in %s.\n", id, target)
@@ -406,10 +407,10 @@ func evalGone(g *goneItem, out string) checkResult {
 		if strings.HasPrefix(strings.ToLower(have), "error") {
 			return pending("cannot read %s on the device: %s", g.kind, firstNonEmptyLine(have))
 		}
-		return pending("%s is still on the robot", g.id)
+		return pending("%s is still on the robot", shownID(g.id))
 	}
 	if g.kind != "HelmChart" {
-		return done("%s is gone from the robot", g.id)
+		return done("%s is gone from the robot", shownID(g.id))
 	}
 	rel := strings.TrimSpace(secs["release"])
 	if sudoProblem(rel) {
@@ -428,7 +429,7 @@ func evalGone(g *goneItem, out string) checkResult {
 	if len(found) > 0 {
 		return pending("the HelmChart is gone, helm release %s is still installed in namespace %s (%d release secret(s)); waiting for helm-controller to uninstall it", g.name, g.targetNS, len(found))
 	}
-	return done("%s is gone from the robot and its helm release is uninstalled", g.id)
+	return done("%s is gone from the robot and its helm release is uninstalled", shownID(g.id))
 }
 
 // waitGoneDevice waits until the item is gone on the robot. When it stays, the error says how to

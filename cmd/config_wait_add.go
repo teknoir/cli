@@ -242,9 +242,9 @@ func evalAddedApplied(c *devCheck, o obj) checkResult {
 	}
 	if c.kind == "HelmChartConfig" {
 		// The robot reinstalls the chart that this configures afterwards; that is not followed here.
-		return done("%s is on the robot (the chart it configures is reinstalled by the robot afterwards; not followed)", c.id)
+		return done("%s is on the robot (the chart it configures is reinstalled by the robot afterwards; not followed)", shownID(c.id))
 	}
-	return done("%s is on the robot", c.id)
+	return done("%s is on the robot", shownID(c.id))
 }
 
 // evalJobComplete judges a Job for ready: complete is done, failed is unhealthy.

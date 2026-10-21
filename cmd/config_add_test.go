@@ -877,7 +877,7 @@ func TestConfigAddSendsNamespacesFirstAndSaysSo(t *testing.T) {
 	if strings.Join(order, ",") != "Namespace/llm-ns,Deployment/llm" {
 		t.Errorf("order %v", order)
 	}
-	want := "sending Namespace llm-ns first, so it is stored before the resources in it (the platform decides the order on the robot)\nadded Namespace/default/llm-ns to vision-station-01\nadded Deployment/default/llm to vision-station-01\n"
+	want := "sending Namespace llm-ns first, so it is stored before the resources in it (the platform decides the order on the robot)\nadded Namespace/llm-ns to vision-station-01\nadded Deployment/default/llm to vision-station-01\n"
 	if out != want {
 		t.Errorf("stdout %q", out)
 	}
