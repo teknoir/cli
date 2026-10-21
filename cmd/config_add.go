@@ -38,7 +38,10 @@ refused ones; 'tnctl config kinds --template Deployment' prints a starter manife
 
   -f FILE          the manifest: YAML or JSON, - reads stdin. Several documents separated by --- are
                    added one by one, in order; the first failure stops the run (the documents before it
-                   are written) and decides the exit code.
+                   are written) and decides the exit code. Namespace documents are sent first (the
+                   platform refuses an unknown namespace, and a robot stops at the first item it cannot
+                   create); the output says so when that changes the order. A dry run does not write the
+                   Namespace, so it accepts the namespaces that a Namespace document of the file creates.
   --replace        overwrite a local item with the same identity (otherwise exit 8). Identical content
                    is "unchanged": nothing is written.
   --dry-run        check the manifest and say what would happen, write nothing
@@ -228,8 +231,92 @@ func (e *cliEnv) runAdd(cmd *cobra.Command, target string, f *addFlags) error {
 	if err != nil {
 		return err
 	}
+	docs, moved := namespacesFirst(docs)
+	if len(moved) > 0 {
+		note := fmt.Sprintf("sending Namespace %s first: the platform refuses a resource in a namespace that does not exist yet", strings.Join(moved, ", "))
+		if s.format == "table" {
+			fmt.Fprintln(cmd.OutOrStdout(), note)
+		} else {
+			fmt.Fprintln(cmd.ErrOrStderr(), "note:", note)
+		}
+	}
 	run := s.putLocal(cmd.Context(), fileLabel(f.file), docs, f.replace)
 	return s.finishLocal(run)
+}
+
+// namespacesFirst returns the documents with the Namespace documents in front (the order of the
+// others, and of the Namespaces among themselves, is kept), and the names of the Namespaces that were
+// moved forward: those that stood after another kind. Nothing is moved, and the list is empty, when
+// the file has no Namespace or they are in front already. Positions (index, line) stay those of the file.
+func namespacesFirst(docs []localDoc) (ordered []localDoc, moved []string) {
+	var nss, rest []localDoc
+	for _, d := range docs {
+		if d.kind == "Namespace" {
+			nss = append(nss, d)
+		} else {
+			rest = append(rest, d)
+		}
+	}
+	if len(nss) == 0 || len(rest) == 0 {
+		return docs, nil
+	}
+	seenOther := false
+	for _, d := range docs {
+		switch {
+		case d.kind != "Namespace":
+			seenOther = true
+		case seenOther:
+			moved = append(moved, d.label())
+		}
+	}
+	if len(moved) == 0 {
+		return docs, nil
+	}
+	for i, d := range moved {
+		moved[i] = strings.TrimPrefix(d, "Namespace/")
+	}
+	return append(nss, rest...), moved
+}
+
+// namespacesOf is the names of the namespaces that the Namespace documents of the input create.
+func namespacesOf(docs []localDoc) map[string]bool {
+	m := map[string]bool{}
+	for _, d := range docs {
+		if d.kind == "Namespace" && d.name != "" {
+			m[d.name] = true
+		}
+	}
+	return m
+}
+
+// dropPendingNamespaceIssues removes, from the answer to a dry run, the refusals of a namespace that
+// a Namespace document of the same file would create: a dry run writes nothing, so the platform does
+// not know the namespace yet, and a real run (Namespace first) would be accepted. It returns the
+// namespaces it let pass. When no error is left, the verdict becomes valid.
+func dropPendingNamespaceIssues(res *api.LocalWriteResult, d localDoc, created map[string]bool) []string {
+	if !created[d.ns] || d.kind == "Namespace" {
+		return nil
+	}
+	var kept []api.LocalValidationIssue
+	dropped := false
+	for _, is := range res.Validation.Issues {
+		if is.Path == "metadata.namespace" && is.Severity != "warning" {
+			dropped = true
+			continue
+		}
+		kept = append(kept, is)
+	}
+	if !dropped {
+		return nil
+	}
+	res.Validation.Issues = kept
+	for _, is := range kept {
+		if is.Severity != "warning" {
+			return []string{d.ns}
+		}
+	}
+	res.Validation.Verdict = api.VerdictValid
+	return []string{d.ns}
 }
 
 // checkDuplicateDocs refuses a file in which two documents are the same item: the second would
@@ -291,11 +378,18 @@ func (s *session) putLocal(ctx context.Context, file string, docs []localDoc, re
 		}
 	}
 	var added []*addedItem
+	created := namespacesOf(docs)
 	for _, d := range docs {
 		res, raw, err := s.fl.PutLocalItem(ctx, s.target, api.LocalWriteRequest{Manifest: d.text, Replace: replace}, s.dryRun)
 		if err != nil {
 			run.err = docError(err, d, len(docs) > 1, len(added), replace, func() bool { return s.localItemExists(ctx, d) })
 			return run
+		}
+		if s.dryRun {
+			if ns := dropPendingNamespaceIssues(res, d, created); len(ns) > 0 {
+				raw = withFields(raw, map[string]any{"validation": res.Validation})
+				fmt.Fprintf(errw, "note: namespace %s does not exist on %s yet; this file creates it with a Namespace document, which is sent first\n", ns[0], s.target)
+			}
 		}
 		run.outs = append(run.outs, localOutcome{doc: d, res: res, raw: raw})
 		for _, wn := range res.Warnings {

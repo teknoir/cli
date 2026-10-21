@@ -170,6 +170,15 @@ exit code is that failure's. Empty documents and comments are skipped. A `---` m
 next document (`--- kind: B`). Two documents that are the same `Kind/namespace/name` are refused with exit 2 before
 anything is sent, a dry run included.
 
+**Namespaces first.** The platform refuses a resource in a namespace that does not exist on the robot (an error
+at `metadata.namespace`), and a robot stops applying at the first item it cannot create. So when a file has a
+Namespace document and other documents, tnctl sends the Namespace documents first (the rest keep their order) and
+says so: `sending Namespace llm-ns first: ...` on stdout, or as `note:` on stderr with `-o json|yaml`. A file whose
+Namespaces are in front already is sent as it is, silently. Error positions and `document N` keep the numbers of
+your file, not the order of sending. A `--dry-run` writes nothing, so the platform does not know the new
+namespace yet: tnctl lets the `metadata.namespace` refusal pass for a namespace that a Namespace document of the
+same file creates (with a `note:`), and keeps every other refusal.
+
 | Result line | Meaning |
 | --- | --- |
 | `added <id> to <target>` | a new local item |
@@ -258,6 +267,7 @@ robot stops the robot's whole configuration from applying). The table is authori
 ```bash
 tnctl config remove vision-station-01 HelmChart/default/local-llm --dry-run
 tnctl config remove vision-station-01 local-llm --wait=applied
+tnctl config remove vision-station-01 Namespace/llm-ns --yes
 ```
 
 Removes a **local** item: an entry that a tool such as Devstudio wrote straight to the robot's device, shown in
@@ -266,6 +276,13 @@ The tool that wrote the item may write it again, so stop it first if it keeps co
 `--dry-run` shows the item that would go (secret values hidden) and removes nothing. Without `--dry-run` the
 result is `Removed <id> from <target>.`; `-o json` prints the platform's answer (`removed`, `owner`,
 `hadOverride`, `warnings`).
+
+**Removing a Namespace** deletes everything in it on the robot, not only what you added there. The platform
+answers with a warning that lists what would go. Without `--yes`, tnctl asks for a dry run, prints that warning
+(stderr) and the dry-run answer, removes nothing and exits 2 with `Removing Namespace <ns> deletes everything in it
+on the robot; repeat with --yes to confirm`. Repeat the command with `--yes` to remove it (the warning is printed
+again). `--dry-run` never needs `--yes`, an item that is already gone needs none, and `--yes` has no effect on
+other kinds. `Namespace/<name>` and the platform's own spelling `Namespace//<name>` both name the item.
 
 Items that come from git are not removed with `remove`. Asking for one gives exit 8 and the platform says where
 to remove it: git, the robot's apps, a fleet or the robot type. Overrides are not removed here either: use
