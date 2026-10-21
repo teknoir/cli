@@ -184,7 +184,7 @@ func renderedDiffers(a *addedItem, rendered map[string]any) string {
 func (w *waiter) addedCheck(a *addedItem) *devCheck {
 	c := &devCheck{id: a.id, kind: a.kind, ns: a.ns, name: a.name, added: true, stamp: a.stamp()}
 	if a.kind == "HelmChart" {
-		h := &expectedHelm{targetNS: a.ns, values: obj{}}
+		h := &expectedHelm{targetNS: a.ns, values: obj{}, stamp: a.stamp()}
 		if vc := digStr(a.item, "spec", "valuesContent"); vc != "" {
 			if v := parseValuesYAML(vc); v != nil {
 				h.values = v
@@ -239,6 +239,10 @@ func evalAddedApplied(c *devCheck, o obj) checkResult {
 		if gen, observed := digInt(o, "metadata", "generation"), digInt(o, "status", "observedGeneration"); gen > observed {
 			return pending("the controller has not seen generation %d yet (at %d)", gen, observed)
 		}
+	}
+	if c.kind == "HelmChartConfig" {
+		// The robot reinstalls the chart that this configures afterwards; that is not followed here.
+		return done("%s is on the robot (the chart it configures is reinstalled by the robot afterwards; not followed)", c.id)
 	}
 	return done("%s is on the robot", c.id)
 }

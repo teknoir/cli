@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/teknoir/cli/pkg/api"
+	"golang.org/x/term"
 )
 
 // ---------- config get --manifest ----------
@@ -61,6 +62,11 @@ Only local items can be edited, that is items that were added with 'tnctl config
 such as Devstudio. For an item from git the command answers with exit 8 and shows how to make a local copy.
 The kind, namespace and name cannot change in an edit (that would be another item; use 'config add').
 A Secret shows <hidden> for its values; leave them as they are to keep the stored ones.
+
+An editor that runs in a terminal (vi, nano) is fine. A graphical one must wait until the file is
+closed, or tnctl sees an unchanged file at once: VISUAL='code --wait', 'subl -w', 'gedit --wait'.
+The command needs a terminal on stdin; in a script use 'tnctl config get --manifest' and 'config add --replace'.
+If the item is changed by someone else while the editor is open, nothing is written (exit 8).
 
   --wait[=LEVEL]   as in 'tnctl config add --wait': published, applied or ready (a bare --wait is ready)
   --timeout T      how long --wait may take (default 5m)`,
@@ -135,12 +141,21 @@ func headerIssue(is api.LocalValidationIssue, offset int) string {
 	return pos + sev + ": " + msg
 }
 
+// stdinIsTerminal says whether the editor can be used: it is a variable so that tests can say yes.
+var stdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+
 func (e *cliEnv) runEdit(cmd *cobra.Command, target, resArg string, wf *waitFlags) error {
+	if !stdinIsTerminal() {
+		return usageErr("edit opens an editor and needs a terminal on stdin; to change a local item from a script, write the new manifest and run: tnctl config add %s -f FILE --replace (tnctl config get %s <resource> --manifest prints the stored one)", target, target)
+	}
 	s, err := e.begin(cmd, target, wf, false)
 	if err != nil {
 		return err
 	}
-	ctx := cmd.Context()
+	// A hangup or SIGTERM (a closed terminal, a dropped ssh session) must end through the deferred
+	// removal of the temporary file, which may hold plaintext values.
+	ctx, stop := signalContext(cmd.Context())
+	defer stop()
 	id, _, err := resolveTarget(ctx, s.fl, target, resArg)
 	if err != nil {
 		return classify(err)
@@ -218,7 +233,7 @@ func (e *cliEnv) runEdit(cmd *cobra.Command, target, resArg string, wf *waitFlag
 		doc := docs[0]
 		res, _, err := s.fl.PutLocalItem(ctx, target, api.LocalWriteRequest{Manifest: text, Replace: true}, true)
 		if err != nil {
-			return docError(err, doc, false, 0, true)
+			return docError(err, doc, false, 0, true, nil)
 		}
 		var problems []api.LocalValidationIssue
 		var extra []string
@@ -245,6 +260,13 @@ func (e *cliEnv) runEdit(cmd *cobra.Command, target, resArg string, wf *waitFlag
 		if res.Action == api.LocalActionUnchanged {
 			fmt.Fprintf(cmd.OutOrStdout(), "No changes: %s on %s is unchanged.\n", id, target)
 			return nil
+		}
+		// The platform has no revision to check, so look once more: if the item changed while the
+		// editor was open (another person, or Devstudio writing it), saving would drop that.
+		if cur, _, err := s.fl.LocalItem(ctx, target, id); err != nil {
+			return classify(notLocalHint(err, target, resArg))
+		} else if strings.TrimSpace(cur.Manifest) != strings.TrimSpace(src.Manifest) {
+			return newErr(codeConflict, "%s on %s changed while you were editing it; nothing was written. Run tnctl config edit again to start from the new version (your text is lost; copy it first if you need it)", id, target)
 		}
 		run := s.putLocal(ctx, "<edit>", []localDoc{doc}, true)
 		return s.finishLocal(run)
@@ -286,6 +308,9 @@ func runEditorProcess(ctx context.Context, argv []string, path string) error {
 	c := exec.CommandContext(ctx, argv[0], append(append([]string{}, argv[1:]...), path)...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := c.Run(); err != nil {
+		if ctx.Err() != nil {
+			return newErr(codeError, "interrupted; nothing was written")
+		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			return newErr(codeError, "the editor %q exited with status %d; nothing was written", argv[0], ee.ExitCode())

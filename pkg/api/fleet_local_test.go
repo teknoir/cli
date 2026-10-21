@@ -1,9 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/teknoir/cli/pkg/config"
 )
 
 func TestFleetPutLocalItem(t *testing.T) {
@@ -62,5 +67,50 @@ func TestFleetLocalItemAndKinds(t *testing.T) {
 	}
 	if len(c.Kinds) != 1 || c.Kinds[0].Namespaced || c.Kinds[0].Template != "t" || c.Refused[0].Reason != "r" || c.SchemaSource != "src" {
 		t.Errorf("%+v", c)
+	}
+}
+
+func TestLocalManifestIsNeverShownInDebugOutput(t *testing.T) {
+	f, _ := fleetServer(t, 200, `{"id":"Secret/default/s","dryRun":false,"action":"create","validation":{"verdict":"valid","issues":[]},"warnings":[]}`)
+	config.Debug = true
+	defer func() { config.Debug = false }()
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	_, _, err := f.PutLocalItem(context.Background(), "vs", LocalWriteRequest{Manifest: "kind: Secret\nstringData:\n  password: hunter2-plaintext\n"}, false)
+	_, _, _ = f.LocalKinds(context.Background())
+	_ = w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "hunter2-plaintext") {
+		t.Errorf("the debug output shows the Secret value:\n%s", out)
+	}
+	if !strings.Contains(out, "Request Body: <") || !strings.Contains(out, "not shown") {
+		t.Errorf("debug output should say the body is withheld:\n%s", out)
+	}
+	if !strings.Contains(out, "Request: PUT") {
+		t.Errorf("the request line is still shown:\n%s", out)
+	}
+}
+
+func TestIsSecretRequest(t *testing.T) {
+	for _, c := range []struct {
+		method, url string
+		want        bool
+	}{
+		{"PUT", "http://h/api/device/fleet/ns/config/vs/local", true},
+		{"PUT", "http://h/api/device/fleet/ns/config/vs/local?dryRun=1", true},
+		{"POST", "http://h/api/device/fleet/ns/config/vs/local", true},
+		{"GET", "http://h/api/device/fleet/ns/config/vs/local?id=x", false},
+		{"PUT", "http://h/api/device/fleet/ns/config/vs/apps", false},
+	} {
+		if got := isSecretRequest(c.method, c.url); got != c.want {
+			t.Errorf("%s %s: %v", c.method, c.url, got)
+		}
 	}
 }

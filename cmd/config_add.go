@@ -47,12 +47,15 @@ refused ones; 'tnctl config kinds --template Deployment' prints a starter manife
                    applied: the robot has it. The object exists (workloads: the controller saw the
                    latest generation); a HelmChart: its helm-install Job finished and a release exists
                    ready: applied, and Deployments, StatefulSets and DaemonSets finished rolling out
-                   with stable pods; a Job completed. A bare --wait is ready; write --wait=applied.
+                   with stable pods; a Job completed. A HelmChartConfig counts as applied once the object is on the
+                   robot (the chart's reinstall is not followed). A bare --wait is ready; write --wait=applied.
   --timeout T      how long --wait may take (default 5m; exit code 4 when it runs out)
 
 Problems in a manifest are printed as FILE:LINE:COL: error: message, with the line of the file you gave
 (also for the second and later documents) and exit code 5. -o json|yaml prints the platform's answer for
 each document (a single object for one document, a list for several), plus a "wait" object with --wait.
+
+Two documents that are the same Kind/namespace/name in one file are refused (exit 2) before anything is sent.
 
 Exit codes as in 'tnctl config --help'; 8 also means the item already exists (use --replace) or is not
 yours to replace (a git item or a platform item).`,
@@ -81,7 +84,9 @@ type localDoc struct {
 	kind, ns, name string
 }
 
-var docSeparator = regexp.MustCompile(`^---[ \t]*(#.*)?$`)
+// docSeparator matches a line that starts a document: --- alone, or followed by a space or tab and
+// a comment or, as YAML allows, the first line of the next document ("--- !!map", "--- kind: x").
+var docSeparator = regexp.MustCompile(`^---([ \t].*)?$`)
 
 // splitDocs splits a multi-document YAML stream at its --- lines. Documents without content
 // (empty or only comments) are dropped. Every document keeps the line it starts on, so that a
@@ -100,16 +105,33 @@ func splitDocs(data string) []localDoc {
 		d.kind, d.ns, d.name = docIdentity(text)
 		docs = append(docs, d)
 	}
+	data = strings.TrimPrefix(data, "\ufeff") // a byte-order mark would hide a first ---
 	for i, line := range strings.SplitAfter(data, "\n") {
-		if docSeparator.MatchString(strings.TrimRight(line, "\r\n")) {
+		if m := docSeparator.FindStringSubmatch(strings.TrimRight(line, "\r\n")); m != nil {
 			flush()
 			start = i + 2
+			// Content after the --- belongs to the new document and starts on this very line.
+			if rest := strings.TrimSpace(m[1]); rest != "" && !strings.HasPrefix(rest, "#") {
+				start = i + 1
+				buf.WriteString(strings.TrimLeft(m[1], " \t") + lineEnd(line))
+			}
 			continue
 		}
 		buf.WriteString(line)
 	}
 	flush()
 	return docs
+}
+
+// lineEnd is the line break at the end of line ("" for the last line without one).
+func lineEnd(line string) string {
+	switch {
+	case strings.HasSuffix(line, "\r\n"):
+		return "\r\n"
+	case strings.HasSuffix(line, "\n"):
+		return "\n"
+	}
+	return ""
 }
 
 func hasContent(text string) bool {
@@ -192,12 +214,33 @@ func (e *cliEnv) runAdd(cmd *cobra.Command, target string, f *addFlags) error {
 	if len(docs) == 0 {
 		return usageErr("%s has no YAML document to add", fileLabel(f.file))
 	}
+	if err := checkDuplicateDocs(fileLabel(f.file), docs); err != nil {
+		return err
+	}
 	s, err := e.begin(cmd, target, &f.wait, f.dryRun)
 	if err != nil {
 		return err
 	}
 	run := s.putLocal(cmd.Context(), fileLabel(f.file), docs, f.replace)
 	return s.finishLocal(run)
+}
+
+// checkDuplicateDocs refuses a file in which two documents are the same item: the second would
+// fail after the first was written (or, with --replace, silently overwrite it), and a dry run
+// cannot see that because it writes nothing.
+func checkDuplicateDocs(file string, docs []localDoc) error {
+	seen := map[string]localDoc{}
+	for _, d := range docs {
+		if d.kind == "" || d.name == "" {
+			continue // the platform reports what is wrong with it
+		}
+		id := d.kind + "/" + d.ns + "/" + d.name
+		if first, ok := seen[id]; ok {
+			return usageErr("%s: %s (line %d) is the same item as document %d (line %d): %s; nothing was sent", file, d.where(), d.line, first.index, first.line, id)
+		}
+		seen[id] = d
+	}
+	return nil
 }
 
 // ---------- writing documents ----------
@@ -244,7 +287,7 @@ func (s *session) putLocal(ctx context.Context, file string, docs []localDoc, re
 	for _, d := range docs {
 		res, raw, err := s.fl.PutLocalItem(ctx, s.target, api.LocalWriteRequest{Manifest: d.text, Replace: replace}, s.dryRun)
 		if err != nil {
-			run.err = docError(err, d, len(docs) > 1, len(added), replace)
+			run.err = docError(err, d, len(docs) > 1, len(added), replace, func() bool { return s.localItemExists(ctx, d) })
 			return run
 		}
 		run.outs = append(run.outs, localOutcome{doc: d, res: res, raw: raw})
@@ -379,15 +422,27 @@ func invalidError(d localDoc, multi bool, errs, written int) error {
 	return newErr(codeRejected, "%s", msg)
 }
 
+// localItemExists reports whether the target has a local item with the identity of the document.
+// A platform, reserved or git identity answers 409 there too, and is not replaceable.
+func (s *session) localItemExists(ctx context.Context, d localDoc) bool {
+	if d.kind == "" || d.name == "" {
+		return false
+	}
+	_, _, err := s.fl.LocalItem(ctx, s.target, d.kind+"/"+d.ns+"/"+d.name)
+	return err == nil
+}
+
 // docError gives a failed request its exit code and, for several documents, says which one failed.
-func docError(err error, d localDoc, multi bool, written int, replace bool) error {
+// exists is asked on a 409 without --replace: whether a local item with this identity is there, so
+// that --replace would help. nil means "do not know".
+func docError(err error, d localDoc, multi bool, written int, replace bool, exists func() bool) error {
 	err = classify(err)
 	var ce *cliError
 	if !errors.As(err, &ce) {
 		return err
 	}
 	inner := ce.err.Error()
-	if ce.code == codeConflict && !replace && strings.Contains(strings.ToLower(inner), "exist") {
+	if ce.code == codeConflict && !replace && exists != nil && exists() {
 		inner += "; use --replace to overwrite it"
 	}
 	if multi {

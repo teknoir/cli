@@ -166,7 +166,9 @@ and stays until `config remove`. Which kinds are accepted: `tnctl config kinds`.
 
 `-f` is a YAML or JSON file, `-` reads stdin. Several documents separated by `---` are added one by one, in
 order, with one request each; the first failure stops the run, the documents before it stay written, and the
-exit code is that failure's. Empty documents and comments are skipped.
+exit code is that failure's. Empty documents and comments are skipped. A `---` may carry the first line of the
+next document (`--- kind: B`). Two documents that are the same `Kind/namespace/name` are refused with exit 2 before
+anything is sent, a dry run included.
 
 | Result line | Meaning |
 | --- | --- |
@@ -175,8 +177,8 @@ exit code is that failure's. Empty documents and comments are skipped.
 | `unchanged <id> on <target> (already as given)` | the stored item says exactly this; nothing was written |
 | `would add / would replace / would leave ... unchanged` | the same with `--dry-run` |
 
-Without `--replace` an existing local item with the same identity gives exit 8 (`already exists; use --replace
-to overwrite it`). Exit 8 also means the identity belongs to a git item that cannot be shadowed or to the
+Without `--replace` an existing local item with the same identity gives exit 8; tnctl adds `use --replace to
+overwrite it` only after it has checked that a local item is there. Exit 8 also means the identity belongs to a git item that cannot be shadowed or to the
 platform itself (the message says which). `--dry-run` runs every check and writes nothing; it cannot be
 combined with `--wait`.
 
@@ -195,8 +197,8 @@ the wait starts after the last one is written and follows all of them.
 | Level | Reached when |
 | --- | --- |
 | `published` | device-controller published a new config (the hash that `config get` shows as `Published:` changed; not needed when everything was `unchanged`), every item wins in the robot's `local` layer, and the published item is the version just written |
-| `applied` | the robot has it, checked over WireGuard SSH: the object exists and carries the new version (`teknoir.org/config-changed-at`); Deployments, StatefulSets, DaemonSets and ReplicaSets also need `metadata.generation == status.observedGeneration`; for a HelmChart the on-device chart has the values and version, its `helm-install-<name>` Job succeeded (a new one when the chart changed) and a release secret exists |
-| `ready` | applied, and Deployments, StatefulSets and DaemonSets finished rolling out with Ready pods that did not restart for 20 s; a Job completed (a failed Job is exit 7); a Pod is Ready; for a HelmChart its release's workloads are ready. Other kinds are as `applied` |
+| `applied` | the robot has it, checked over WireGuard SSH: the object exists and carries the new version (`teknoir.org/config-changed-at`); Deployments, StatefulSets, DaemonSets and ReplicaSets also need `metadata.generation == status.observedGeneration`; for a HelmChart the on-device chart carries the new version (`teknoir.org/config-changed-at`), its `helm-install-<name>` Job succeeded (a new one when anything in the chart's `spec` changed) and a release secret exists |
+| `ready` | applied, and Deployments, StatefulSets and DaemonSets finished rolling out with Ready pods that did not restart for 20 s; a Job completed (a failed Job is exit 7); a Pod is Ready; for a HelmChart its release's workloads are ready. Other kinds are as `applied`; a HelmChartConfig is applied when the object is on the robot, the reinstall of the chart it configures is not followed |
 
 The robot has to be reachable before anything is written (`applied`, `ready`), as for the other writes.
 
@@ -214,7 +216,9 @@ tnctl config edit <target> <resource> [--wait[=published|applied|ready]] [--time
 Fetches the stored manifest of a local item, writes it to a private temporary file (mode 0600 in a 0700
 directory, removed afterwards) and opens it in `$VISUAL`, else `$EDITOR`, else `vi`. The command line is split
 into words with quotes but never run through a shell, so `VISUAL='code --wait'` and paths with spaces in quotes
-work. When the editor exits:
+work. It needs a terminal on stdin (exit 2 otherwise; in a script use `get --manifest` and `add --replace`). A
+graphical editor must wait until the file is closed, or tnctl sees an unchanged file at once (`code --wait`,
+`subl -w`, `gedit --wait`). A hangup or SIGTERM removes the temporary file too. When the editor exits:
 
 - an empty file, or a file without changes (also one that differs only in comments or spelling that the platform
   stores identically): nothing is written, exit 0 (`No changes: ...`);
@@ -226,7 +230,9 @@ work. When the editor exits:
 The kind, namespace and name cannot change in an edit (that would be a second item): the editor reopens with a
 message. Only one document is allowed. An item that is not local gives exit 8 with the hint of `get --manifest`.
 If the item carries an override on this robot, saving a new version drops it (tnctl says so before it opens the
-editor), and a tool such as Devstudio that wrote the item may write it again.
+editor), and a tool such as Devstudio that wrote the item may write it again. The platform has no revision to
+compare, so tnctl reads the item once more before it writes: if it changed while the editor was open, nothing is
+written (exit 8) and you start again from the new version.
 
 ### kinds
 

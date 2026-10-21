@@ -63,6 +63,9 @@ func TestEditHeaderRoundTrip(t *testing.T) {
 	}
 }
 
+// The edit tests have a terminal on stdin unless they say otherwise.
+func init() { stdinIsTerminal = func() bool { return true } }
+
 // editorSetup writes a fake editor: a shell script that records what it was given and applies
 // sed expression number N (file sedN in the state directory) to the file. The directory has a space
 // in its name and the editor is given with quotes and an extra flag, the way 'code --wait' is.
@@ -86,6 +89,7 @@ cp "$file" "$dir/seen$n"
 stat -c %a "$file" > "$dir/fileperm"
 stat -c %a "$(dirname "$file")" > "$dir/dirperm"
 dirname "$file" > "$dir/tmpdir"
+if [ -f "$dir/term$n" ]; then kill -TERM "$PPID"; exec sleep 30; fi
 if [ -f "$dir/exit$n" ]; then exit "$(cat "$dir/exit$n")"; fi
 if [ -f "$dir/empty$n" ]; then : > "$file"; fi
 if [ -f "$dir/sed$n" ]; then sed -i -f "$dir/sed$n" "$file"; fi
@@ -217,7 +221,8 @@ func TestConfigEditLoopReopensOnErrors(t *testing.T) {
 	if dry != 2 || real != 1 {
 		t.Errorf("dry runs %d, writes %d", dry, real)
 	}
-	if g := p.seen("GET", addPath); len(g) != 1 || g[0].Query != "id=Deployment%2Fdefault%2Fwhoami" {
+	// the item is read when the edit starts and once more just before the write
+	if g := p.seen("GET", addPath); len(g) != 2 || g[0].Query != "id=Deployment%2Fdefault%2Fwhoami" {
 		t.Errorf("%+v", g)
 	}
 }

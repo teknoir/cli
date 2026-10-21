@@ -181,12 +181,15 @@ type expectedHelm struct {
 	// wantImage is the image the pods must run (from --image), if any. Only the workloads whose
 	// pod template has it are held to it.
 	wantImage string
+	// stamp is the config-changed-at value the device's HelmChart must carry ("" = not checked);
+	// set for added local items, whose chart/repo/set changes are not visible in the values.
+	stamp string
 }
 
 // helmBaseline is what the device had before the write.
 type helmBaseline struct {
 	present bool
-	sig     string // valuesContent + version of the on-device HelmChart
+	sig     string // the whole spec of the on-device HelmChart
 	jobUID  string
 }
 
@@ -202,7 +205,13 @@ func helmSig(chart obj) string {
 	if chart == nil {
 		return ""
 	}
-	return digStr(chart, "spec", "valuesContent") + "\x00" + digStr(chart, "spec", "version")
+	// The whole spec: helm-controller starts a new Job for any change of it (chart, repo, set,
+	// targetNamespace, timeout), not only for values and version. Marshalling sorts the keys.
+	b, err := json.Marshal(dig(chart, "spec"))
+	if err != nil {
+		return digStr(chart, "spec", "valuesContent") + "\x00" + digStr(chart, "spec", "version")
+	}
+	return string(b)
 }
 
 func parseHelmSnapshot(out string) helmSnapshot {
@@ -275,6 +284,9 @@ func evalHelmApplied(exp expectedHelm, base helmBaseline, s helmSnapshot, jobNam
 			return pending("cannot read the HelmChart on the device: %s", s.chartErr)
 		}
 		return pending("the HelmChart is not on the device yet")
+	}
+	if exp.stamp != "" && digStr(s.chart, "metadata", "annotations", changedAtAnnotation) != exp.stamp {
+		return pending("the device has an older version of the HelmChart")
 	}
 	if exp.values != nil {
 		have := parseValuesYAML(digStr(s.chart, "spec", "valuesContent"))

@@ -250,6 +250,7 @@ func TestConfigAddConflictIsExit8(t *testing.T) {
 	p := newFakePlatform(t)
 	msg := "Deployment/default/whoami already exists as a local item on vision-station-01"
 	p.on("PUT", addPath, 409, `{"error":{"name":"ConflictError","message":"`+msg+`"}}`)
+	p.on("GET", addPath, 200, manifestBody(whoamiID, storedYAML)) // a local item is there: --replace helps
 	e, _ := testEnv(t, p, nil)
 	f := tempFile(t, "w.yaml", whoamiYAML)
 	_, _, err := runCLI(t, e, "config", "add", "vision-station-01", "-f", f)
@@ -281,6 +282,7 @@ func TestConfigAddStopsAtTheFirstFailure(t *testing.T) {
 		}
 		return 200, addOK("ConfigMap/default/x", "create")
 	})
+	p.on("GET", addPath, 200, manifestBody("ConfigMap/default/b", "kind: ConfigMap\nmetadata: {name: b}\n"))
 	e, _ := testEnv(t, p, nil)
 	in := "kind: ConfigMap\nmetadata: {name: a}\n---\nkind: ConfigMap\nmetadata: {name: b}\n---\nkind: ConfigMap\nmetadata: {name: c}\n"
 	out, _, err := runCLI(t, e, "config", "add", "vision-station-01", "-f", tempFile(t, "m.yaml", in))
