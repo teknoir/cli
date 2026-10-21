@@ -658,3 +658,19 @@ func TestConfigRemoveOtherKindsNeedNoYes(t *testing.T) {
 		t.Errorf("%d requests", n)
 	}
 }
+
+func TestConfigLocalOnOlderPlatform(t *testing.T) {
+	// a device backend that predates the local routes answers a bare 404: exit 2, not "not found"
+	p := localPlatform(t)
+	p.on("DELETE", removePath, 404, "")
+	p.on("GET", "/local-kinds", 404, "")
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "remove", "vision-station-01", llmID)
+	if exitCodeOf(err) != codeUsage || !strings.Contains(err.Error(), "this platform cannot remove local items yet") || strings.Contains(err.Error(), "already have been removed") {
+		t.Errorf("remove: %d %v", exitCodeOf(err), err)
+	}
+	_, _, err = runCLI(t, e, "config", "kinds")
+	if exitCodeOf(err) != codeUsage || !strings.Contains(err.Error(), "this platform cannot add or edit local resources yet") {
+		t.Errorf("kinds: %d %v", exitCodeOf(err), err)
+	}
+}

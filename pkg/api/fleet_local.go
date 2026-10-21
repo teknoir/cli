@@ -108,15 +108,19 @@ type LocalItemSource struct {
 	HasOverride bool            `json:"hasOverride"`
 }
 
-// msgNoLocalAPI explains a platform whose device backend predates local resources.
-const msgNoLocalAPI = "this platform cannot add or edit local resources yet: its device backend is older than this tnctl"
+// Features of the local routes, for an *UnsupportedPlatformError.
+const (
+	featureLocalAdd    = "add or edit local resources"
+	featureLocalRemove = "remove local items"
+)
 
-// noLocalAPI gives the bare 404 of a missing route a message. A 404 that carries the platform's own
-// message (an unknown robot, device or item) is kept.
-func noLocalAPI(err error) error {
+// noLocalAPI turns the bare 404 of a missing local route (a device backend that predates it) into an
+// *UnsupportedPlatformError. A 404 that carries the platform's own message (an unknown robot, device
+// or item) is kept.
+func noLocalAPI(err error, feature string) error {
 	var ae *Error
 	if errors.As(err, &ae) && ae.Status == http.StatusNotFound && ae.Message == "" {
-		ae.Message = msgNoLocalAPI
+		return &UnsupportedPlatformError{Version: Version, Feature: feature}
 	}
 	return err
 }
@@ -124,7 +128,7 @@ func noLocalAPI(err error) error {
 // LocalKinds returns the kinds the platform accepts as local items, and the refused ones.
 func (f *Fleet) LocalKinds(ctx context.Context) (*LocalKindCatalog, json.RawMessage, error) {
 	c, raw, err := decode[LocalKindCatalog](f.Do(ctx, "GET", "local-kinds", nil, nil))
-	return &c, raw, noLocalAPI(err)
+	return &c, raw, noLocalAPI(err, featureLocalAdd)
 }
 
 // LocalItem returns a local item of a robot or device as YAML. id is Kind/namespace/name. An
@@ -132,7 +136,7 @@ func (f *Fleet) LocalKinds(ctx context.Context) (*LocalKindCatalog, json.RawMess
 // platform's explanation.
 func (f *Fleet) LocalItem(ctx context.Context, target, id string) (*LocalItemSource, json.RawMessage, error) {
 	s, raw, err := decode[LocalItemSource](f.Do(ctx, "GET", configPath(target, "local"), url.Values{"id": {id}}, nil))
-	return &s, raw, noLocalAPI(err)
+	return &s, raw, noLocalAPI(err, featureLocalAdd)
 }
 
 // PutLocalItem adds or replaces a local item. With dryRun nothing is written. An answer of 422
@@ -148,7 +152,7 @@ func (f *Fleet) PutLocalItem(ctx context.Context, target string, req LocalWriteR
 				return &res, json.RawMessage(ae.Body), nil
 			}
 		}
-		return nil, nil, noLocalAPI(err)
+		return nil, nil, noLocalAPI(err, featureLocalAdd)
 	}
 	return &r, raw, nil
 }

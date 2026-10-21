@@ -27,9 +27,16 @@ const LastCatalogVersion = "v0.0.9-beta"
 type UnsupportedPlatformError struct {
 	// Version is this tnctl's version.
 	Version string
+	// Feature, when set, is what the platform cannot do yet ("add or edit local resources"): it has
+	// the fleet API, but its device backend predates this route.
+	Feature string
 }
 
 func (e *UnsupportedPlatformError) Error() string {
+	if e.Feature != "" {
+		return fmt.Sprintf("this platform cannot %s yet: its device backend predates it (the route answered 404). "+
+			"Ask your platform admin to update it", e.Feature)
+	}
 	return fmt.Sprintf("this platform does not support tnctl %s yet (it has no fleet API for teamspaces and devices). "+
 		"Use tnctl %s with this platform, or ask your platform admin to update it", e.Version, LastCatalogVersion)
 }
