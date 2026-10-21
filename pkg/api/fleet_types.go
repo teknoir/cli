@@ -395,6 +395,34 @@ type OverrideWriteResult struct {
 	Warnings  []string             `json:"warnings"`
 }
 
+// LocalRemoveResult is the answer of DELETE config/:target/local.
+type LocalRemoveResult struct {
+	Target ConfigTargetRef `json:"target"`
+	ID     string          `json:"id,omitempty"`
+	DryRun bool            `json:"dryRun"`
+	// Noop: the item was not (or no longer) there, nothing changed.
+	Noop bool `json:"noop,omitempty"`
+	// Removed is the item as it was, secret values hidden.
+	Removed map[string]any `json:"removed,omitempty"`
+	// Owner is the tool that wrote the item (for example devstudio).
+	Owner       string `json:"owner,omitempty"`
+	HadOverride bool   `json:"hadOverride"`
+	// RevertsTo is set when a git copy with the same identity takes over after the removal:
+	// nothing is uninstalled, the robot runs that copy.
+	RevertsTo *LocalRevertsTo `json:"revertsTo,omitempty"`
+	// OverrideRemoved: a device override of the identity was removed with the item.
+	OverrideRemoved bool `json:"overrideRemoved,omitempty"`
+	// KeptOverride: the override stays and applies to the git copy.
+	KeptOverride bool     `json:"keptOverride,omitempty"`
+	Warnings     []string `json:"warnings"`
+}
+
+// LocalRevertsTo is the layer and source of the git copy that takes over after a local item is removed.
+type LocalRevertsTo struct {
+	Layer  string `json:"layer"`
+	Source string `json:"source,omitempty"`
+}
+
 // PromoteResult is GET config/:target/promote.
 type PromoteResult struct {
 	YAML       string `json:"yaml"`

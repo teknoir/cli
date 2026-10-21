@@ -32,6 +32,21 @@ Values and version apply to HelmCharts. A workload (Deployment and so on) takes 
 
 Use overrides for testing. When a change works, `config promote` prints the YAML to commit. After it is merged, `config reset` the override.
 
+### Remove an override
+
+`config unset <target> <resource> [k.path...]` takes back part of an override or, with no keys, all of it for that resource. `config reset <target> <resource>` does the same, and `config reset <target> --all` removes every override of the robot. The git value returns.
+
+## Remove a local item
+
+A local item is written straight to the robot by a tool such as Devstudio, not by git or an override. It shows in the `local` layer of `config get`. `config unset` and `reset` do not apply to it: there is no git value to go back to. Remove it with:
+
+```bash
+tnctl config remove vision-station-01 HelmChart/default/local-llm --dry-run   # what would go
+tnctl config remove vision-station-01 local-llm --wait=applied                # remove, wait until it is gone
+```
+
+The robot deletes the object; a HelmChart's release is uninstalled. If git has a copy with the same identity, that copy applies again and nothing is uninstalled (the answer says so, and what happens to an override on this robot). The tool that wrote the item may write it again. Items from git are removed in git, in the robot's apps, a fleet or the robot type; `remove` on such an item exits 8 and names the place. `--wait=published` waits for device-controller to publish a new config (its hash changes). `--wait=applied` also checks over WireGuard SSH that the object (and a HelmChart's release) is gone, and prints the manual `kubectl delete` if it is not; when a git copy took over it checks nothing on the robot and prints no delete command.
+
 ## Published, applied, ready
 
 A write has three stages. `--wait` follows them.
@@ -58,7 +73,7 @@ A reset reaches the robot: the platform stamps an item whose content changed wit
 | 5 | rejected: invalid values, unknown revision, no such target, not overridable | fix the input; retrying does not help |
 | 6 | not logged in, token rejected, or not allowed | `tnctl login --no-browser` |
 | 7 | applied but unhealthy: helm Job failed, pods crash or cannot pull | `tnctl logs`, then change or reset |
-| 8 | conflict: someone changed the same overrides | run the command again |
+| 8 | conflict: someone changed the same overrides; or `remove` of an item that is not local | run the command again; for `remove`, remove the item where the message says |
 | 9 | rate limited | wait `error.retryAfter` seconds (`-o json`), run again |
 
 ## Tips for agents

@@ -33,6 +33,7 @@ Typical loop for developing on one robot:
   tnctl config set vision-station-01 notebook replicas=2 log.level=debug --wait=applied
   tnctl config diff vision-station-01                                   what differs from git
   tnctl config reset vision-station-01 --all                            back to git
+  tnctl config remove vision-station-01 local-llm                       delete a local item (written by Devstudio)
   tnctl config promote vision-station-01 notebook                       the YAML to commit when it works
 
 --wait[=LEVEL] on a write follows the change; without it the command returns as soon as the
@@ -77,7 +78,7 @@ func newConfigCmd(e *cliEnv) *cobra.Command {
 	}
 	c.AddCommand(
 		newConfigGetCmd(e), newConfigSetCmd(e), newConfigUnsetCmd(e), newConfigDeleteCmd(e),
-		newConfigResetCmd(e), newConfigTryCmd(e), newConfigUntryCmd(e), newConfigDiffCmd(e),
+		newConfigResetCmd(e), newConfigRemoveCmd(e), newConfigTryCmd(e), newConfigUntryCmd(e), newConfigDiffCmd(e),
 		newConfigWaitCmd(e), newConfigLinksCmd(e), newConfigPromoteCmd(e),
 	)
 	return c
