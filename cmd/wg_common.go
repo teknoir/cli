@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"github.com/teknoir/cli/pkg/auth"
 	"github.com/teknoir/wg-tunnel/pkg/api"
 	"github.com/teknoir/wg-tunnel/pkg/knownhosts"
+	"github.com/teknoir/wg-tunnel/pkg/wgclient"
 )
 
 const (
@@ -119,11 +121,36 @@ func newWGCredential(domain string) func(ctx context.Context, wgPublicKey string
 		calls++
 		first := calls == 1
 		mu.Unlock()
+		var tok string
+		var err error
 		if first {
-			return auth.AccessToken(ctx, domain)
+			tok, err = auth.AccessToken(ctx, domain)
+		} else {
+			tok, err = auth.FreshAccessToken(ctx, domain)
 		}
-		return auth.FreshAccessToken(ctx, domain)
+		if errors.Is(err, auth.ErrSessionExpired) {
+			return "", &wgLoginExpired{err}
+		}
+		return tok, err
 	}
+}
+
+// wgLoginExpired is the credential error of a dead login. The wgclient session retries a failing
+// credential until the hub session runs out, which would leave an unusable tunnel open for
+// minutes. It therefore presents itself as a definitive hub denial (errors.As to *wgclient.Error:
+// 401 unauthenticated), which ends the session at once; errors.Is still matches
+// auth.ErrSessionExpired, and describeWGError prints the login message.
+type wgLoginExpired struct{ err error }
+
+func (e *wgLoginExpired) Error() string { return e.err.Error() }
+func (e *wgLoginExpired) Unwrap() error { return e.err }
+
+func (e *wgLoginExpired) As(target any) bool {
+	if t, ok := target.(**wgclient.Error); ok {
+		*t = &wgclient.Error{Status: http.StatusUnauthorized, Reason: api.ReasonUnauthenticated}
+		return true
+	}
+	return false
 }
 
 // wgPosture describes this tnctl to the hub's posture check.

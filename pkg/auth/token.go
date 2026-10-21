@@ -97,13 +97,17 @@ func AccessToken(ctx context.Context, domain string) (string, error) {
 // disabled or logged out in Keycloak therefore loses the tunnel at the next
 // renewal instead of when the old access token expires.
 func FreshAccessToken(ctx context.Context, domain string) (string, error) {
-	d := defaultTokenDeps
+	return accessToken(ctx, domain, forceRefresh(defaultTokenDeps))
+}
+
+// forceRefresh makes d always redeem the refresh token, even while the access token is valid.
+func forceRefresh(d tokenDeps) tokenDeps {
 	refresh := d.refresh
 	d.refresh = func(ctx context.Context, domain string, a config.AuthConfig) (*oauth2.Token, error) {
 		a.Expiry = "" // unparsable expiry makes GetValidToken redeem the refresh token
 		return refresh(ctx, domain, a)
 	}
-	return accessToken(ctx, domain, d)
+	return d
 }
 
 func accessToken(ctx context.Context, domain string, d tokenDeps) (string, error) {

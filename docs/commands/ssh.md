@@ -129,6 +129,10 @@ The domain and hub come from your login and configuration, so a bare
 
 - `Tunneling is not active for <device>`: turn Tunneling on for the device in the Teknoir console; for a
   new device, wait until it has connected.
+- `Your tnctl login has expired. Run: tnctl login`: the stored login was revoked or idle too long. Run
+  `tnctl login`; a running session ends at its next renewal with the same message. The exit status is 1, as for
+  every WireGuard failure (exit 6 is reported only by the commands that call the platform API, such as
+  `tnctl login --check`, `devices` and `config`), so a script should run `tnctl login --check` first.
 - `device_offline`: the device is not connected to the hub. Check its power and network.
 - Timeouts creating the session: the network must allow outbound HTTPS to `wg.<domain>` and outbound UDP
   (the relay, default port 3478).

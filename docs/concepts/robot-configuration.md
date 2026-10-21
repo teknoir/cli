@@ -96,7 +96,7 @@ A reset reaches the robot: the platform stamps an item whose content changed wit
 | 3 | not found: robot, device or resource | check the names |
 | 4 | timeout: `--wait` ran out of time | `config wait` again, or read the logs |
 | 5 | rejected: invalid values or manifest, unknown revision, no such target, not overridable | fix the input (for `add`, the `file:line:col` lines say where); retrying does not help |
-| 6 | not logged in, token rejected, or not allowed | `tnctl login --no-browser` |
+| 6 | not logged in, login expired (`-o json` code `session_expired`), token rejected, or not allowed | `tnctl login --no-browser` |
 | 7 | applied but unhealthy: helm Job failed, pods crash or cannot pull | `tnctl logs`, then change or reset |
 | 8 | conflict: someone changed the same overrides; `add` of an item that exists; `remove`, `edit` or `get --manifest` of an item that is not local | run the command again; for `add`, use `--replace`; for the others, act where the message says |
 | 9 | rate limited | wait `error.retryAfter` seconds (`-o json`), run again |

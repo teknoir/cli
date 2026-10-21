@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/teknoir/cli/pkg/api"
+	"github.com/teknoir/cli/pkg/auth"
 )
 
 // waitLevel is how far --wait follows a change.
@@ -278,6 +279,11 @@ func (w *waiter) pause(ctx context.Context) error {
 type transient struct{ n int }
 
 func (t *transient) fail(err error) error {
+	// A dead login never recovers while waiting: end the wait at once. A failed refresh that
+	// is only a network or server error does not match and is retried like any other poll.
+	if errors.Is(err, auth.ErrSessionExpired) {
+		return err
+	}
 	var ae *api.Error
 	if errors.As(err, &ae) && (ae.IsAuth() || (ae.Status >= 400 && ae.Status < 500)) {
 		return err
