@@ -503,3 +503,158 @@ func TestConfigRemoveNoopSkipsTheWait(t *testing.T) {
 		t.Errorf("a removal that did nothing has nothing to wait for: %v", err)
 	}
 }
+
+// ---------- removing a Namespace ----------
+
+const nsID = "Namespace/default/llm-ns"
+
+func nsRemovedBody(dry bool, warning string) string {
+	d := "false"
+	if dry {
+		d = "true"
+	}
+	return `{"target":{"kind":"robot","name":"vision-station-01","device":"vision-station-01"},"id":"Namespace//llm-ns","dryRun":` + d +
+		`,"hadOverride":false,"owner":"backstage","removed":{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"llm-ns"}},"warnings":["` + warning + `"]}`
+}
+
+const nsWarning = "Removing Namespace llm-ns deletes everything in it on the robot: Deployment/llm, Service/llm, Secret/llm-token"
+
+func TestConfigRemoveNamespaceNeedsYes(t *testing.T) {
+	p := newFakePlatform(t)
+	var mu sync.Mutex
+	var dry, real int
+	p.onFunc("DELETE", removePath, func(r rec) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(r.Query, "dryRun=1") {
+			dry++
+			return 200, nsRemovedBody(true, nsWarning)
+		}
+		real++
+		return 200, nsRemovedBody(false, nsWarning)
+	})
+	e, _ := testEnv(t, p, nil)
+	for _, arg := range []string{nsID, "Namespace//llm-ns"} {
+		out, errs, err := runCLI(t, e, "config", "remove", "vision-station-01", arg)
+		if exitCodeOf(err) != codeUsage || err.Error() != "Removing Namespace llm-ns deletes everything in it on the robot; repeat with --yes to confirm" {
+			t.Fatalf("%s: exit %d: %v", arg, exitCodeOf(err), err)
+		}
+		if !strings.Contains(errs, "warning: "+nsWarning) || !strings.HasPrefix(out, "Would remove Namespace//llm-ns from vision-station-01.\n") {
+			t.Errorf("the warning and the dry-run answer must be printed\nstdout: %s\nstderr: %s", out, errs)
+		}
+	}
+	if real != 0 || dry != 2 {
+		t.Fatalf("without --yes nothing may be removed: %d dry runs, %d real", dry, real)
+	}
+	// -o json: the dry-run answer goes to stderr, so stdout holds nothing a script could take for a result
+	out, errs, err := runCLI(t, e, "config", "remove", "vision-station-01", nsID, "-o", "json")
+	if exitCodeOf(err) != codeUsage || strings.TrimSpace(out) != "" || !json.Valid([]byte(errs)) && !strings.Contains(errs, `"dryRun"`) {
+		t.Errorf("json: exit %d\nstdout %s\nstderr %s", exitCodeOf(err), out, errs)
+	}
+	if real != 0 {
+		t.Errorf("%d real removals", real)
+	}
+}
+
+func TestConfigRemoveNamespaceGateIgnoresCaseOfTheKind(t *testing.T) {
+	p := newFakePlatform(t)
+	var mu sync.Mutex
+	var dry, real int
+	var paths []string
+	p.onFunc("DELETE", removePath, func(r rec) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		paths = append(paths, r.Query)
+		if strings.Contains(r.Query, "dryRun=1") {
+			dry++
+			return 200, nsRemovedBody(true, nsWarning)
+		}
+		real++
+		return 200, nsRemovedBody(false, nsWarning)
+	})
+	e, _ := testEnv(t, p, nil)
+	for _, arg := range []string{"namespace/default/llm-ns", "NAMESPACE/default/llm-ns"} {
+		_, _, err := runCLI(t, e, "config", "remove", "vision-station-01", arg)
+		if exitCodeOf(err) != codeUsage || !strings.Contains(err.Error(), "repeat with --yes") {
+			t.Fatalf("%s: exit %d: %v", arg, exitCodeOf(err), err)
+		}
+	}
+	if real != 0 || dry != 2 {
+		t.Fatalf("%d dry runs, %d real", dry, real)
+	}
+	// with --yes the platform gets its own spelling of the kind
+	if _, _, err := runCLI(t, e, "config", "remove", "vision-station-01", "namespace/default/llm-ns", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	if real != 1 || !strings.Contains(paths[len(paths)-1], "Namespace") {
+		t.Errorf("real %d, paths %v", real, paths)
+	}
+}
+
+func TestConfigRemoveNamespaceWithYes(t *testing.T) {
+	p := newFakePlatform(t)
+	p.onFunc("DELETE", removePath, func(r rec) (int, string) {
+		if strings.Contains(r.Query, "dryRun") {
+			t.Errorf("--yes must not need a dry run first: %q", r.Query)
+		}
+		return 200, nsRemovedBody(false, nsWarning)
+	})
+	e, _ := testEnv(t, p, nil)
+	out, errs, err := runCLI(t, e, "config", "remove", "vision-station-01", nsID, "--yes")
+	if err != nil || !strings.HasPrefix(out, "Removed Namespace//llm-ns from vision-station-01.\n") || !strings.Contains(errs, "warning: "+nsWarning) {
+		t.Fatalf("%v\n%s\n%s", err, out, errs)
+	}
+	if n := len(p.seen("DELETE", removePath)); n != 1 {
+		t.Errorf("%d requests", n)
+	}
+}
+
+func TestConfigRemoveNamespaceDryRunNeedsNoYes(t *testing.T) {
+	p := newFakePlatform(t)
+	p.onFunc("DELETE", removePath, func(r rec) (int, string) {
+		if !strings.Contains(r.Query, "dryRun=1") {
+			t.Errorf("a real DELETE in a dry run: %q", r.Query)
+		}
+		return 200, nsRemovedBody(true, nsWarning)
+	})
+	e, _ := testEnv(t, p, nil)
+	out, errs, err := runCLI(t, e, "config", "remove", "vision-station-01", nsID, "--dry-run")
+	if err != nil || !strings.HasPrefix(out, "Would remove Namespace//llm-ns") || !strings.Contains(errs, "deletes everything") {
+		t.Fatalf("%v\n%s\n%s", err, out, errs)
+	}
+	if n := len(p.seen("DELETE", removePath)); n != 1 {
+		t.Errorf("%d requests", n)
+	}
+}
+
+func TestConfigRemoveNamespaceAlreadyGoneNeedsNoYes(t *testing.T) {
+	p := newFakePlatform(t)
+	p.on("DELETE", removePath, 200, `{"target":{"kind":"robot","name":"vision-station-01","device":"vision-station-01"},"id":"Namespace//llm-ns","dryRun":false,"noop":true,"hadOverride":false,"warnings":[]}`)
+	e, _ := testEnv(t, p, nil)
+	out, _, err := runCLI(t, e, "config", "remove", "vision-station-01", nsID)
+	if err != nil || !strings.Contains(out, "already gone") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+}
+
+func TestConfigRemoveNamespaceNotLocalKeepsThePlatformsAnswer(t *testing.T) {
+	p := newFakePlatform(t)
+	p.on("DELETE", removePath, 409, `{"error":{"message":"Namespace llm-ns comes from a fleet; remove it in git"}}`)
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "remove", "vision-station-01", nsID)
+	if exitCodeOf(err) != codeConflict || !strings.Contains(err.Error(), "remove it in git") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestConfigRemoveOtherKindsNeedNoYes(t *testing.T) {
+	p := localPlatform(t)
+	p.on("DELETE", removePath, 200, removedBody(llmID, false, ""))
+	e, _ := testEnv(t, p, nil)
+	if _, _, err := runCLI(t, e, "config", "remove", "vision-station-01", llmID); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(p.seen("DELETE", removePath)); n != 1 {
+		t.Errorf("%d requests", n)
+	}
+}

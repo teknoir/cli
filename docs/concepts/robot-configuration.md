@@ -45,7 +45,32 @@ tnctl config remove vision-station-01 HelmChart/default/local-llm --dry-run   # 
 tnctl config remove vision-station-01 local-llm --wait=applied                # remove, wait until it is gone
 ```
 
-The robot deletes the object; a HelmChart's release is uninstalled. If git has a copy with the same identity, that copy applies again and nothing is uninstalled (the answer says so, and what happens to an override on this robot). The tool that wrote the item may write it again. Items from git are removed in git, in the robot's apps, a fleet or the robot type; `remove` on such an item exits 8 and names the place. `--wait=published` waits for device-controller to publish a new config (its hash changes). `--wait=applied` also checks over WireGuard SSH that the object (and a HelmChart's release) is gone, and prints the manual `kubectl delete` if it is not; when a git copy took over it checks nothing on the robot and prints no delete command.
+The robot deletes the object; a HelmChart's release is uninstalled. Removing a Namespace deletes everything in it, so `remove` prints the platform's warnings and exits 2 until you repeat it with `--yes` (`--dry-run` never needs it). If git has a copy with the same identity, that copy applies again and nothing is uninstalled (the answer says so, and what happens to an override on this robot). The tool that wrote the item may write it again. Items from git are removed in git, in the robot's apps, a fleet or the robot type; `remove` on such an item exits 8 and names the place. `--wait=published` waits for device-controller to publish a new config (its hash changes). `--wait=applied` also checks over WireGuard SSH that the object (and a HelmChart's release) is gone, and prints the manual `kubectl delete` if it is not; when a git copy took over it checks nothing on the robot and prints no delete command.
+
+## Add or edit a local item
+
+A local item is a Kubernetes resource that belongs to one robot only: it is stored in the robot's device, wins over a git copy with the same `Kind/namespace/name` and stays until it is removed. Use it for a ConfigMap, a Service, a small workload or a HelmChart that only this robot needs. For something that belongs to many robots, put it in git.
+
+```bash
+tnctl config kinds                                       # what can be added, and what is refused (and why)
+tnctl config kinds --template Deployment > whoami.yaml   # a starter manifest
+tnctl config add vision-station-01 -f whoami.yaml --dry-run
+tnctl config add vision-station-01 -f whoami.yaml --wait=applied
+```
+
+The platform checks the manifest against the Kubernetes schemas before it writes anything. Problems come back as `whoami.yaml:12:13: error: ...` with the line of your file (also for the second and later `---` documents) and exit 5. A manifest with several documents is added in order and stops at the first failure; Namespace documents are sent first, so they are stored before the resources in them (this orders the requests only; the platform decides the order on the robot), and the output says so. `--replace` overwrites an existing local item; without it an existing one gives exit 8. Identical content is `unchanged` and writes nothing.
+
+Not every kind is accepted: the robot's agent keeps only the top-level fields `apiVersion`, `kind`, `metadata`, `data`, `binaryData`, `type`, `spec` and `status`, so kinds that carry their content elsewhere (a Role's `rules`, for one) would arrive empty, and it runs as cluster-admin. `tnctl config kinds` lists the supported kinds with a note for each and the refused ones with the reason. A custom resource is refused too: if its CRD is missing on the robot, the robot's whole configuration stops applying.
+
+### The edit loop
+
+```bash
+tnctl config edit vision-station-01 Deployment/default/whoami --wait=applied   # opens $VISUAL or $EDITOR
+tnctl config get vision-station-01 Deployment/default/whoami --manifest > whoami.yaml   # or: get it, edit it yourself
+tnctl config add vision-station-01 -f whoami.yaml --replace --wait=applied
+```
+
+`edit` opens the stored manifest, and when you save, the platform checks it. With errors the editor opens again with the errors at the top of the file; close it without changes to give up (nothing is written). An unchanged file writes nothing and exits 0. The kind, namespace and name cannot change. Only local items can be edited: for an item from git, `edit` and `get --manifest` exit 8 and show how to make a local copy (`config get ... --rendered`, then `config add`). `--wait` as in the table below; for a local item `applied` means that the robot's copy carries the new version (and, for a workload, that its controller has seen it; for a HelmChart that its helm Job succeeded and a release exists), and `ready` that a rollout is complete, a Job has completed, and so on.
 
 ## Published, applied, ready
 
@@ -70,10 +95,10 @@ A reset reaches the robot: the platform stamps an item whose content changed wit
 | 2 | usage: bad arguments, ambiguous resource name | fix the command |
 | 3 | not found: robot, device or resource | check the names |
 | 4 | timeout: `--wait` ran out of time | `config wait` again, or read the logs |
-| 5 | rejected: invalid values, unknown revision, no such target, not overridable | fix the input; retrying does not help |
+| 5 | rejected: invalid values or manifest, unknown revision, no such target, not overridable | fix the input (for `add`, the `file:line:col` lines say where); retrying does not help |
 | 6 | not logged in, login expired (`-o json` code `session_expired`), token rejected, or not allowed | `tnctl login --no-browser` |
 | 7 | applied but unhealthy: helm Job failed, pods crash or cannot pull | `tnctl logs`, then change or reset |
-| 8 | conflict: someone changed the same overrides; or `remove` of an item that is not local | run the command again; for `remove`, remove the item where the message says |
+| 8 | conflict: someone changed the same overrides; `add` of an item that exists; `remove`, `edit` or `get --manifest` of an item that is not local | run the command again; for `add`, use `--replace`; for the others, act where the message says |
 | 9 | rate limited | wait `error.retryAfter` seconds (`-o json`), run again |
 
 ## Tips for agents

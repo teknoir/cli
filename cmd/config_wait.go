@@ -84,6 +84,10 @@ type writeInfo struct {
 	image map[string]string
 	// gone: the write removed this local item; published and applied then mean "no longer there".
 	gone *goneItem
+	// added: the write added or replaced these local items; published and applied then mean "there, as written".
+	added []*addedItem
+	// hashBefore is the config hash device-controller had published before the first write of added.
+	hashBefore string
 }
 
 // waiter follows a change: published through the fleet API, applied and ready on the device.
@@ -234,6 +238,8 @@ func (w *waiter) wait(ctx context.Context, info writeInfo) error {
 			w.stage = string(w.level)
 			err = w.waitGoneDevice(ctx, info.gone)
 		}
+	} else if len(info.added) > 0 {
+		err = w.waitAddedPublished(ctx, info)
 	} else {
 		err = w.waitPublished(ctx, info)
 	}
@@ -382,6 +388,10 @@ type devCheck struct {
 	wl                 *expectedWorkload
 	stab               stability
 	finished           bool
+	// added marks an item written by config add or edit: it is checked from the item itself, and
+	// stamp is the config-changed-at value its copy on the robot must carry ("" when unknown).
+	added bool
+	stamp string
 }
 
 // waitDevice waits until every resource is applied (and ready) on the robot.
@@ -448,6 +458,11 @@ func (w *waiter) expectation(ctx context.Context, id string, info writeInfo) (*d
 	kind, ns, name, err := checkID(id)
 	if err != nil {
 		return nil, err
+	}
+	for _, a := range info.added {
+		if a.id == id {
+			return w.addedCheck(a), nil
+		}
 	}
 	d, _, err := w.fl.ConfigResource(ctx, w.target, id, false)
 	if err != nil {
@@ -533,6 +548,13 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 				r.msg += "; last log lines:\n" + indent(strings.TrimSpace(lr.Stdout), "    ")
 			}
 		}
+		if r.state == checkDone && c.added {
+			rr, err := ex.Run(ctx, remoteShell(releaseProbeScript(c.helm.targetNS, c.name)))
+			if err != nil {
+				return checkResult{}, err
+			}
+			r = evalReleaseInstalled(c.name, c.helm.targetNS, rr.Stdout)
+		}
 		if r.state != checkDone || !needReady {
 			return r, nil
 		}
@@ -559,6 +581,9 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 		return pending("cannot read %s on the device: %s", c.kind, errText), nil
 	}
 	r := evalWorkloadApplied(*c.wl, o)
+	if r.state == checkDone && c.added {
+		r = evalAddedApplied(c, o)
+	}
 	if r.state != checkDone || !needReady {
 		return r, nil
 	}
@@ -580,6 +605,12 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 			return pending("pod %s: %s", c.name, why), nil
 		}
 		return w.readiness(&c.stab, now, readyResult{checkResult: done("pod ready"), sig: fmt.Sprint(podRestarts(o))}), nil
+	}
+	if c.added {
+		if c.kind == "Job" {
+			return evalJobComplete(o), nil
+		}
+		return done("%s applied", c.kind), nil
 	}
 	return done("%s applied (jobs have no readiness to wait for)", c.kind), nil
 }

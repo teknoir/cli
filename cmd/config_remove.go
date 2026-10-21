@@ -18,6 +18,7 @@ import (
 func newConfigRemoveCmd(e *cliEnv) *cobra.Command {
 	var f struct {
 		dryRun bool
+		yes    bool
 		wait   waitFlags
 	}
 	c := &cobra.Command{
@@ -39,6 +40,7 @@ Overrides are removed with 'tnctl config unset' and 'tnctl config reset', not wi
 
   <resource>      Kind/namespace/name, Kind/name or a unique name, as in the other config commands
   --dry-run       show what would be removed, remove nothing
+  --yes           confirm the removal of a Namespace (see below); other items need no confirmation
   --wait=LEVEL    published: device-controller published a new config (its hash changed) without
                   the item
                   applied: also the object is gone on the robot, and for a HelmChart its release is
@@ -47,9 +49,14 @@ Overrides are removed with 'tnctl config unset' and 'tnctl config reset', not wi
                   published already means the git copy wins, and applied needs no check on the robot.
   --timeout T     how long --wait may take (default 5m; exit code 4 when it runs out)
 
+Removing a Namespace deletes everything in it on the robot, not only what you added. Without --yes the
+command prints the platform's warning and the list of what would go (from a dry run), removes nothing and
+exits with 2; repeat it with --yes to confirm. --dry-run never needs --yes.
+
 Exit 8 also means the item is not local, so it cannot be removed here; the message says where to remove it.`,
 		Example: `  tnctl config remove vision-station-01 HelmChart/default/local-llm --dry-run
-  tnctl config remove vision-station-01 local-llm --wait=applied`,
+  tnctl config remove vision-station-01 local-llm --wait=applied
+  tnctl config remove vision-station-01 Namespace/llm-ns --yes`,
 		Args: argsRange(2, 2, "remove needs a robot or device name and a local resource"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target, resArg := args[0], args[1]
@@ -68,6 +75,16 @@ Exit 8 also means the item is not local, so it cannot be removed here; the messa
 			kind, ns, name, err := checkID(id)
 			if err != nil {
 				return err
+			}
+			if strings.EqualFold(kind, "Namespace") {
+				// the platform may match the kind case-sensitively: send its own spelling
+				kind = "Namespace"
+				id = kind + "/" + ns + "/" + name
+			}
+			if kind == "Namespace" && !f.dryRun && !f.yes {
+				if err := e.confirmNamespaceRemoval(cmd, s, target, id, name); err != nil {
+					return err
+				}
 			}
 			w := s.waiter()
 			gone := &goneItem{id: id, kind: kind, ns: ns, name: name}
@@ -119,12 +136,42 @@ Exit 8 also means the item is not local, so it cannot be removed here; the messa
 		},
 	}
 	c.Flags().BoolVar(&f.dryRun, "dry-run", false, "show what would be removed, remove nothing")
+	c.Flags().BoolVar(&f.yes, "yes", false, "confirm the removal of a Namespace, which deletes everything in it on the robot")
 	f.wait.add(c)
 	return c
 }
 
+// confirmNamespaceRemoval stops the removal of a Namespace that was not confirmed with --yes. It asks
+// the platform for a dry run, prints what it says would go, and returns the usage error (exit 2).
+// A Namespace that is not local is not removable at all: the platform's own answer (exit 8, 404) is
+// returned instead, as the removal would give it. An item that is already gone needs no confirmation.
+func (e *cliEnv) confirmNamespaceRemoval(cmd *cobra.Command, s *session, target, id, name string) error {
+	res, raw, err := s.fl.RemoveLocalItem(cmd.Context(), target, id, true)
+	if err != nil {
+		return classify(removeNotFoundHint(err, target))
+	}
+	if res.Noop {
+		return nil
+	}
+	out, errw := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	for _, wn := range res.Warnings {
+		fmt.Fprintln(errw, "warning:", wn)
+	}
+	if s.format == "table" {
+		printRemoveResult(out, res, id, target)
+	} else if err := writeStructured(errw, s.format, raw); err != nil {
+		// stderr, not stdout: a refusal must not leave an answer on stdout that a script could take
+		// for the result of a removal
+		return err
+	}
+	return usageErr("Removing Namespace %s deletes everything in it on the robot; repeat with --yes to confirm", name)
+}
+
 // printRemoveResult is the table-mode answer of a removal.
 func printRemoveResult(out io.Writer, res *api.LocalRemoveResult, id, target string) {
+	if res.ID != "" {
+		id = res.ID // the platform's spelling, Namespace//name for a cluster-scoped item
+	}
 	switch {
 	case res.Noop && res.DryRun:
 		fmt.Fprintf(out, "Nothing to remove: %s is not in %s.\n", id, target)

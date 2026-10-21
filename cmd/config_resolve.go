@@ -50,6 +50,12 @@ func resolveResourceArg(arg string, known []string) (string, error) {
 		return "", usageErr("the resource is empty: use Kind/namespace/name, Kind/name or a name, for example HelmChart/default/notebook")
 	}
 	parts := strings.Split(arg, "/")
+	// The platform names a cluster-scoped item Namespace//name (no namespace); that is what it prints,
+	// so accept it back. The platform ignores the namespace of such a kind.
+	if len(parts) == 3 && parts[1] == "" && parts[2] != "" && strings.EqualFold(parts[0], "Namespace") {
+		parts[1] = "default"
+		arg = strings.Join(parts, "/")
+	}
 	for _, p := range parts {
 		if p == "" {
 			return "", usageErr("%q is not a resource: use Kind/namespace/name, Kind/name or a name, for example HelmChart/default/notebook", arg)

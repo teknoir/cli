@@ -45,6 +45,9 @@ application off on one robot is not possible yet.
 | `config unset <target> <resource> [k.path...]` | Remove override keys; the git value returns |
 | `config delete <target> <resource> k.path...` | Remove a value from the robot (writes `null`) |
 | `config reset <target> [<resource> \| --all]` | Back to git |
+| `config add <target> -f <file\|->` | Add a local resource (any supported Kubernetes kind) to a robot |
+| `config edit <target> <resource>` | Edit a local item in `$EDITOR`, checked by the platform before it is saved |
+| `config kinds` | The kinds `add` supports, the refused ones with reasons, and starter manifests |
 | `config remove <target> <resource>` | Remove a local item (written straight to the robot, for example by Devstudio) |
 | `config try <target> <app-path> <revision>` | Run another branch, tag or commit of an application |
 | `config untry <target> <app-path>` | Back to the application's own revision |
@@ -58,7 +61,7 @@ All accept the [global flags](index.md#global-flags), including `-o json|yaml`.
 ### get
 
 ```bash
-tnctl config get <target> [<resource>] [--layers] [--provenance] [--rendered] [--overrides] [--defaults]
+tnctl config get <target> [<resource>] [--layers] [--provenance] [--rendered] [--overrides] [--defaults] [--manifest]
 ```
 
 Without a resource: one row per effective resource with the layer that wins, what it contains
@@ -68,6 +71,10 @@ only the overrides with who set them, why, and the state the platform reports.
 With a resource: its merged values (HelmChart) or images, chart, git source and override.
 `--provenance` shows one row per value with the layer it comes from, `--rendered` the item exactly as
 published to the device, `--defaults` adds the chart's own defaults at the pinned version.
+`--manifest` prints the stored YAML of a **local** item, ready to edit (`> item.yaml`, then `config add --replace`,
+or use `config edit`). For an item that is not local (it comes from git or is managed by the platform) the
+platform answers 409: tnctl prints its message and a hint how to make a local copy
+(`config get ... --rendered > item.yaml`, then `config add`), and exits 8. Secret values show as `<hidden>`.
 
 ### set
 
@@ -140,11 +147,129 @@ that back, `unset` the key.
 `reset <target> <resource>` removes the override of one resource, `reset <target> --all` every override of
 the robot, values and tried revisions included. It never guesses: you need one of the two.
 
+### add
+
+```bash
+tnctl config add <target> -f <file|-> [--replace] [--dry-run] [--wait[=published|applied|ready]] [--timeout 5m]
+```
+
+```bash
+tnctl config kinds --template Deployment > whoami.yaml     # a starter manifest
+tnctl config add vision-station-01 -f whoami.yaml --dry-run
+tnctl config add vision-station-01 -f whoami.yaml --wait=applied
+```
+
+Adds a Kubernetes resource to one robot as a **local item**: the platform checks it against the Kubernetes
+schemas, stores it in the device's manifest and publishes it to the robot, whose agent applies it. A local item
+wins over a git copy with the same `Kind/namespace/name` (the platform says which copy it hides, as a warning)
+and stays until `config remove`. Which kinds are accepted: `tnctl config kinds`.
+
+`-f` is a YAML or JSON file, `-` reads stdin. Several documents separated by `---` are added one by one, in
+order, with one request each; the first failure stops the run, the documents before it stay written, and the
+exit code is that failure's. Empty documents and comments are skipped. A `---` may carry the first line of the
+next document (`--- kind: B`). Two documents that are the same `Kind/namespace/name` are refused with exit 2 before
+anything is sent, a dry run included.
+
+**Namespaces first.** When a file has a Namespace document and other documents, tnctl sends the Namespace
+documents first (the rest keep their order) so that the Namespace is stored before the resources in it, and says
+so: `sending Namespace llm-ns first, ...` on stdout, or as `note:` on stderr with `-o json|yaml`. This orders the
+requests only; the order in which the robot applies the items is decided by the platform. A file whose Namespaces
+are in front already is sent as it is, silently. Error positions and `document N` keep the numbers of your file,
+not the order of sending; when a document fails, the message lists what was written before it
+(`written before it: Namespace/llm-ns`), which in sending order can include documents that stand after it in the
+file. A `--dry-run` writes nothing, so the platform does not know the new namespace yet and says so (a warning, or
+an error at `metadata.namespace`): tnctl drops that complaint for a namespace that a Namespace document of the same
+file creates (with a `note:`), and keeps every other finding.
+
+| Result line | Meaning |
+| --- | --- |
+| `added <id> to <target>` | a new local item |
+| `replaced <id> on <target>` | `--replace` overwrote the existing local item |
+| `unchanged <id> on <target> (already as given)` | the stored item says exactly this; nothing was written |
+| `would add / would replace / would leave ... unchanged` | the same with `--dry-run` |
+
+Without `--replace` an existing local item with the same identity gives exit 8; tnctl adds `use --replace to
+overwrite it` only after it has checked that a local item is there. Exit 8 also means the identity belongs to a git item that cannot be shadowed or to the
+platform itself (the message says which). `--dry-run` runs every check and writes nothing; it cannot be
+combined with `--wait`.
+
+**Problems in the manifest** are printed to stderr as `FILE:LINE:COL: error: message`, one per finding, and the
+command exits 5 (nothing of that document is written). The positions are the lines of *your file*: the platform
+reports them inside each document and tnctl adds the line where that document starts. Warnings use
+`warning:` and do not fail. A dry run that finds errors exits 5 too, so `--dry-run` works as a check in a script.
+
+```
+stack.yaml:12:13: error: Invalid type. Expected: integer, given: string (spec.replicas)
+```
+
+**`--wait`** (default `--timeout` 5m; a bare `--wait` is `ready`, write `--wait=applied`). With several documents
+the wait starts after the last one is written and follows all of them.
+
+| Level | Reached when |
+| --- | --- |
+| `published` | device-controller published a new config (the hash that `config get` shows as `Published:` changed; not needed when everything was `unchanged`), every item wins in the robot's `local` layer, and the published item is the version just written |
+| `applied` | the robot has it, checked over WireGuard SSH: the object exists and carries the new version (`teknoir.org/config-changed-at`); Deployments, StatefulSets, DaemonSets and ReplicaSets also need `metadata.generation == status.observedGeneration`; for a HelmChart the on-device chart carries the new version (`teknoir.org/config-changed-at`), its `helm-install-<name>` Job succeeded (a new one when anything in the chart's `spec` changed) and a release secret exists |
+| `ready` | applied, and Deployments, StatefulSets and DaemonSets finished rolling out with Ready pods that did not restart for 20 s; a Job completed (a failed Job is exit 7); a Pod is Ready; for a HelmChart its release's workloads are ready. Other kinds are as `applied`; a HelmChartConfig is applied when the object is on the robot, the reinstall of the chart it configures is not followed |
+
+The robot has to be reachable before anything is written (`applied`, `ready`), as for the other writes.
+
+`-o json|yaml` prints the platform's answer for each document (`id`, `action`, `validation`, the stored `item`
+with secret values hidden, `replaces`, `warnings`): one object for one document, a list for several, and with
+`--wait` a `wait` object in each. A refused manifest prints its answer (with the findings in
+`validation.issues`) before the command exits 5.
+
+### edit
+
+```bash
+tnctl config edit <target> <resource> [--wait[=published|applied|ready]] [--timeout 5m]
+```
+
+Fetches the stored manifest of a local item, writes it to a private temporary file (mode 0600 in a 0700
+directory, removed afterwards) and opens it in `$VISUAL`, else `$EDITOR`, else `vi`. The command line is split
+into words with quotes but never run through a shell, so `VISUAL='code --wait'` and paths with spaces in quotes
+work. It needs a terminal on stdin (exit 2 otherwise; in a script use `get --manifest` and `add --replace`). A
+graphical editor must wait until the file is closed, or tnctl sees an unchanged file at once (`code --wait`,
+`subl -w`, `gedit --wait`). A hangup or SIGTERM removes the temporary file too. When the editor exits:
+
+- an empty file, or a file without changes (also one that differs only in comments or spelling that the platform
+  stores identically): nothing is written, exit 0 (`No changes: ...`);
+- otherwise the platform checks the manifest with a dry run. With errors the editor opens **again** with the
+  errors as a comment block at the top of the file (the line numbers are those of the file in the editor; the block
+  is removed when you save). Close the editor without changing anything to give up: exit 5, nothing written;
+- a valid manifest is written with `replace` and followed with `--wait`, as for `add`.
+
+The kind, namespace and name cannot change in an edit (that would be a second item): the editor reopens with a
+message. Only one document is allowed. An item that is not local gives exit 8 with the hint of `get --manifest`.
+If the item carries an override on this robot, saving a new version drops it (tnctl says so before it opens the
+editor), and a tool such as Devstudio that wrote the item may write it again. The platform has no revision to
+compare, so tnctl reads the item once more before it writes: if it changed while the editor was open, nothing is
+written (exit 8) and you start again from the new version.
+
+### kinds
+
+```bash
+tnctl config kinds [--template KIND] [-o json]
+```
+
+A table of the kinds that `add` and `edit` accept (`APIVERSION`, `KIND`, `SCOPE`, `NOTE`: for example a Pod
+should be a Deployment, and removing a Namespace deletes everything in it), then the refused kinds with the
+reason, and the schema version used for the check. `--template KIND` prints a starter manifest of one kind
+(case does not matter). `-o json` is the platform's answer, templates included.
+
+Supported: ConfigMap, Secret, Service, Deployment, StatefulSet, DaemonSet, Job, CronJob, Pod, ReplicaSet,
+Ingress, PersistentVolumeClaim, NetworkPolicy, HorizontalPodAutoscaler, PodDisruptionBudget, LimitRange,
+ResourceQuota, ServiceAccount, HelmChart, HelmChartConfig and, cluster-scoped, Namespace. Refused: Role,
+RoleBinding, ClusterRole and ClusterRoleBinding (the robot's agent drops their rules, subjects and roleRef, and it
+runs as cluster-admin), webhook configurations, StorageClass, PriorityClass, RuntimeClass, PersistentVolume, Node,
+CustomResourceDefinition and every kind without a bundled schema (a custom resource whose CRD is missing on the
+robot stops the robot's whole configuration from applying). The table is authoritative; the platform may change it.
+
 ### remove
 
 ```bash
 tnctl config remove vision-station-01 HelmChart/default/local-llm --dry-run
 tnctl config remove vision-station-01 local-llm --wait=applied
+tnctl config remove vision-station-01 Namespace/llm-ns --yes
 ```
 
 Removes a **local** item: an entry that a tool such as Devstudio wrote straight to the robot's device, shown in
@@ -153,6 +278,14 @@ The tool that wrote the item may write it again, so stop it first if it keeps co
 `--dry-run` shows the item that would go (secret values hidden) and removes nothing. Without `--dry-run` the
 result is `Removed <id> from <target>.`; `-o json` prints the platform's answer (`removed`, `owner`,
 `hadOverride`, `warnings`).
+
+**Removing a Namespace** deletes everything in it on the robot, not only what you added there. Without `--yes`,
+tnctl asks the platform for a dry run, prints the platform's warnings (stderr; they list what would go when the
+platform provides the list) and the dry-run answer, removes nothing and exits 2 with `Removing Namespace <ns> deletes
+everything in it on the robot; repeat with --yes to confirm`. With `-o json|yaml` the dry-run answer goes to stderr,
+so stdout stays empty. Repeat the command with `--yes` to remove it (the warning is printed again). `--dry-run`
+never needs `--yes`, an item that is already gone needs none, and `--yes` has no effect on other kinds. The kind may
+be written in any case; `Namespace/<name>` and the platform's own spelling `Namespace//<name>` both name the item.
 
 Items that come from git are not removed with `remove`. Asking for one gives exit 8 and the platform says where
 to remove it: git, the robot's apps, a fleet or the robot type. Overrides are not removed here either: use
@@ -217,7 +350,7 @@ as the platform has stored it. A bare `--wait` means `ready`. Write `--wait=appl
 | Level | Reached when |
 | --- | --- |
 | `published` | The platform evaluated the write (its `overridesRevision` equals the written revision, or a later one when somebody else wrote after you) and the override's state is `active` or `redundant`. `invalid`, `no-target` or `not-applicable` ends with exit 5 and the platform's reason. |
-| `applied` | The robot has it. HelmChart: the on-device HelmChart has the published values and version and the helm Job is a new one that succeeded. Values the platform hides (keys that look like credentials show as `<hidden>`) are only checked to be present. Workload: the containers have the published images and the controller has seen the latest generation. |
+| `applied` | The robot has it (for `add` and `edit`: see [add](#add)). HelmChart: the on-device HelmChart has the published values and version and the helm Job is a new one that succeeded. Values the platform hides (keys that look like credentials show as `<hidden>`) are only checked to be present. Workload: the containers have the published images and the controller has seen the latest generation. |
 | `ready` | Applied, and the rollout is complete, the pods are Ready on the new image and have not restarted for 20 s. With `--image` only the workloads that run the image are held to it; the other workloads of the release only have to be rolled out and Ready. |
 
 `applied` and `ready` look at the robot over WireGuard SSH (the robot's server computer, as
@@ -256,10 +389,10 @@ are on stderr. Errors with `-o json` are `{"error":{"code":"timeout","message":"
 | 2 | usage: bad arguments or flags, ambiguous resource name |
 | 3 | not found: no such robot, device or resource |
 | 4 | timeout: `--wait` ran out of time (the change itself is written) |
-| 5 | rejected: the platform refused it (invalid values, unknown revision, no such target, not overridable) |
+| 5 | rejected: the platform refused it (invalid values or manifest, unknown revision, no such target, not overridable) |
 | 6 | not logged in, login expired (`-o json` code `session_expired`), token rejected, or not allowed: run `tnctl login` |
 | 7 | applied but unhealthy: the helm Job failed or pods crash or cannot pull the image |
-| 8 | conflict: someone else changed the same robot's overrides at the same time; run the command again. For `remove`: the item is not local, the message says where to remove it |
+| 8 | conflict: someone else changed the same robot's overrides at the same time; run the command again. For `add`: the local item exists already (use `--replace`) or the identity is not yours to replace. For `remove`, `edit` and `get --manifest`: the item is not local, the message says where to remove it |
 | 9 | rate limited: the platform allows 60 writes a minute per user; wait the `Retry-After` time (`-o json`: `error.retryAfter`, seconds) and run it again |
 
 ## An agent's loop

@@ -54,6 +54,9 @@ type Error struct {
 	Message string
 	// RetryAfter is the Retry-After header of a 429, in seconds (0: none).
 	RetryAfter int
+	// Body is the response body of the failed request (at most the size the client reads), for
+	// callers that know a richer error shape, such as a 422 that carries a validation result.
+	Body []byte
 }
 
 // KindAuth marks an Error that needs a login (Error.Kind): no login, an expired or rejected token,
@@ -124,7 +127,11 @@ func doRaw(ctx context.Context, method, rawURL, token string, body any) (json.Ra
 			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
 		bodyReader = bytes.NewReader(jsonBody)
-		debugf("Request Body: %s", string(jsonBody))
+		if isSecretRequest(method, rawURL) {
+			debugf("Request Body: <%d bytes, not shown: local item manifest, may hold Secret values>", len(jsonBody))
+		} else {
+			debugf("Request Body: %s", string(jsonBody))
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
@@ -181,9 +188,15 @@ func isSecretRoute(rawURL string) bool {
 	return strings.HasSuffix(stripQuery(rawURL), "/credentials")
 }
 
+// isSecretRequest reports whether the body sent to this URL may hold secret values: the manifest
+// of a local item (a Secret's data or stringData), which debug output must not show.
+func isSecretRequest(method, rawURL string) bool {
+	return method != http.MethodGet && strings.HasSuffix(stripQuery(rawURL), "/local")
+}
+
 // errorFromResponse builds the Error of a non-2xx response.
 func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) *Error {
-	e := &Error{Method: method, URL: stripQuery(rawURL), Status: resp.StatusCode}
+	e := &Error{Method: method, URL: stripQuery(rawURL), Status: resp.StatusCode, Body: body}
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		loc := resp.Header.Get("Location")
 		if strings.Contains(loc, "/oauth2/") {
