@@ -257,7 +257,7 @@ are on stderr. Errors with `-o json` are `{"error":{"code":"timeout","message":"
 | 3 | not found: no such robot, device or resource |
 | 4 | timeout: `--wait` ran out of time (the change itself is written) |
 | 5 | rejected: the platform refused it (invalid values, unknown revision, no such target, not overridable) |
-| 6 | not logged in, token rejected, or not allowed: run `tnctl login` |
+| 6 | not logged in, login expired (`-o json` code `session_expired`), token rejected, or not allowed: run `tnctl login` |
 | 7 | applied but unhealthy: the helm Job failed or pods crash or cannot pull the image |
 | 8 | conflict: someone else changed the same robot's overrides at the same time; run the command again. For `remove`: the item is not local, the message says where to remove it |
 | 9 | rate limited: the platform allows 60 writes a minute per user; wait the `Retry-After` time (`-o json`: `error.retryAfter`, seconds) and run it again |

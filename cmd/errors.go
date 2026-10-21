@@ -22,7 +22,7 @@ const (
 	codeNotFound  = 3 // robot, device or resource does not exist
 	codeTimeout   = 4 // --wait or the request timed out
 	codeRejected  = 5 // the platform refused the change: validation, invalid, no-target
-	codeAuth      = 6 // not logged in, token rejected, or not allowed
+	codeAuth      = 6 // not logged in, login expired (JSON code "session_expired"), token rejected, or not allowed
 	codeUnhealthy = 7 // applied, but the workload fails (Job failed, CrashLoopBackOff, ImagePullBackOff)
 	codeConflict  = 8 // someone else changed the same thing; try again
 	codeRateLimit = 9 // too many requests: wait the Retry-After time and run it again
@@ -39,6 +39,9 @@ var codeNames = map[int]string{
 	codeConflict:  "conflict",
 	codeRateLimit: "rate_limited",
 }
+
+// codeSessionExpiredName is the JSON error code of an expired login (exit code codeAuth).
+const codeSessionExpiredName = "session_expired"
 
 // cliError is an error with an exit code.
 type cliError struct {
@@ -67,6 +70,10 @@ func classify(err error) error {
 	var ee *exitError
 	if errors.As(err, &ee) {
 		return err
+	}
+	if errors.Is(err, auth.ErrSessionExpired) {
+		// the refresh token is dead: same exit code as "not logged in", the action is the same
+		return &cliError{code: codeAuth, err: &auth.SessionExpiredError{Cause: err}}
 	}
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		return &cliError{code: codeAuth, err: errors.New("not logged in: run tnctl login")}
@@ -124,10 +131,18 @@ func exitCodeOf(err error) int {
 // writeError prints err as `Error: message`, or as {"error":{"code","message"}} for -o json.
 func writeError(w io.Writer, err error, format string) {
 	code := exitCodeOf(err)
+	expired := errors.Is(err, auth.ErrSessionExpired)
+	if expired {
+		err = classify(err) // the fixed "run tnctl login" message, not the token endpoint's text
+	}
 	if format == "json" {
 		name := codeNames[code]
 		if name == "" {
 			name = "error"
+		}
+		if expired {
+			// same exit code as "auth", its own name: agents can tell "log in again" from "not allowed"
+			name = codeSessionExpiredName
 		}
 		body := map[string]any{"code": name, "message": err.Error()}
 		var ae *api.Error

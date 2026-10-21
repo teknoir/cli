@@ -16,9 +16,17 @@ including resolved URLs and the exact `ssh` invocation used.
     `tnctl` falls back to printing a verification URL and one-time code — open the URL manually and
     enter the code. On headless machines this is expected behavior.
 
-??? failure "Tokens seem expired"
-    `tnctl` refreshes access tokens automatically using the stored refresh token. If refresh fails
-    (e.g. the refresh token was revoked), simply run `tnctl login` again.
+??? failure "`Your tnctl login has expired. Run: tnctl login` (exit 6, `-o json` code `session_expired`)"
+    `tnctl` refreshes access tokens automatically using the stored refresh token. This message means the
+    platform refused the refresh token: it was revoked, your user was disabled, it was unused for longer than
+    the offline idle timeout (30 days by default), or the platform's login service was reset. Run
+    `tnctl login` again (`--no-browser` on a headless host). `tnctl login --check` tests the stored login
+    without logging in and exits 6 when it has expired. A network error while renewing is not this message:
+    it is shown as it is and retrying helps.
+
+??? failure "`tnctl login` warns that the login response has no refresh token"
+    The platform did not grant the `offline_access` scope, so this login cannot be renewed and ends when the
+    access token expires (minutes). Ask a platform admin to allow `offline_access` for the `teknoir-cli` client.
 
 ??? failure "`not logged in or token expired: run tnctl login`"
     The platform answered 401: there is no token, or it was rejected or has expired. Run `tnctl login`.

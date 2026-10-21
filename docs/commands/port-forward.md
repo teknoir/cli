@@ -59,6 +59,8 @@ Press Ctrl+C to stop.
 The `Open http://…` line appears for services published as web UIs. If the path changes later,
 `tnctl` prints `path is now: …` on stderr. The session is renewed with a fresh login token for as long
 as the command runs, and it ends at once if the device is revoked or your access is removed.
+If your login has expired (revoked or idle too long), the next renewal ends the session with
+`Your tnctl login has expired. Run: tnctl login`; see [`login`](login.md#when-the-login-expires).
 
 Errors name a reason and what to do, for example `service_unknown` (no such service; check
 `tnctl port-forward <device>`), `service_denied` (the device refused the target), `p2p_unavailable` (retry

@@ -13,9 +13,10 @@ import (
 )
 
 var (
-	realm     string
-	clientID  string
-	noBrowser bool
+	realm          string
+	clientID       string
+	noBrowser      bool
+	loginCheckOnly bool
 )
 
 // loginCmd represents the login command
@@ -32,10 +33,14 @@ func init() {
 	rootCmd.AddCommand(loginCmd)
 	loginCmd.Flags().StringVar(&realm, "realm", "master", "Keycloak realm")
 	loginCmd.Flags().StringVar(&clientID, "client-id", config.ClientID, "Keycloak client ID")
+	loginCmd.Flags().BoolVar(&loginCheckOnly, "check", false, "Do not log in: check that the stored login works (exit 0), or exit 6 when it has expired; prints the user and expiry, never a token")
 	loginCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "Do not try to open a browser; just print the login URL and code (the default over SSH or without a display)")
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
+	if loginCheckOnly {
+		return runLoginCheck(cmd)
+	}
 	ctx := cmd.Context()
 	cfg, err := config.Load()
 	if err != nil {
@@ -102,6 +107,10 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to complete device authorization: %w", err)
+	}
+
+	if w := missingRefreshTokenWarning(token, clientID); w != "" {
+		fmt.Fprintln(os.Stderr, w)
 	}
 
 	// Save tokens

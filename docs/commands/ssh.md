@@ -129,6 +129,8 @@ The domain and hub come from your login and configuration, so a bare
 
 - `Tunneling is not active for <device>`: turn Tunneling on for the device in the Teknoir console; for a
   new device, wait until it has connected.
+- `Your tnctl login has expired. Run: tnctl login`: the stored login was revoked or idle too long. Run
+  `tnctl login`; a running session ends at its next renewal with the same message.
 - `device_offline`: the device is not connected to the hub. Check its power and network.
 - Timeouts creating the session: the network must allow outbound HTTPS to `wg.<domain>` and outbound UDP
   (the relay, default port 3478).

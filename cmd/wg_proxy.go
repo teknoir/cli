@@ -201,6 +201,8 @@ func wgHint(reason, namespace, device string) string {
 func describeWGError(err error, o *wgProxyOptions) string {
 	var he *wgclient.Error
 	switch {
+	case errors.Is(err, auth.ErrSessionExpired):
+		return auth.SessionExpiredMessage
 	case errors.As(err, &he):
 		reason := he.Reason
 		if reason == "" {
@@ -216,7 +218,7 @@ func describeWGError(err error, o *wgProxyOptions) string {
 	case errors.Is(err, wgclient.ErrHandshakeTimeout):
 		return "handshake with the hub timed out; is the TURN relay (UDP) reachable from this network?"
 	case errors.Is(err, wgclient.ErrExpired):
-		return "session expired: the hub could not be reached to renew it"
+		return "the WireGuard session expired: the hub could not be reached to renew it"
 	}
 	return oneLine(err.Error())
 }
