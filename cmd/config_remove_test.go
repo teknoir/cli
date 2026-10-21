@@ -539,7 +539,7 @@ func TestConfigRemoveNamespaceNeedsYes(t *testing.T) {
 		if exitCodeOf(err) != codeUsage || err.Error() != "Removing Namespace llm-ns deletes everything in it on the robot; repeat with --yes to confirm" {
 			t.Fatalf("%s: exit %d: %v", arg, exitCodeOf(err), err)
 		}
-		if !strings.Contains(errs, "warning: "+nsWarning) || !strings.HasPrefix(out, "Would remove Namespace//llm-ns from vision-station-01.\n") {
+		if !strings.Contains(errs, "warning: "+nsWarning) || !strings.HasPrefix(out, "Would remove Namespace/llm-ns from vision-station-01.\n") {
 			t.Errorf("the warning and the dry-run answer must be printed\nstdout: %s\nstderr: %s", out, errs)
 		}
 	}
@@ -601,7 +601,7 @@ func TestConfigRemoveNamespaceWithYes(t *testing.T) {
 	})
 	e, _ := testEnv(t, p, nil)
 	out, errs, err := runCLI(t, e, "config", "remove", "vision-station-01", nsID, "--yes")
-	if err != nil || !strings.HasPrefix(out, "Removed Namespace//llm-ns from vision-station-01.\n") || !strings.Contains(errs, "warning: "+nsWarning) {
+	if err != nil || !strings.HasPrefix(out, "Removed Namespace/llm-ns from vision-station-01.\n") || !strings.Contains(errs, "warning: "+nsWarning) {
 		t.Fatalf("%v\n%s\n%s", err, out, errs)
 	}
 	if n := len(p.seen("DELETE", removePath)); n != 1 {
@@ -619,7 +619,7 @@ func TestConfigRemoveNamespaceDryRunNeedsNoYes(t *testing.T) {
 	})
 	e, _ := testEnv(t, p, nil)
 	out, errs, err := runCLI(t, e, "config", "remove", "vision-station-01", nsID, "--dry-run")
-	if err != nil || !strings.HasPrefix(out, "Would remove Namespace//llm-ns") || !strings.Contains(errs, "deletes everything") {
+	if err != nil || !strings.HasPrefix(out, "Would remove Namespace/llm-ns") || !strings.Contains(errs, "deletes everything") {
 		t.Fatalf("%v\n%s\n%s", err, out, errs)
 	}
 	if n := len(p.seen("DELETE", removePath)); n != 1 {
@@ -672,5 +672,29 @@ func TestConfigLocalOnOlderPlatform(t *testing.T) {
 	_, _, err = runCLI(t, e, "config", "kinds")
 	if exitCodeOf(err) != codeUsage || !strings.Contains(err.Error(), "this platform cannot add or edit local resources yet") {
 		t.Errorf("kinds: %d %v", exitCodeOf(err), err)
+	}
+}
+
+func TestShownID(t *testing.T) {
+	for in, want := range map[string]string{
+		"Namespace//la-test":            "Namespace/la-test",
+		"Namespace/default/la-test":     "Namespace/la-test",
+		"ConfigMap/la-test/settings":    "ConfigMap/la-test/settings",
+		"Deployment/default/whoami":     "Deployment/default/whoami",
+		"HelmChart/kube-system/traefik": "HelmChart/kube-system/traefik",
+		"whoami":                        "whoami",
+		"ClusterRole//x":                "ClusterRole//x",
+		"app:https://host#":             "app:https://host#",
+	} {
+		if got := shownID(in); got != want {
+			t.Errorf("shownID(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// what is printed is what config remove and edit accept
+	known := []string{"Namespace/default/la-test", "Namespace/default/la", "ConfigMap/la-test/settings"}
+	for _, id := range known {
+		if got, err := resolveResourceArg(shownID(id), known); err != nil || got != id {
+			t.Errorf("%s printed as %s resolves to %q, %v", id, shownID(id), got, err)
+		}
 	}
 }

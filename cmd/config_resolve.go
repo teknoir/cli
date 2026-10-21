@@ -179,3 +179,14 @@ func editDistance(a, b string) int {
 	}
 	return prev[len(b)]
 }
+
+// shownID is how an item id is printed. A Namespace is cluster-scoped: Namespace/default/x (how tnctl
+// follows it) and the platform's Namespace//x both print as Namespace/x, which config remove and edit
+// also accept. Everything else (other ids, progress keys such as app:<url>#<path>) is printed as is.
+func shownID(id string) string {
+	parts := strings.Split(id, "/")
+	if len(parts) == 3 && parts[0] == "Namespace" {
+		return parts[0] + "/" + parts[2]
+	}
+	return id
+}

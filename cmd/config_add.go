@@ -291,18 +291,21 @@ func namespacesOf(docs []localDoc) map[string]bool {
 }
 
 // namespaceMissing reports whether a finding or warning of the platform says that the namespace ns
-// of the document does not exist (yet): the error "namespace x does not exist ..." at
-// metadata.namespace, or the warning "Nothing in this robot's configuration creates the namespace x".
-// It matches on the text and the namespace name, so that another finding about the namespace (for
-// example one that refuses it) is kept.
+// of the document does not exist (yet). A platform that names the finding (IssueNamespaceUnknown) is
+// matched on that code in dropPendingNamespaceIssues; this reads the text of a platform that does not:
+// "Namespace 'x' is not known to exist on this robot. Add a Namespace item ...", and older wordings
+// ("namespace x does not exist", "Nothing in this robot's configuration creates the namespace x").
+// The namespace name must appear, and a finding that a Namespace item would not resolve ("would come
+// too late") or another finding about the namespace (for example one that refuses it) is kept.
 func namespaceMissing(msg, ns string) bool {
-	m := strings.ToLower(msg)
-	ns = strings.ToLower(ns)
-	if !strings.Contains(m, "namespace "+ns) {
+	m := strings.NewReplacer("'", "", `"`, "", "`", "").Replace(strings.ToLower(msg))
+	// the whole name: a finding about la-test is not one about la
+	named := regexp.MustCompile(`namespace ` + regexp.QuoteMeta(strings.ToLower(ns)) + `($|[^a-z0-9-])`)
+	if !named.MatchString(m) || strings.Contains(m, "too late") {
 		return false
 	}
-	return strings.Contains(m, "does not exist") || strings.Contains(m, "creates the namespace") ||
-		strings.Contains(m, "doesn't exist") || strings.Contains(m, "not found")
+	return strings.Contains(m, "is not known to exist") || strings.Contains(m, "does not exist") ||
+		strings.Contains(m, "creates the namespace") || strings.Contains(m, "doesn't exist") || strings.Contains(m, "not found")
 }
 
 // dropPendingNamespaceIssues removes, from the answer to a dry run, the complaints about a namespace
@@ -314,10 +317,11 @@ func dropPendingNamespaceIssues(res *api.LocalWriteResult, d localDoc, created m
 	if !created[d.ns] || d.kind == "Namespace" {
 		return nil
 	}
+	wasInvalid := res.Validation.Verdict == api.VerdictInvalid
 	dropped := false
 	var kept []api.LocalValidationIssue
 	for _, is := range res.Validation.Issues {
-		if is.Path == "metadata.namespace" && namespaceMissing(is.Message, d.ns) {
+		if is.Path == "metadata.namespace" && (is.Code == api.IssueNamespaceUnknown || is.Code == "" && namespaceMissing(is.Message, d.ns)) {
 			dropped = true
 			continue
 		}
@@ -342,6 +346,11 @@ func dropPendingNamespaceIssues(res *api.LocalWriteResult, d localDoc, created m
 		}
 	}
 	res.Validation.Verdict = api.VerdictValid
+	if wasInvalid && res.Action == api.LocalActionUnchanged {
+		// A platform that answers every invalid manifest with "unchanged" (backstage f5423d04): the
+		// namespace finding is only made for an item that is not stored, so the write is an add.
+		res.Action = api.LocalActionCreate
+	}
 	return []string{d.ns}
 }
 
@@ -498,6 +507,7 @@ func localResultLine(res *api.LocalWriteResult, d localDoc, target string) strin
 	if id == "" {
 		id = d.label()
 	}
+	id = shownID(id)
 	switch {
 	case res.Action == api.LocalActionUnchanged && res.DryRun:
 		return fmt.Sprintf("would leave %s unchanged on %s (already as given)", id, target)

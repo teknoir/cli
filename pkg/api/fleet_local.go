@@ -39,14 +39,20 @@ type LocalKindCatalog struct {
 // LocalValidationIssue is one finding about a manifest, positioned in the text that was sent
 // (1-based line and column, relative to the manifest, not to a file it came from).
 type LocalValidationIssue struct {
-	Severity  string `json:"severity"` // error or warning
-	Message   string `json:"message"`
+	Severity string `json:"severity"` // error or warning
+	Message  string `json:"message"`
+	// Code names a finding a client acts on (IssueNamespaceUnknown); the wording of Message may change.
+	Code      string `json:"code,omitempty"`
 	Path      string `json:"path"`
 	Line      int    `json:"line,omitempty"`
 	Column    int    `json:"column,omitempty"`
 	EndLine   int    `json:"endLine,omitempty"`
 	EndColumn int    `json:"endColumn,omitempty"`
 }
+
+// IssueNamespaceUnknown is the code of the finding that metadata.namespace is not known to exist on the
+// target and that a Namespace item stored first would make it known.
+const IssueNamespaceUnknown = "namespace-unknown"
 
 // Verdicts of a LocalValidation.
 const (
