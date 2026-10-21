@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/teknoir/cli/pkg/auth"
 	"github.com/teknoir/wg-tunnel/pkg/api"
 	"github.com/teknoir/wg-tunnel/pkg/wgclient"
 )
@@ -29,6 +30,8 @@ type wgStatusReport struct {
 	Device       string
 	Hub          string // URL
 	HubReachable bool
+	// HubNotContacted: no request was sent (the stored login is dead), so reachability is unknown.
+	HubNotContacted bool
 	// DeviceOnline: "yes", "no" or "unknown" (the hub did not get that far).
 	DeviceOnline string
 	Problem      string // the reason line when the session could not be created
@@ -46,9 +49,12 @@ func formatWGStatus(r wgStatusReport) string {
 	w := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
 	row := func(k, v string) { _, _ = fmt.Fprintf(w, "%s\t%s\n", k, v) }
 	row("Device", r.Device)
-	if r.HubReachable {
+	switch {
+	case r.HubNotContacted:
+		row("Hub", "not contacted ("+r.Hub+")")
+	case r.HubReachable:
 		row("Hub", "reachable ("+r.Hub+")")
-	} else {
+	default:
 		row("Hub", "unreachable ("+r.Hub+")")
 	}
 	row("Device online", r.DeviceOnline)
@@ -108,6 +114,10 @@ func formatServiceLine(s api.ServiceSpec) string {
 // statusDenial maps a hub denial to (device online, problem text).
 func statusDenial(err error, o wgStatusOptions) (online, problem string) {
 	var he *wgclient.Error
+	if errors.Is(err, auth.ErrSessionExpired) {
+		// The "denial" is ours (wgLoginExpired); the hub was never asked.
+		return "unknown", describeWGError(err, &wgProxyOptions{domain: o.domain, namespace: o.namespace, device: o.device})
+	}
 	if !errors.As(err, &he) {
 		return "unknown", ""
 	}
@@ -162,7 +172,11 @@ func runWGStatus(ctx context.Context, o wgStatusOptions, cred wgclient.Credentia
 	cancel()
 	if err != nil {
 		var he *wgclient.Error
-		rep.HubReachable = errors.As(err, &he) // an answer, even a denial, means the hub is up
+		if errors.Is(err, auth.ErrSessionExpired) {
+			rep.HubNotContacted = true // a dead login never reached the hub
+		} else {
+			rep.HubReachable = errors.As(err, &he) // an answer, even a denial, means the hub is up
+		}
 		rep.DeviceOnline, rep.Problem = statusDenial(err, o)
 		if rep.Problem == "" {
 			rep.Problem = describeWGError(err, &wgProxyOptions{domain: o.domain, namespace: o.namespace, device: o.device})

@@ -55,11 +55,12 @@ tnctl login --realm customers
 
 ```bash
 tnctl login --check            # human readable
-tnctl login --check -o json    # {"domain","user","accessExpires","refreshed","offline","refreshExpires"?}
+tnctl login --check -o json    # {"domain","user","accessExpires","offline","refreshExpires"?}
 ```
 
-`--check` never opens a browser and never prints a token. It uses the stored access token while it is valid;
-otherwise it redeems the refresh token (and saves the renewed tokens, as every command does). It exits:
+`--check` never opens a browser and never prints a token. It always redeems the refresh token, even while
+the stored access token is still valid, so a revoked or expired login is caught now and not halfway through a
+long job (this rotates the tokens once; the renewed tokens are saved, as every command does). It exits:
 
 | Exit | Meaning |
 | --- | --- |
@@ -88,12 +89,20 @@ Long-running commands behave the same: `--wait` stops at the next poll, and `ssh
 `socks-proxy` over WireGuard end the tunnel when the next renewal needs a new token. A network problem while
 renewing is **not** reported as an expired login: `--wait` retries it, and other commands print the network error.
 
+`tnctl` does not give up on a refresh token by itself unless its `exp` claim is more than five minutes past
+(offline tokens have none): otherwise the platform decides, so a host whose clock runs ahead keeps a working
+login. The platform's `invalid_grant`, `invalid_token` and `unauthorized_client` answers all count as an expired
+login; if `tnctl login` does not help (the last one can also mean the `teknoir-cli` client was changed), run with
+`--debug` to see the platform's own answer.
+
 ## Notes
 
 - Because `offline_access` is requested, `tnctl` receives a refresh token and can renew expired
   access tokens automatically on subsequent commands. If the platform does not grant it, `tnctl login`
   warns that the login ends with the access token; ask a platform admin to allow `offline_access` for the
   `teknoir-cli` client.
+- A new login replaces the stored refresh token even when the response has none, so an old, dead one is
+  never kept.
 - A token is renewed when it has less than min(60 s, half its lifetime) left.
 - Use `--debug` to print the resolved issuer URL and client ID.
 

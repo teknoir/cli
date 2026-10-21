@@ -118,8 +118,6 @@ type Status struct {
 	User string `json:"user,omitempty"`
 	// AccessExpires is when the current access token ends.
 	AccessExpires time.Time `json:"accessExpires"`
-	// Refreshed is true when the check had to redeem the refresh token (so the login is alive).
-	Refreshed bool `json:"refreshed"`
 	// Offline is true when the refresh token is an offline token.
 	Offline bool `json:"offline"`
 	// RefreshExpires is when the refresh token ends; nil when it has no fixed expiry (an offline
@@ -127,8 +125,8 @@ type Status struct {
 	RefreshExpires *time.Time `json:"refreshExpires,omitempty"`
 }
 
-// Check verifies that the stored login for the domain works: it returns a Status when the access
-// token is still valid or a refresh succeeds (the refreshed tokens are saved), and an error
+// Check verifies that the stored login for the domain works: it redeems the refresh token (one
+// rotation; the new tokens are saved) and returns a Status when that succeeds, and an error
 // matching ErrSessionExpired when the login is dead, ErrNotLoggedIn when there is none. Other
 // errors (network, server) are returned as they are: they do not say the login is dead.
 func Check(ctx context.Context, domain string) (*Status, error) {
@@ -136,12 +134,9 @@ func Check(ctx context.Context, domain string) (*Status, error) {
 }
 
 func check(ctx context.Context, domain string, d tokenDeps) (*Status, error) {
-	before, err := d.load()
-	if err != nil {
-		return nil, err
-	}
-	old := before.Auths[config.SanitizeDomain(domain)]
-	if _, err := accessToken(ctx, domain, d); err != nil {
+	// Always redeem the refresh token: a still-valid access token proves nothing about it, and
+	// `tnctl login --check || tnctl login` must catch a revoked session before a long job does.
+	if _, err := accessToken(ctx, domain, forceRefresh(d)); err != nil {
 		return nil, err
 	}
 	cfg, err := d.load()
@@ -150,7 +145,6 @@ func check(ctx context.Context, domain string, d tokenDeps) (*Status, error) {
 	}
 	a := cfg.Auths[config.SanitizeDomain(domain)]
 	st := &Status{Domain: domain, Offline: isOfflineToken(a.RefreshToken)}
-	st.Refreshed = a.AccessToken != old.AccessToken
 	if exp, err := time.Parse(time.RFC3339, a.Expiry); err == nil {
 		st.AccessExpires = exp
 	}

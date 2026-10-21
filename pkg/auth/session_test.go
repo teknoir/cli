@@ -119,7 +119,7 @@ func TestRefreshNetworkErrorIsTransient(t *testing.T) {
 func TestLocallyExpiredRefreshTokenSkipsTheRequest(t *testing.T) {
 	_, n := fakeIDP(t, 200, `{"access_token":"x","token_type":"bearer","expires_in":300}`)
 	a := expiredAccess()
-	a.RefreshToken = jwt(t, map[string]any{"typ": "Refresh", "exp": time.Now().Add(-time.Minute).Unix()})
+	a.RefreshToken = jwt(t, map[string]any{"typ": "Refresh", "exp": time.Now().Add(-time.Hour).Unix()})
 	_, err := GetValidToken(context.Background(), "teknoir.cloud", a)
 	if !errors.Is(err, ErrSessionExpired) {
 		t.Fatalf("got %v", err)
@@ -234,16 +234,25 @@ func TestCachedTokenUsedUntilTheMargin(t *testing.T) {
 func TestCheck(t *testing.T) {
 	now := time.Now()
 	at := jwt(t, map[string]any{"iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "preferred_username": "anders", "sub": "u1"})
-	t.Run("valid access token, no request", func(t *testing.T) {
-		_, n := fakeIDP(t, 500, `{}`)
+	t.Run("valid access token still redeems the refresh token", func(t *testing.T) {
+		newRT := jwt(t, map[string]any{"typ": "Offline"})
+		_, n := fakeIDP(t, 200, `{"access_token":"`+at+`","refresh_token":"`+newRT+`","token_type":"bearer","expires_in":300}`)
 		cfg := cfgWith("teknoir.cloud", config.AuthConfig{AccessToken: at, RefreshToken: jwt(t, map[string]any{"typ": "Offline"}), Realm: "master", Expiry: now.Add(5 * time.Minute).Format(time.RFC3339)})
 		d := tokenDeps{load: func() (*config.Config, error) { return cfg, nil }, refresh: GetValidToken, save: func(*config.Config) error { return nil }}
 		st, err := check(context.Background(), "teknoir.cloud", d)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st.User != "anders" || st.Refreshed || !st.Offline || st.RefreshExpires != nil || n.Load() != 0 {
-			t.Errorf("%+v", st)
+		if st.User != "anders" || !st.Offline || st.RefreshExpires != nil || n.Load() != 1 {
+			t.Errorf("%+v, %d requests", st, n.Load())
+		}
+	})
+	t.Run("valid access token but revoked session is caught", func(t *testing.T) {
+		fakeIDP(t, 400, `{"error":"invalid_grant"}`)
+		cfg := cfgWith("teknoir.cloud", config.AuthConfig{AccessToken: at, RefreshToken: jwt(t, map[string]any{"typ": "Offline"}), Realm: "master", Expiry: now.Add(5 * time.Minute).Format(time.RFC3339)})
+		d := tokenDeps{load: func() (*config.Config, error) { return cfg, nil }, refresh: GetValidToken, save: func(*config.Config) error { return nil }}
+		if _, err := check(context.Background(), "teknoir.cloud", d); !errors.Is(err, ErrSessionExpired) {
+			t.Fatalf("a revoked session passed --check on a cached access token: %v", err)
 		}
 	})
 	t.Run("refresh works", func(t *testing.T) {
@@ -257,7 +266,7 @@ func TestCheck(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !st.Refreshed || st.User != "anders" || st.RefreshExpires == nil || st.RefreshExpires.Unix() != rtExp {
+		if st.User != "anders" || st.RefreshExpires == nil || st.RefreshExpires.Unix() != rtExp {
 			t.Errorf("%+v", st)
 		}
 		b, _ := json.Marshal(st)
@@ -289,4 +298,19 @@ func TestCheck(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	})
+}
+
+func TestRefreshTokenJustPastExpIsLeftToKeycloak(t *testing.T) {
+	// a host whose clock runs ahead must not declare a still-valid login dead
+	_, n := fakeIDP(t, 200, `{"access_token":"new","refresh_token":"rt2","token_type":"bearer","expires_in":300}`)
+	a := expiredAccess()
+	a.RefreshToken = jwt(t, map[string]any{"typ": "Refresh", "exp": time.Now().Add(-time.Minute).Unix()})
+	if _, err := GetValidToken(context.Background(), "teknoir.cloud", a); err != nil || n.Load() != 1 {
+		t.Fatalf("err %v, %d requests", err, n.Load())
+	}
+	// ... but one that is clearly past its exp is dead without a request
+	a.RefreshToken = jwt(t, map[string]any{"typ": "Refresh", "exp": time.Now().Add(-refreshExpirySkew - time.Minute).Unix()})
+	if _, err := GetValidToken(context.Background(), "teknoir.cloud", a); !errors.Is(err, ErrSessionExpired) || n.Load() != 1 {
+		t.Fatalf("err %v, %d requests", err, n.Load())
+	}
 }

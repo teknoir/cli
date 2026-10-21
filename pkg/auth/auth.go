@@ -14,6 +14,18 @@ var tokenURL = func(domain, realm string) string {
 	return fmt.Sprintf("https://auth.%s/auth/realms/%s/protocol/openid-connect/token", domain, realm)
 }
 
+// SetTokenURLForTest points the token endpoint at a fake (for tests in other packages) and returns
+// the function that restores it.
+func SetTokenURLForTest(f func(domain, realm string) string) (restore func()) {
+	old := tokenURL
+	tokenURL = f
+	return func() { tokenURL = old }
+}
+
+// refreshExpirySkew is how far past its exp a refresh token must be before tnctl gives up on it
+// without asking Keycloak, so a fast local clock cannot kill a login that is still valid.
+const refreshExpirySkew = 5 * time.Minute
+
 // GetValidToken returns a valid access token, refreshing it if necessary. A refresh token that
 // Keycloak rejects (or that is known to be expired) gives an error matching ErrSessionExpired.
 func GetValidToken(ctx context.Context, domain string, auth config.AuthConfig) (*oauth2.Token, error) {
@@ -35,7 +47,9 @@ func GetValidToken(ctx context.Context, domain string, auth config.AuthConfig) (
 	if auth.RefreshToken == "" {
 		return nil, &SessionExpiredError{Cause: fmt.Errorf("no refresh token stored")}
 	}
-	if exp, ok := refreshTokenExpiry(auth.RefreshToken); ok && !exp.After(time.Now()) {
+	// Keycloak has the last word on a token that expired only moments ago: this host's clock may
+	// run ahead of it, so only a token that is clearly past its exp is declared dead locally.
+	if exp, ok := refreshTokenExpiry(auth.RefreshToken); ok && time.Since(exp) > refreshExpirySkew {
 		return nil, &SessionExpiredError{Cause: fmt.Errorf("refresh token expired at %s", exp.UTC().Format(time.RFC3339))}
 	}
 

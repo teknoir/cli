@@ -41,12 +41,8 @@ func writeLoginCheck(w io.Writer, st *tnauth.Status, format string) error {
 	if who == "" {
 		who = "an unknown user"
 	}
-	how := "access token valid"
-	if st.Refreshed {
-		how = "renewed just now, access token valid"
-	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Logged in to %s as %s (%s until %s).\n", st.Domain, who, how, st.AccessExpires.Local().Format(time.RFC3339))
+	fmt.Fprintf(&sb, "Logged in to %s as %s (renewed just now, access token valid until %s).\n", st.Domain, who, st.AccessExpires.Local().Format(time.RFC3339))
 	switch {
 	case st.RefreshExpires != nil:
 		fmt.Fprintf(&sb, "The login can be renewed until %s.\n", st.RefreshExpires.Local().Format(time.RFC3339))

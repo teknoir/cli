@@ -11,6 +11,7 @@ import (
 
 	"github.com/teknoir/cli/pkg/api"
 	"github.com/teknoir/cli/pkg/auth"
+	"github.com/teknoir/cli/pkg/config"
 )
 
 // Exit codes of the commands that agents drive (robots, config, exec, logs). They are part of
@@ -132,7 +133,12 @@ func exitCodeOf(err error) int {
 func writeError(w io.Writer, err error, format string) {
 	code := exitCodeOf(err)
 	expired := errors.Is(err, auth.ErrSessionExpired)
+	detail := ""
 	if expired {
+		var se *auth.SessionExpiredError
+		if errors.As(err, &se) {
+			detail = se.Detail() // what the platform answered, for --debug
+		}
 		err = classify(err) // the fixed "run tnctl login" message, not the token endpoint's text
 	}
 	if format == "json" {
@@ -154,4 +160,7 @@ func writeError(w io.Writer, err error, format string) {
 		return
 	}
 	fmt.Fprintln(w, "Error:", err)
+	if detail != "" && config.Debug {
+		_, _ = fmt.Fprintln(w, "Debug: login service said:", detail)
+	}
 }

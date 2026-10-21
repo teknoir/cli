@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/teknoir/cli/pkg/api"
 	"github.com/teknoir/cli/pkg/auth"
+	"github.com/teknoir/cli/pkg/config"
 	"github.com/teknoir/wg-tunnel/pkg/wgclient"
 	"golang.org/x/oauth2"
 )
@@ -287,6 +288,13 @@ func TestLoginCheckValidLogin(t *testing.T) {
 	at := testJWT(t, map[string]any{"preferred_username": "anders", "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix()})
 	rt := testJWT(t, map[string]any{"typ": "Offline"})
 	useConfig(t, "teknoir.cloud", map[string]any{"access_token": at, "refresh_token": rt, "expiry": now.Add(5 * time.Minute).Format(time.RFC3339), "realm": "master"})
+	// --check always redeems the refresh token, so the token endpoint is faked (rotating the token)
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"` + at + `","refresh_token":"` + rt + `","token_type":"bearer","expires_in":300}`))
+	}))
+	defer idp.Close()
+	defer auth.SetTokenURLForTest(func(string, string) string { return idp.URL })()
 
 	out, errs, err := runLoginCheckCLI(t, "--check")
 	if err != nil {
@@ -306,10 +314,10 @@ func TestLoginCheckValidLogin(t *testing.T) {
 	}
 	var st struct {
 		Domain, User                  string
-		Offline, Refreshed            bool
+		Offline                       bool
 		AccessExpires, RefreshExpires any
 	}
-	if err := json.Unmarshal([]byte(out), &st); err != nil || st.User != "anders" || st.Domain != "teknoir.cloud" || !st.Offline || st.Refreshed || st.RefreshExpires != nil {
+	if err := json.Unmarshal([]byte(out), &st); err != nil || st.User != "anders" || st.Domain != "teknoir.cloud" || !st.Offline || st.RefreshExpires != nil {
 		t.Errorf("%v: %s", err, out)
 	}
 	if strings.Contains(out, at) || strings.Contains(out, rt) {
@@ -331,5 +339,71 @@ func TestLoginCheckNotLoggedInExits6(t *testing.T) {
 	_, _, err := runLoginCheckCLI(t, "--check")
 	if exitCodeOf(err) != codeAuth || !errors.Is(err, auth.ErrNotLoggedIn) {
 		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestLoginCheckRevokedSessionWithValidAccessTokenExits6(t *testing.T) {
+	now := time.Now()
+	at := testJWT(t, map[string]any{"iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix()})
+	useConfig(t, "teknoir.cloud", map[string]any{"access_token": at, "refresh_token": testJWT(t, map[string]any{"typ": "Offline"}), "expiry": now.Add(5 * time.Minute).Format(time.RFC3339), "realm": "master"})
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer idp.Close()
+	defer auth.SetTokenURLForTest(func(string, string) string { return idp.URL })()
+	_, _, err := runLoginCheckCLI(t, "--check")
+	if err == nil || exitCodeOf(err) != codeAuth || classify(err).Error() != auth.SessionExpiredMessage {
+		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestStoreLoginClearsTheOldRefreshTokenWhenTheResponseHasNone(t *testing.T) {
+	cfg := &config.Config{Auths: map[string]config.AuthConfig{"teknoir_cloud": {AccessToken: "old", RefreshToken: "old-rt"}}}
+	storeLogin(cfg, "teknoir.cloud", &oauth2.Token{AccessToken: "new", Expiry: time.Now().Add(time.Minute)}, "master", "teknoir-cli")
+	a := cfg.Auths[config.SanitizeDomain("teknoir.cloud")]
+	if a.AccessToken != "new" || a.RefreshToken != "" || a.Realm != "master" || a.ClientID != "teknoir-cli" {
+		t.Errorf("%+v", a)
+	}
+	storeLogin(cfg, "teknoir.cloud", &oauth2.Token{AccessToken: "n2", RefreshToken: "rt2", Expiry: time.Now().Add(time.Minute)}, "master", "teknoir-cli")
+	if cfg.Auths[config.SanitizeDomain("teknoir.cloud")].RefreshToken != "rt2" {
+		t.Error("new refresh token not stored")
+	}
+}
+
+func TestRunWGStatusExpiredLoginDoesNotClaimTheHubAnswered(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	defer srv.Close()
+	o := wgStatusOptions{domain: "teknoir.cloud", namespace: "ns1", device: "dev-1", hubURL: srv.URL}
+	cred := func(context.Context, string) (string, error) { return "", &wgLoginExpired{expiredErr} }
+	var out, errb bytes.Buffer
+	code := runWGStatus(context.Background(), o, cred, nil, nil, &out, &errb)
+	if code != wgExitFail || calls != 0 {
+		t.Fatalf("code %d, %d hub calls", code, calls)
+	}
+	got := out.String()
+	if strings.Contains(got, "Hub  reachable") || strings.Contains(got, "unreachable") {
+		t.Errorf("claims something about the hub:\n%s", got)
+	}
+	if !strings.Contains(got, "not contacted") || !strings.Contains(got, auth.SessionExpiredMessage) {
+		t.Errorf("want 'not contacted' and the login message:\n%s", got)
+	}
+}
+
+func TestWriteErrorShowsTheLoginServiceAnswerOnlyWithDebug(t *testing.T) {
+	defer func(d bool) { config.Debug = d }(config.Debug)
+	var b bytes.Buffer
+	config.Debug = false
+	writeError(&b, fmt.Errorf("x: %w", expiredErr), "")
+	if got := b.String(); got != "Error: "+auth.SessionExpiredMessage+"\n" {
+		t.Errorf("%q", got)
+	}
+	b.Reset()
+	config.Debug = true
+	writeError(&b, fmt.Errorf("x: %w", expiredErr), "")
+	if got := b.String(); !strings.Contains(got, "Debug: login service said:") || !strings.Contains(got, "invalid_grant") {
+		t.Errorf("%q", got)
 	}
 }

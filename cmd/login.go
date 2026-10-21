@@ -113,16 +113,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, w)
 	}
 
-	// Save tokens
-	auth := cfg.Auths[config.SanitizeDomain(domain)]
-	auth.AccessToken = token.AccessToken
-	if token.RefreshToken != "" {
-		auth.RefreshToken = token.RefreshToken
-	}
-	auth.Expiry = token.Expiry.Format(time.RFC3339)
-	auth.Realm = realm
-	auth.ClientID = clientID
-	cfg.Auths[config.SanitizeDomain(domain)] = auth
+	storeLogin(cfg, domain, token, realm, clientID)
 
 	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("failed to save tokens to config: %w", err)
@@ -130,6 +121,19 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Successfully logged in! Tokens saved to configuration.")
 	return nil
+}
+
+// storeLogin records a completed login in cfg (the caller saves it). The refresh token is replaced
+// even when the response has none: the old one belongs to the previous login and is most likely
+// dead, so keeping it would only produce a confusing invalid_grant later.
+func storeLogin(cfg *config.Config, domain string, token *oauth2.Token, realm, clientID string) {
+	auth := cfg.Auths[config.SanitizeDomain(domain)]
+	auth.AccessToken = token.AccessToken
+	auth.RefreshToken = token.RefreshToken
+	auth.Expiry = token.Expiry.Format(time.RFC3339)
+	auth.Realm = realm
+	auth.ClientID = clientID
+	cfg.Auths[config.SanitizeDomain(domain)] = auth
 }
 
 // canOpenBrowser reports whether this session can show a browser: never over SSH, and on
