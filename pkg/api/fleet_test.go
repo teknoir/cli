@@ -86,6 +86,22 @@ func TestFleetRoutes(t *testing.T) {
 	}
 }
 
+func TestFleetRemoveLocalItem(t *testing.T) {
+	ctx := context.Background()
+	f, s := fleetServer(t, 200, `{"id":"HelmChart/default/local-llm","dryRun":true,"owner":"devstudio","hadOverride":true,"removed":{"kind":"HelmChart"},"warnings":["w"]}`)
+	r, raw, err := f.RemoveLocalItem(ctx, "vs", "HelmChart/default/local-llm", true)
+	if err != nil || s.method != "DELETE" || !strings.HasSuffix(s.path, "/config/vs/local") || s.query != "dryRun=1&id=HelmChart%2Fdefault%2Flocal-llm" || s.body != "" {
+		t.Errorf("%v %+v", err, s)
+	}
+	if !r.DryRun || r.Owner != "devstudio" || !r.HadOverride || r.Removed["kind"] != "HelmChart" || len(r.Warnings) != 1 || len(raw) == 0 {
+		t.Errorf("%+v", r)
+	}
+	f.RemoveLocalItem(ctx, "vs", "HelmChart/default/local-llm", false)
+	if s.query != "id=HelmChart%2Fdefault%2Flocal-llm" {
+		t.Errorf("query %q", s.query)
+	}
+}
+
 func TestFleetTargetNameIsEscaped(t *testing.T) {
 	f, s := fleetServer(t, 200, `{}`)
 	f.ConfigTarget(context.Background(), "a/b c")

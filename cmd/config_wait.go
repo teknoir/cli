@@ -81,6 +81,8 @@ type writeInfo struct {
 	// image: resource id -> the container or image path whose new image the pods must run
 	// ("" for the primary one). Absent: no image is expected.
 	image map[string]string
+	// gone: the write removed this local item; published and applied then mean "no longer there".
+	gone *goneItem
 }
 
 // waiter follows a change: published through the fleet API, applied and ready on the device.
@@ -224,7 +226,16 @@ func (w *waiter) wait(ctx context.Context, info writeInfo) error {
 	w.deadline = start.Add(w.limit)
 
 	w.stage = "published"
-	err := w.waitPublished(ctx, info)
+	var err error
+	if info.gone != nil {
+		err = w.waitGonePublished(ctx, info.gone)
+		if err == nil && (w.level == waitApplied || w.level == waitReady) {
+			w.stage = string(w.level)
+			err = w.waitGoneDevice(ctx, info.gone)
+		}
+	} else {
+		err = w.waitPublished(ctx, info)
+	}
 	if err == nil && info.resourcesAfter != nil && w.lastView != nil {
 		info.resources = info.resourcesAfter(w.lastView)
 	}
@@ -233,6 +244,10 @@ func (w *waiter) wait(ctx context.Context, info writeInfo) error {
 		err = w.waitDevice(ctx, info)
 	}
 	if err != nil {
+		var st *stillThereError
+		if errors.As(err, &st) {
+			return newErr(codeTimeout, "%s", st.msg)
+		}
 		if errors.Is(err, context.Canceled) || (ctx.Err() == context.Canceled && !errors.Is(err, context.DeadlineExceeded)) {
 			return newErr(codeError, "interrupted while waiting for the change to be %s (the change itself is written)", w.stage)
 		}

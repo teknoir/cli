@@ -141,6 +141,14 @@ func (f *Fleet) DeleteAllOverrides(ctx context.Context, target string) (*Overrid
 	return &r, raw, err
 }
 
+// RemoveLocalItem deletes a local item (an entry a tool such as Devstudio wrote straight to the
+// device's manifest) from a robot or device. id is Kind/namespace/name. With dryRun nothing is
+// removed; the result says what would be.
+func (f *Fleet) RemoveLocalItem(ctx context.Context, target, id string, dryRun bool) (*LocalRemoveResult, json.RawMessage, error) {
+	r, raw, err := decode[LocalRemoveResult](f.Do(ctx, "DELETE", configPath(target, "local"), writeQuery(id, dryRun), nil))
+	return &r, raw, err
+}
+
 // Promote returns the overlay YAML and GitHub links to commit a resource's override to git.
 func (f *Fleet) Promote(ctx context.Context, target, id, to string) (*PromoteResult, json.RawMessage, error) {
 	q := url.Values{"id": {id}}

@@ -45,6 +45,7 @@ application off on one robot is not possible yet.
 | `config unset <target> <resource> [k.path...]` | Remove override keys; the git value returns |
 | `config delete <target> <resource> k.path...` | Remove a value from the robot (writes `null`) |
 | `config reset <target> [<resource> \| --all]` | Back to git |
+| `config remove <target> <resource>` | Remove a local item (written straight to the robot, for example by Devstudio) |
 | `config try <target> <app-path> <revision>` | Run another branch, tag or commit of an application |
 | `config untry <target> <app-path>` | Back to the application's own revision |
 | `config diff <target> [<resource>]` | Git result against effective, as a unified diff |
@@ -139,6 +140,31 @@ that back, `unset` the key.
 `reset <target> <resource>` removes the override of one resource, `reset <target> --all` every override of
 the robot, values and tried revisions included. It never guesses: you need one of the two.
 
+### remove
+
+```bash
+tnctl config remove vision-station-01 HelmChart/default/local-llm --dry-run
+tnctl config remove vision-station-01 local-llm --wait=applied
+```
+
+Removes a **local** item: an entry that a tool such as Devstudio wrote straight to the robot's device, shown in
+the `local` layer of `config get`. The robot deletes the object; for a HelmChart its release is uninstalled.
+The tool that wrote the item may write it again, so stop it first if it keeps coming back.
+`--dry-run` shows the item that would go (secret values hidden) and removes nothing. Without `--dry-run` the
+result is `Removed <id> from <target>.`; `-o json` prints the platform's answer (`removed`, `owner`,
+`hadOverride`, `warnings`).
+
+Items that come from git are not removed with `remove`. Asking for one gives exit 8 and the platform says where
+to remove it: git, the robot's apps, a fleet or the robot type. Overrides are not removed here either: use
+`unset` or `reset`.
+
+`--wait=published` waits until the platform's configuration of the robot no longer has the item in its local layer.
+`--wait=applied` (a bare `--wait` is the same for `remove`) also looks at the robot over WireGuard SSH, as for the
+other writes, and waits until `k3s kubectl get <kind> <name>` finds nothing; for a HelmChart also until no helm
+release secret (`owner=helm,name=<name>`, in the chart's target namespace) is left. The robot has to be
+reachable before anything is removed. If the item stays after `--timeout` the command exits 4 and prints how to
+delete it by hand: `tnctl exec <target> -- sudo k3s kubectl -n <ns> delete <kind> <name>`.
+
 ### try and untry
 
 ```bash
@@ -219,7 +245,7 @@ are on stderr. Errors with `-o json` are `{"error":{"code":"timeout","message":"
 | 5 | rejected: the platform refused it (invalid values, unknown revision, no such target, not overridable) |
 | 6 | not logged in, token rejected, or not allowed: run `tnctl login` |
 | 7 | applied but unhealthy: the helm Job failed or pods crash or cannot pull the image |
-| 8 | conflict: someone else changed the same robot's overrides at the same time; run the command again |
+| 8 | conflict: someone else changed the same robot's overrides at the same time; run the command again. For `remove`: the item is not local, the message says where to remove it |
 | 9 | rate limited: the platform allows 60 writes a minute per user; wait the `Retry-After` time (`-o json`: `error.retryAfter`, seconds) and run it again |
 
 ## An agent's loop
