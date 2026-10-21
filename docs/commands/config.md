@@ -170,14 +170,16 @@ exit code is that failure's. Empty documents and comments are skipped. A `---` m
 next document (`--- kind: B`). Two documents that are the same `Kind/namespace/name` are refused with exit 2 before
 anything is sent, a dry run included.
 
-**Namespaces first.** The platform refuses a resource in a namespace that does not exist on the robot (an error
-at `metadata.namespace`), and a robot stops applying at the first item it cannot create. So when a file has a
-Namespace document and other documents, tnctl sends the Namespace documents first (the rest keep their order) and
-says so: `sending Namespace llm-ns first: ...` on stdout, or as `note:` on stderr with `-o json|yaml`. A file whose
-Namespaces are in front already is sent as it is, silently. Error positions and `document N` keep the numbers of
-your file, not the order of sending. A `--dry-run` writes nothing, so the platform does not know the new
-namespace yet: tnctl lets the `metadata.namespace` refusal pass for a namespace that a Namespace document of the
-same file creates (with a `note:`), and keeps every other refusal.
+**Namespaces first.** When a file has a Namespace document and other documents, tnctl sends the Namespace
+documents first (the rest keep their order) so that the Namespace is stored before the resources in it, and says
+so: `sending Namespace llm-ns first, ...` on stdout, or as `note:` on stderr with `-o json|yaml`. This orders the
+requests only; the order in which the robot applies the items is decided by the platform. A file whose Namespaces
+are in front already is sent as it is, silently. Error positions and `document N` keep the numbers of your file,
+not the order of sending; when a document fails, the message lists what was written before it
+(`written before it: Namespace/llm-ns`), which in sending order can include documents that stand after it in the
+file. A `--dry-run` writes nothing, so the platform does not know the new namespace yet and says so (a warning, or
+an error at `metadata.namespace`): tnctl drops that complaint for a namespace that a Namespace document of the same
+file creates (with a `note:`), and keeps every other finding.
 
 | Result line | Meaning |
 | --- | --- |
@@ -277,12 +279,13 @@ The tool that wrote the item may write it again, so stop it first if it keeps co
 result is `Removed <id> from <target>.`; `-o json` prints the platform's answer (`removed`, `owner`,
 `hadOverride`, `warnings`).
 
-**Removing a Namespace** deletes everything in it on the robot, not only what you added there. The platform
-answers with a warning that lists what would go. Without `--yes`, tnctl asks for a dry run, prints that warning
-(stderr) and the dry-run answer, removes nothing and exits 2 with `Removing Namespace <ns> deletes everything in it
-on the robot; repeat with --yes to confirm`. Repeat the command with `--yes` to remove it (the warning is printed
-again). `--dry-run` never needs `--yes`, an item that is already gone needs none, and `--yes` has no effect on
-other kinds. `Namespace/<name>` and the platform's own spelling `Namespace//<name>` both name the item.
+**Removing a Namespace** deletes everything in it on the robot, not only what you added there. Without `--yes`,
+tnctl asks the platform for a dry run, prints the platform's warnings (stderr; they list what would go when the
+platform provides the list) and the dry-run answer, removes nothing and exits 2 with `Removing Namespace <ns> deletes
+everything in it on the robot; repeat with --yes to confirm`. With `-o json|yaml` the dry-run answer goes to stderr,
+so stdout stays empty. Repeat the command with `--yes` to remove it (the warning is printed again). `--dry-run`
+never needs `--yes`, an item that is already gone needs none, and `--yes` has no effect on other kinds. The kind may
+be written in any case; `Namespace/<name>` and the platform's own spelling `Namespace//<name>` both name the item.
 
 Items that come from git are not removed with `remove`. Asking for one gives exit 8 and the platform says where
 to remove it: git, the robot's apps, a fleet or the robot type. Overrides are not removed here either: use

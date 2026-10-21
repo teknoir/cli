@@ -546,10 +546,48 @@ func TestConfigRemoveNamespaceNeedsYes(t *testing.T) {
 	if real != 0 || dry != 2 {
 		t.Fatalf("without --yes nothing may be removed: %d dry runs, %d real", dry, real)
 	}
-	// -o json prints the dry-run answer, still exit 2
-	out, _, err := runCLI(t, e, "config", "remove", "vision-station-01", nsID, "-o", "json")
-	if exitCodeOf(err) != codeUsage || !json.Valid([]byte(out)) || !strings.Contains(out, `"dryRun": true`) && !strings.Contains(out, `"dryRun":true`) {
-		t.Errorf("json: exit %d\n%s", exitCodeOf(err), out)
+	// -o json: the dry-run answer goes to stderr, so stdout holds nothing a script could take for a result
+	out, errs, err := runCLI(t, e, "config", "remove", "vision-station-01", nsID, "-o", "json")
+	if exitCodeOf(err) != codeUsage || strings.TrimSpace(out) != "" || !json.Valid([]byte(errs)) && !strings.Contains(errs, `"dryRun"`) {
+		t.Errorf("json: exit %d\nstdout %s\nstderr %s", exitCodeOf(err), out, errs)
+	}
+	if real != 0 {
+		t.Errorf("%d real removals", real)
+	}
+}
+
+func TestConfigRemoveNamespaceGateIgnoresCaseOfTheKind(t *testing.T) {
+	p := newFakePlatform(t)
+	var mu sync.Mutex
+	var dry, real int
+	var paths []string
+	p.onFunc("DELETE", removePath, func(r rec) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		paths = append(paths, r.Query)
+		if strings.Contains(r.Query, "dryRun=1") {
+			dry++
+			return 200, nsRemovedBody(true, nsWarning)
+		}
+		real++
+		return 200, nsRemovedBody(false, nsWarning)
+	})
+	e, _ := testEnv(t, p, nil)
+	for _, arg := range []string{"namespace/default/llm-ns", "NAMESPACE/default/llm-ns"} {
+		_, _, err := runCLI(t, e, "config", "remove", "vision-station-01", arg)
+		if exitCodeOf(err) != codeUsage || !strings.Contains(err.Error(), "repeat with --yes") {
+			t.Fatalf("%s: exit %d: %v", arg, exitCodeOf(err), err)
+		}
+	}
+	if real != 0 || dry != 2 {
+		t.Fatalf("%d dry runs, %d real", dry, real)
+	}
+	// with --yes the platform gets its own spelling of the kind
+	if _, _, err := runCLI(t, e, "config", "remove", "vision-station-01", "namespace/default/llm-ns", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	if real != 1 || !strings.Contains(paths[len(paths)-1], "Namespace") {
+		t.Errorf("real %d, paths %v", real, paths)
 	}
 }
 

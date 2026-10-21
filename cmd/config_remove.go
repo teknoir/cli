@@ -76,6 +76,11 @@ Exit 8 also means the item is not local, so it cannot be removed here; the messa
 			if err != nil {
 				return err
 			}
+			if strings.EqualFold(kind, "Namespace") {
+				// the platform may match the kind case-sensitively: send its own spelling
+				kind = "Namespace"
+				id = kind + "/" + ns + "/" + name
+			}
 			if kind == "Namespace" && !f.dryRun && !f.yes {
 				if err := e.confirmNamespaceRemoval(cmd, s, target, id, name); err != nil {
 					return err
@@ -154,7 +159,9 @@ func (e *cliEnv) confirmNamespaceRemoval(cmd *cobra.Command, s *session, target,
 	}
 	if s.format == "table" {
 		printRemoveResult(out, res, id, target)
-	} else if err := writeStructured(out, s.format, raw); err != nil {
+	} else if err := writeStructured(errw, s.format, raw); err != nil {
+		// stderr, not stdout: a refusal must not leave an answer on stdout that a script could take
+		// for the result of a removal
 		return err
 	}
 	return usageErr("Removing Namespace %s deletes everything in it on the robot; repeat with --yes to confirm", name)

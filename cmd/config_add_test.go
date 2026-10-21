@@ -221,7 +221,7 @@ func TestConfigAddInvalidTranslatesPositionsToFileLines(t *testing.T) {
 			t.Errorf("stderr lacks %q:\n%s", frag, errs)
 		}
 	}
-	if !strings.Contains(err.Error(), "document 2 (line 7) is invalid (3 error(s) above)") || !strings.Contains(err.Error(), "the 1 document(s) before it were written") {
+	if !strings.Contains(err.Error(), "document 2 (line 7) is invalid (3 error(s) above)") || !strings.Contains(err.Error(), "written before it: ConfigMap/cfg") {
 		t.Errorf("error: %v", err)
 	}
 	if out != "added ConfigMap/default/cfg to vision-station-01\n" {
@@ -289,7 +289,7 @@ func TestConfigAddStopsAtTheFirstFailure(t *testing.T) {
 	if exitCodeOf(err) != codeConflict || len(p.seen("PUT", addPath)) != 2 {
 		t.Fatalf("exit %d, %d requests: %v", exitCodeOf(err), len(p.seen("PUT", addPath)), err)
 	}
-	if !strings.Contains(err.Error(), "document 2 (line 4, ConfigMap/b): ConfigMap/default/b already exists") || !strings.Contains(err.Error(), "the 1 document(s) before it were written") || !strings.Contains(err.Error(), "--replace") {
+	if !strings.Contains(err.Error(), "document 2 (line 4, ConfigMap/b): ConfigMap/default/b already exists") || !strings.Contains(err.Error(), "written before it: ConfigMap/a") || !strings.Contains(err.Error(), "--replace") {
 		t.Errorf("error: %v", err)
 	}
 	if strings.Count(out, "added") != 1 {
@@ -877,7 +877,7 @@ func TestConfigAddSendsNamespacesFirstAndSaysSo(t *testing.T) {
 	if strings.Join(order, ",") != "Namespace/llm-ns,Deployment/llm" {
 		t.Errorf("order %v", order)
 	}
-	want := "sending Namespace llm-ns first: the platform refuses a resource in a namespace that does not exist yet\nadded Namespace/default/llm-ns to vision-station-01\nadded Deployment/default/llm to vision-station-01\n"
+	want := "sending Namespace llm-ns first, so it is stored before the resources in it (the platform decides the order on the robot)\nadded Namespace/default/llm-ns to vision-station-01\nadded Deployment/default/llm to vision-station-01\n"
 	if out != want {
 		t.Errorf("stdout %q", out)
 	}
@@ -909,7 +909,7 @@ func TestConfigAddNamespaceFirstKeepsFilePositionsInErrors(t *testing.T) {
 	_, errs, err := runCLI(t, e, "config", "add", "vision-station-01", "-f", f)
 	// the Deployment is document 1, line 2 of the file: line 2 of the document is line 3 of the file
 	if exitCodeOf(err) != codeRejected || !strings.Contains(errs, f+":3:3: error: bad") ||
-		!strings.Contains(err.Error(), "document 1 (line 2, Deployment/llm)") || !strings.Contains(err.Error(), "the 1 document(s) before it were written") {
+		!strings.Contains(err.Error(), "document 1 (line 2, Deployment/llm)") || !strings.Contains(err.Error(), "written before it: Namespace/llm-ns") {
 		t.Errorf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
 	}
 }
@@ -947,5 +947,62 @@ func TestConfigAddDryRunAcceptsTheNamespaceTheFileCreates(t *testing.T) {
 	out, _, err = runCLI(t, e, "config", "add", "vision-station-01", "--dry-run", "-o", "json", "-f", tempFile(t, "d.yaml", deployIn("llm-ns")+"---\n"+nsYAML))
 	if err != nil || strings.Contains(out, "does not exist on this robot") {
 		t.Errorf("%v\n%s", err, out)
+	}
+}
+
+func TestConfigAddDryRunDropsTheBackendsNamespaceWarning(t *testing.T) {
+	p := newFakePlatform(t)
+	warn := "Nothing in this robot's configuration creates the namespace llm-ns. Add a Namespace item for it unless it already exists on the robot."
+	other := "Nothing in this robot's configuration creates the namespace other. Add a Namespace item for it unless it already exists on the robot."
+	p.onFunc("PUT", addPath, func(r rec) (int, string) {
+		switch {
+		case strings.Contains(r.Body, "kind: Namespace"):
+			return 200, writeResult("Namespace//llm-ns", "create", true, nil, nil)
+		case strings.Contains(r.Body, "namespace: other"):
+			return 200, writeResult("Deployment/other/llm", "create", true, nil, nil, other)
+		}
+		return 200, writeResult("Deployment/llm-ns/llm", "create", true, nil, nil, warn)
+	})
+	e, _ := testEnv(t, p, nil)
+	// the warning would not appear in a real run (the Namespace is sent first), so it is not shown
+	out, errs, err := runCLI(t, e, "config", "add", "vision-station-01", "--dry-run", "-f", tempFile(t, "a.yaml", deployIn("llm-ns")+"---\n"+nsYAML))
+	if err != nil || strings.Contains(errs, "creates the namespace") || !strings.Contains(errs, "note: namespace llm-ns") || !strings.Contains(out, "would add Deployment/llm-ns/llm") {
+		t.Fatalf("%v\n%s\n%s", err, out, errs)
+	}
+	out, _, err = runCLI(t, e, "config", "add", "vision-station-01", "--dry-run", "-o", "json", "-f", tempFile(t, "j.yaml", deployIn("llm-ns")+"---\n"+nsYAML))
+	if err != nil || strings.Contains(out, "creates the namespace") {
+		t.Errorf("%v\n%s", err, out)
+	}
+	// a namespace that the file does not create keeps its warning
+	_, errs, err = runCLI(t, e, "config", "add", "vision-station-01", "--dry-run", "-f", tempFile(t, "b.yaml", deployIn("other")+"---\n"+nsYAML))
+	if err != nil || !strings.Contains(errs, "warning: "+other) {
+		t.Errorf("%v\n%s", err, errs)
+	}
+}
+
+func TestDropPendingNamespaceIssuesKeepsOtherFindings(t *testing.T) {
+	d := localDoc{kind: "Deployment", ns: "llm-ns", name: "llm"}
+	res := &api.LocalWriteResult{Validation: api.LocalValidation{Verdict: api.VerdictInvalid, Issues: []api.LocalValidationIssue{
+		{Severity: "error", Path: "metadata.namespace", Message: "namespace llm-ns is not allowed for local items"},
+	}}}
+	if got := dropPendingNamespaceIssues(res, d, map[string]bool{"llm-ns": true}); len(got) != 0 || len(res.Validation.Issues) != 1 || res.Validation.Verdict != api.VerdictInvalid {
+		t.Errorf("a refusal that is not about a missing namespace must stay: %v %+v", got, res.Validation)
+	}
+}
+
+func TestConfigAddFailureNamesTheNamespaceThatWasWritten(t *testing.T) {
+	// file order: Deployment, Namespace, Service; sending order: Namespace, Deployment, Service
+	p := newFakePlatform(t)
+	p.onFunc("PUT", addPath, func(r rec) (int, string) {
+		if strings.Contains(r.Body, "kind: Deployment") {
+			return 409, `{"error":{"message":"Deployment/llm-ns/llm already exists"}}`
+		}
+		return 200, addOK("Namespace//llm-ns", "create")
+	})
+	e, _ := testEnv(t, p, nil)
+	in := deployIn("llm-ns") + "---\n" + nsYAML + "---\nkind: Service\nmetadata: {name: s, namespace: llm-ns}\n"
+	_, _, err := runCLI(t, e, "config", "add", "vision-station-01", "-f", tempFile(t, "s.yaml", in))
+	if exitCodeOf(err) != codeConflict || !strings.Contains(err.Error(), "document 1 (line 1, Deployment/llm)") || !strings.Contains(err.Error(), "written before it: Namespace/llm-ns") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
 	}
 }

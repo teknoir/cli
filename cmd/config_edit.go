@@ -233,7 +233,7 @@ func (e *cliEnv) runEdit(cmd *cobra.Command, target, resArg string, wf *waitFlag
 		doc := docs[0]
 		res, _, err := s.fl.PutLocalItem(ctx, target, api.LocalWriteRequest{Manifest: text, Replace: true}, true)
 		if err != nil {
-			return docError(err, doc, false, 0, true, nil)
+			return docError(err, doc, false, nil, true, nil)
 		}
 		var problems []api.LocalValidationIssue
 		var extra []string

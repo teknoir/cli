@@ -38,10 +38,11 @@ refused ones; 'tnctl config kinds --template Deployment' prints a starter manife
 
   -f FILE          the manifest: YAML or JSON, - reads stdin. Several documents separated by --- are
                    added one by one, in order; the first failure stops the run (the documents before it
-                   are written) and decides the exit code. Namespace documents are sent first (the
-                   platform refuses an unknown namespace, and a robot stops at the first item it cannot
-                   create); the output says so when that changes the order. A dry run does not write the
-                   Namespace, so it accepts the namespaces that a Namespace document of the file creates.
+                   are written) and decides the exit code. Namespace documents are sent first, so they
+                   are stored before the resources in them; the output says so when that changes the
+                   order. This orders the requests only: the platform decides the order in which the
+                   robot applies the items. A dry run does not write the Namespace, so it does not
+                   complain about a namespace that a Namespace document of the file creates.
   --replace        overwrite a local item with the same identity (otherwise exit 8). Identical content
                    is "unchanged": nothing is written.
   --dry-run        check the manifest and say what would happen, write nothing
@@ -233,7 +234,7 @@ func (e *cliEnv) runAdd(cmd *cobra.Command, target string, f *addFlags) error {
 	}
 	docs, moved := namespacesFirst(docs)
 	if len(moved) > 0 {
-		note := fmt.Sprintf("sending Namespace %s first: the platform refuses a resource in a namespace that does not exist yet", strings.Join(moved, ", "))
+		note := fmt.Sprintf("sending Namespace %s first, so it is stored before the resources in it (the platform decides the order on the robot)", strings.Join(moved, ", "))
 		if s.format == "table" {
 			fmt.Fprintln(cmd.OutOrStdout(), note)
 		} else {
@@ -289,27 +290,52 @@ func namespacesOf(docs []localDoc) map[string]bool {
 	return m
 }
 
-// dropPendingNamespaceIssues removes, from the answer to a dry run, the refusals of a namespace that
-// a Namespace document of the same file would create: a dry run writes nothing, so the platform does
-// not know the namespace yet, and a real run (Namespace first) would be accepted. It returns the
-// namespaces it let pass. When no error is left, the verdict becomes valid.
+// namespaceMissing reports whether a finding or warning of the platform says that the namespace ns
+// of the document does not exist (yet): the error "namespace x does not exist ..." at
+// metadata.namespace, or the warning "Nothing in this robot's configuration creates the namespace x".
+// It matches on the text and the namespace name, so that another finding about the namespace (for
+// example one that refuses it) is kept.
+func namespaceMissing(msg, ns string) bool {
+	m := strings.ToLower(msg)
+	ns = strings.ToLower(ns)
+	if !strings.Contains(m, "namespace "+ns) {
+		return false
+	}
+	return strings.Contains(m, "does not exist") || strings.Contains(m, "creates the namespace") ||
+		strings.Contains(m, "doesn't exist") || strings.Contains(m, "not found")
+}
+
+// dropPendingNamespaceIssues removes, from the answer to a dry run, the complaints about a namespace
+// that a Namespace document of the same file would create: a dry run writes nothing, so the platform
+// does not know the namespace yet (it warns, or refuses), while a real run, with the Namespace sent
+// first, is accepted without it. It returns the namespaces it let pass. When no error is left, the
+// verdict becomes valid.
 func dropPendingNamespaceIssues(res *api.LocalWriteResult, d localDoc, created map[string]bool) []string {
 	if !created[d.ns] || d.kind == "Namespace" {
 		return nil
 	}
-	var kept []api.LocalValidationIssue
 	dropped := false
+	var kept []api.LocalValidationIssue
 	for _, is := range res.Validation.Issues {
-		if is.Path == "metadata.namespace" && is.Severity != "warning" {
+		if is.Path == "metadata.namespace" && namespaceMissing(is.Message, d.ns) {
 			dropped = true
 			continue
 		}
 		kept = append(kept, is)
 	}
+	var warnings []string
+	for _, w := range res.Warnings {
+		if namespaceMissing(w, d.ns) {
+			dropped = true
+			continue
+		}
+		warnings = append(warnings, w)
+	}
 	if !dropped {
 		return nil
 	}
 	res.Validation.Issues = kept
+	res.Warnings = warnings
 	for _, is := range kept {
 		if is.Severity != "warning" {
 			return []string{d.ns}
@@ -378,16 +404,17 @@ func (s *session) putLocal(ctx context.Context, file string, docs []localDoc, re
 		}
 	}
 	var added []*addedItem
+	var written []string // Kind/name of what this run wrote, in sending order
 	created := namespacesOf(docs)
 	for _, d := range docs {
 		res, raw, err := s.fl.PutLocalItem(ctx, s.target, api.LocalWriteRequest{Manifest: d.text, Replace: replace}, s.dryRun)
 		if err != nil {
-			run.err = docError(err, d, len(docs) > 1, len(added), replace, func() bool { return s.localItemExists(ctx, d) })
+			run.err = docError(err, d, len(docs) > 1, written, replace, func() bool { return s.localItemExists(ctx, d) })
 			return run
 		}
 		if s.dryRun {
 			if ns := dropPendingNamespaceIssues(res, d, created); len(ns) > 0 {
-				raw = withFields(raw, map[string]any{"validation": res.Validation})
+				raw = withFields(raw, map[string]any{"validation": res.Validation, "warnings": res.Warnings})
 				fmt.Fprintf(errw, "note: namespace %s does not exist on %s yet; this file creates it with a Namespace document, which is sent first\n", ns[0], s.target)
 			}
 		}
@@ -396,7 +423,7 @@ func (s *session) putLocal(ctx context.Context, file string, docs []localDoc, re
 			fmt.Fprintln(errw, "warning:", wn)
 		}
 		if n := printIssues(errw, file, d, len(docs) > 1, res.Validation); res.Invalid() {
-			run.err = invalidError(d, len(docs) > 1, n, len(added))
+			run.err = invalidError(d, len(docs) > 1, n, written)
 			return run
 		}
 		if s.format == "table" {
@@ -418,6 +445,7 @@ func (s *session) putLocal(ctx context.Context, file string, docs []localDoc, re
 				return run
 			}
 			added = append(added, a)
+			written = append(written, d.label())
 		}
 	}
 	if waiting && len(added) > 0 {
@@ -524,14 +552,14 @@ func formatIssue(file string, offset int, multi bool, doc int, is api.LocalValid
 }
 
 // invalidError is the error of a manifest the platform refused (exit 5).
-func invalidError(d localDoc, multi bool, errs, written int) error {
+func invalidError(d localDoc, multi bool, errs int, written []string) error {
 	what := "the manifest"
 	if multi {
 		what = d.where()
 	}
 	msg := fmt.Sprintf("%s is invalid (%d error(s) above); it was not written", what, errs)
-	if written > 0 {
-		msg += fmt.Sprintf("; the %d document(s) before it were written", written)
+	if len(written) > 0 {
+		msg += "; written before it: " + strings.Join(written, ", ")
 	}
 	return newErr(codeRejected, "%s", msg)
 }
@@ -549,7 +577,7 @@ func (s *session) localItemExists(ctx context.Context, d localDoc) bool {
 // docError gives a failed request its exit code and, for several documents, says which one failed.
 // exists is asked on a 409 without --replace: whether a local item with this identity is there, so
 // that --replace would help. nil means "do not know".
-func docError(err error, d localDoc, multi bool, written int, replace bool, exists func() bool) error {
+func docError(err error, d localDoc, multi bool, written []string, replace bool, exists func() bool) error {
 	err = classify(err)
 	var ce *cliError
 	if !errors.As(err, &ce) {
@@ -561,8 +589,8 @@ func docError(err error, d localDoc, multi bool, written int, replace bool, exis
 	}
 	if multi {
 		inner = d.where() + ": " + inner
-		if written > 0 {
-			inner += fmt.Sprintf("; the %d document(s) before it were written", written)
+		if len(written) > 0 {
+			inner += "; written before it: " + strings.Join(written, ", ")
 		}
 	}
 	return &cliError{code: ce.code, err: errors.New(inner)}
