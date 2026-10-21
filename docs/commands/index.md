@@ -43,6 +43,7 @@ a name that is not there.
 
 | You see | Cause | What helps |
 | --- | --- | --- |
+| `Your tnctl login has expired. Run: tnctl login` (exit 6, `-o json` code `session_expired`) | The platform refused the stored refresh token (revoked, user disabled, idle for more than the offline idle timeout, login service reset). | `tnctl login`. `tnctl login --check` tests the stored login. |
 | `not logged in or token expired: run tnctl login` (exit 6) | No token, or the platform rejected it (HTTP 401). | `tnctl login`. |
 | `not allowed for this account or teamspace: <reason>` (exit 6) | Your account is fine but may not do this (HTTP 403), for example a viewer asking for a device login (`need the developer role`). | **Logging in again does not help.** Ask a teamspace admin for the role the message names. |
 | `the platform refused the request: not logged in, the token was rejected, or your account may not do this here` (exit 6) | An older gateway answers 401 and 403 alike with a redirect to the login page, so `tnctl` cannot tell which one it was. | `tnctl login` first; if that does not help, ask a teamspace owner. |

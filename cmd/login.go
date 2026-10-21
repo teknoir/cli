@@ -13,9 +13,10 @@ import (
 )
 
 var (
-	realm     string
-	clientID  string
-	noBrowser bool
+	realm          string
+	clientID       string
+	noBrowser      bool
+	loginCheckOnly bool
 )
 
 // loginCmd represents the login command
@@ -32,10 +33,14 @@ func init() {
 	rootCmd.AddCommand(loginCmd)
 	loginCmd.Flags().StringVar(&realm, "realm", "master", "Keycloak realm")
 	loginCmd.Flags().StringVar(&clientID, "client-id", config.ClientID, "Keycloak client ID")
+	loginCmd.Flags().BoolVar(&loginCheckOnly, "check", false, "Do not log in: check that the stored login works (exit 0), or exit 6 when it has expired; prints the user and expiry, never a token")
 	loginCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "Do not try to open a browser; just print the login URL and code (the default over SSH or without a display)")
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
+	if loginCheckOnly {
+		return runLoginCheck(cmd)
+	}
 	ctx := cmd.Context()
 	cfg, err := config.Load()
 	if err != nil {
@@ -104,16 +109,11 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to complete device authorization: %w", err)
 	}
 
-	// Save tokens
-	auth := cfg.Auths[config.SanitizeDomain(domain)]
-	auth.AccessToken = token.AccessToken
-	if token.RefreshToken != "" {
-		auth.RefreshToken = token.RefreshToken
+	if w := missingRefreshTokenWarning(token, clientID); w != "" {
+		fmt.Fprintln(os.Stderr, w)
 	}
-	auth.Expiry = token.Expiry.Format(time.RFC3339)
-	auth.Realm = realm
-	auth.ClientID = clientID
-	cfg.Auths[config.SanitizeDomain(domain)] = auth
+
+	storeLogin(cfg, domain, token, realm, clientID)
 
 	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("failed to save tokens to config: %w", err)
@@ -121,6 +121,19 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Successfully logged in! Tokens saved to configuration.")
 	return nil
+}
+
+// storeLogin records a completed login in cfg (the caller saves it). The refresh token is replaced
+// even when the response has none: the old one belongs to the previous login and is most likely
+// dead, so keeping it would only produce a confusing invalid_grant later.
+func storeLogin(cfg *config.Config, domain string, token *oauth2.Token, realm, clientID string) {
+	auth := cfg.Auths[config.SanitizeDomain(domain)]
+	auth.AccessToken = token.AccessToken
+	auth.RefreshToken = token.RefreshToken
+	auth.Expiry = token.Expiry.Format(time.RFC3339)
+	auth.Realm = realm
+	auth.ClientID = clientID
+	cfg.Auths[config.SanitizeDomain(domain)] = auth
 }
 
 // canOpenBrowser reports whether this session can show a browser: never over SSH, and on
