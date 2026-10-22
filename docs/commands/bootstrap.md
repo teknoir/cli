@@ -178,7 +178,8 @@ tnctl bootstrap edge-01 --registry-mirror harbor.teknoir.cloud --registry-creden
   robot never keeps a stale credential. `--registry-mirror none` removes a file that the scripts wrote
   (and keeps yours). Without `--registry-mirror` the scripts leave the file alone.
 - **The credential** is a Harbor robot account that can only pull from the proxy projects. It is embedded in
-  the scripts (like the device keys, so keep the scripts private) and the scripts never print it. The file
+  the scripts (like the device keys, so keep the scripts private) and the scripts never print it. `tnctl bootstrap` writes the
+  scripts with mode `0600` (and tightens a script that an earlier run left at `0644`); the file on the robot
   must not be readable by group or others.
 - The Docker-mode script (`bootstrap_docker_server_<device>.sh`) is not changed.
 - For a robot that is already running, the Ansible playbook `registry-mirror.yml` (repository `ansible`)

@@ -103,14 +103,7 @@ var bootstrapCmd = &cobra.Command{
 
 		serverData, agentData := nodes.apply(data)
 
-		generate := func(tmpl *template.Template, filename string, data templates.TemplateData) error {
-			f, err := os.Create(filename)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			return tmpl.Execute(f, data)
-		}
+		generate := writeBootstrapScript
 
 		agentFile := fmt.Sprintf("bootstrap_agent_%s.sh", deviceName)
 		serverFile := fmt.Sprintf("bootstrap_server_%s.sh", deviceName)
@@ -220,4 +213,19 @@ func init() {
 	bootstrapCmd.Flags().String("registry-credential-file", "",
 		"file with the Harbor credential for --registry-mirror, one line username:password (a robot account of the teamspace), readable by you only. The password goes into the generated scripts and is never printed")
 	rootCmd.AddCommand(bootstrapCmd)
+}
+
+// writeBootstrapScript renders a bootstrap script to filename with mode 0600: the scripts hold the device
+// password, the k3s token and the teamspace's Harbor robot password. A file that already exists (written with
+// 0644 by an earlier tnctl) is chmodded too, because OpenFile's mode applies to new files only.
+func writeBootstrapScript(tmpl *template.Template, filename string, data templates.TemplateData) error {
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	return tmpl.Execute(f, data)
 }
