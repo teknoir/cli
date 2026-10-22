@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"sync"
 
 	"github.com/teknoir/cli/pkg/auth"
 	"github.com/teknoir/wg-tunnel/pkg/api"
@@ -110,24 +109,14 @@ func validateHubHost(raw, domain string) error {
 
 // newWGCredential returns the wgclient credential func: the token is read from
 // ~/.tnctl.yaml (and refreshed) on every call, never from argv or the
-// environment. Session creation may use the cached token; every renewal must
-// present a newly issued one (the hub refuses a token it has already
-// accepted), so renewals force a refresh.
+// environment. Every call, session creation and every renewal, redeems the
+// refresh token for a newly issued hub token (auth.HubAccessToken: the scope
+// teknoir-ztna when the login has it). The hub refuses a token it has already
+// accepted and requires the hub audience, which the main token (the one
+// Backstage and the fleet API see) never has, so nothing is cached or reused.
 func newWGCredential(domain string) func(ctx context.Context, wgPublicKey string) (string, error) {
-	var mu sync.Mutex
-	calls := 0
 	return func(ctx context.Context, _ string) (string, error) {
-		mu.Lock()
-		calls++
-		first := calls == 1
-		mu.Unlock()
-		var tok string
-		var err error
-		if first {
-			tok, err = auth.AccessToken(ctx, domain)
-		} else {
-			tok, err = auth.FreshAccessToken(ctx, domain)
-		}
+		tok, _, err := auth.HubAccessToken(ctx, domain)
 		if errors.Is(err, auth.ErrSessionExpired) {
 			return "", &wgLoginExpired{err}
 		}

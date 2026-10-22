@@ -24,6 +24,16 @@ including resolved URLs and the exact `ssh` invocation used.
     without logging in and exits 6 when it has expired. A network error while renewing is not this message:
     it is shown as it is and retrying helps.
 
+??? failure "`ssh`, `exec`, `port-forward` or `wg status` is refused after a tnctl upgrade (`unauthenticated`, `posture`)"
+    The WireGuard hub requires a token with the `teknoir-ztna` audience, which `tnctl` gets from the optional
+    scope of the same name at login. A login made before the platform offered the scope cannot gain it:
+    run `tnctl login` once more (`tnctl login --check` prints `Tunneling: relogin` for such a login). A hub
+    answer `posture` ("update tnctl") means this `tnctl` is older than 0.1.2: update it, then log in again.
+    If `tnctl` warns about `invalid_scope`, the platform lists the scope but the `teknoir-cli` client
+    lacks it: `tnctl` carries on without the hub audience (login and fleet commands keep working, and a hub that
+    only logs the audience accepts it), but a hub that enforces it refuses the tunnel. Ask a platform admin to add
+    the scope to the client (see `KEYCLOAK.md`).
+
 ??? failure "`tnctl login` warns that the login response has no refresh token"
     The platform did not grant the `offline_access` scope, so this login cannot be renewed and ends when the
     access token expires (minutes). Ask a platform admin to allow `offline_access` for the `teknoir-cli` client.

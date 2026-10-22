@@ -51,6 +51,14 @@ func writeLoginCheck(w io.Writer, st *tnauth.Status, format string) error {
 	default:
 		sb.WriteString("The expiry of the login is not known.\n")
 	}
+	switch st.Tunneling {
+	case tnauth.TunnelingOK:
+		sb.WriteString("Tunneling: ok.\n")
+	case tnauth.TunnelingRelogin:
+		sb.WriteString("Tunneling: run 'tnctl login' once more to keep WireGuard access (ssh, exec, port-forward); this login predates the tunneling scope.\n")
+	case tnauth.TunnelingNA:
+		sb.WriteString("Tunneling: n/a (this platform needs no extra login step).\n")
+	}
 	_, err := io.WriteString(w, sb.String())
 	return err
 }

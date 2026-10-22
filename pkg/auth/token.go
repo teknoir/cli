@@ -2,9 +2,12 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/viper"
@@ -32,6 +35,8 @@ type tokenDeps struct {
 	load    func() (*config.Config, error)
 	refresh func(ctx context.Context, domain string, a config.AuthConfig) (*oauth2.Token, error)
 	save    func(*config.Config) error
+	// hub redeems the refresh token for a hub token (nil: redeemHubToken).
+	hub func(ctx context.Context, domain string, a config.AuthConfig) (*oauth2.Token, error)
 	// lock serialises the read-refresh-save cycle across processes; nil = none.
 	lock func(ctx context.Context) (unlock func(), err error)
 }
@@ -84,7 +89,7 @@ var defaultTokenDeps = tokenDeps{
 }
 
 // AccessToken loads the tnctl configuration, returns a valid access token for
-// the domain (refreshing it when it is about to expire) and persists a
+// the domain (the main token: it never has the hub audience, see HubAccessToken) (refreshing it when it is about to expire) and persists a
 // refreshed token back to the configuration. It re-reads the configuration on
 // every call, so long-running processes always get the current token.
 func AccessToken(ctx context.Context, domain string) (string, error) {
@@ -108,6 +113,95 @@ func forceRefresh(d tokenDeps) tokenDeps {
 		return refresh(ctx, domain, a)
 	}
 	return d
+}
+
+// HubAccessToken returns a newly issued access token for the WireGuard hub: it always redeems the
+// refresh token, with the scope teknoir-ztna when the login was granted it, so the token carries the
+// hub audience (ztna reports whether it does). It is never cached and never used for anything but
+// wg.<domain>: only the rotated refresh token is saved, the stored access token (the main token,
+// which Backstage and the fleet API see) and its expiry stay untouched. A login without the scope
+// (production, airgapped, a login made before the realm had it) is redeemed without a scope, as
+// before: the token then has no hub audience, which a hub in enforce mode refuses.
+func HubAccessToken(ctx context.Context, domain string) (token string, ztna bool, err error) {
+	return hubAccessToken(ctx, domain, defaultTokenDeps)
+}
+
+func hubAccessToken(ctx context.Context, domain string, d tokenDeps) (string, bool, error) {
+	tokenMu.Lock()
+	defer tokenMu.Unlock()
+	if d.lock != nil {
+		unlock, err := d.lock(ctx)
+		if err != nil {
+			return "", false, err
+		}
+		defer unlock()
+	}
+	cfg, err := d.load()
+	if err != nil {
+		return "", false, err
+	}
+	key := config.SanitizeDomain(domain)
+	authData, exists := cfg.Auths[key]
+	if !exists || authData.AccessToken == "" {
+		return "", false, &NotLoggedInError{Domain: domain}
+	}
+	if err := usableRefreshToken(authData.RefreshToken); err != nil {
+		return "", false, err
+	}
+	redeem := d.hub
+	if redeem == nil {
+		redeem = redeemHubToken
+	}
+	token, err := redeem(ctx, domain, authData)
+	if err != nil {
+		return "", false, err
+	}
+	if token.RefreshToken != authData.RefreshToken {
+		authData.RefreshToken = token.RefreshToken
+		cfg.Auths[key] = authData
+		if err := d.save(cfg); err != nil {
+			return "", false, fmt.Errorf("failed to save refreshed token: %w", err)
+		}
+	}
+	return token.AccessToken, hasAudience(token.AccessToken, ztnaAudience), nil
+}
+
+// redeemHubToken redeems the refresh token with the hub scope when the login was granted it. When
+// the realm refuses the scope (invalid_scope: the realm change was rolled back and teknoir-cli lost
+// the optional scope), it redeems once more downscoped, with a warning: the token then has no hub
+// audience, which a hub in transition mode still accepts and one in enforce mode refuses (a clear
+// "run tnctl login" / "ask an admin" then, not an unusable tnctl).
+func redeemHubToken(ctx context.Context, domain string, a config.AuthConfig) (*oauth2.Token, error) {
+	if !hasScope(a.RefreshToken, ztnaScope) {
+		return redeemRefreshToken(ctx, domain, a, "")
+	}
+	mainSc, hubSc := scopesFor(a.RefreshToken)
+	token, err := redeemRefreshToken(ctx, domain, a, hubSc)
+	if !isInvalidScope(err) {
+		return token, err
+	}
+	warnHubScopeRefused()
+	return redeemRefreshToken(ctx, domain, a, mainSc)
+}
+
+// isInvalidScope reports whether err is the token endpoint's invalid_scope answer.
+func isInvalidScope(err error) bool {
+	var re *oauth2.RetrieveError
+	return errors.As(err, &re) && re.ErrorCode == "invalid_scope"
+}
+
+// warnWriter and warnedHubScope serve warnHubScopeRefused: one warning per process, however many
+// renewals a long-lived wg-proxy does.
+var (
+	warnWriter     io.Writer = os.Stderr
+	warnedHubScope atomic.Bool
+)
+
+func warnHubScopeRefused() {
+	if warnedHubScope.Swap(true) {
+		return
+	}
+	_, _ = fmt.Fprintln(warnWriter, "Warning: the realm refused the scope teknoir-ztna for this client (invalid_scope); continuing without the hub audience. A WireGuard hub that enforces the audience will refuse this login: ask a platform admin to add teknoir-ztna to the optional scopes of the teknoir-cli client.")
 }
 
 func accessToken(ctx context.Context, domain string, d tokenDeps) (string, error) {

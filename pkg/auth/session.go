@@ -74,12 +74,53 @@ func refreshMargin(accessToken string) time.Duration {
 // claims are the JWT claims tnctl looks at. They are read without verifying the signature: the
 // token is the user's own and the values only decide when to refresh and what to display.
 type claims struct {
-	Exp               int64  `json:"exp"`
-	Iat               int64  `json:"iat"`
-	Typ               string `json:"typ"`
-	Sub               string `json:"sub"`
-	PreferredUsername string `json:"preferred_username"`
-	Email             string `json:"email"`
+	Aud               audience `json:"aud"`
+	Scope             string   `json:"scope"`
+	Exp               int64    `json:"exp"`
+	Iat               int64    `json:"iat"`
+	Typ               string   `json:"typ"`
+	Sub               string   `json:"sub"`
+	PreferredUsername string   `json:"preferred_username"`
+	Email             string   `json:"email"`
+}
+
+// audience is the aud claim: a string or an array of strings.
+type audience []string
+
+func (a *audience) UnmarshalJSON(b []byte) error {
+	var one string
+	if json.Unmarshal(b, &one) == nil {
+		*a = audience{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(b, &many); err != nil {
+		*a = nil // an unreadable aud is no audience; the other claims stay usable
+		return nil
+	}
+	*a = many
+	return nil
+}
+
+// hasAudience reports whether the (unverified) access token lists aud.
+func hasAudience(token, aud string) bool {
+	for _, a := range jwtClaims(token).Aud {
+		if a == aud {
+			return true
+		}
+	}
+	return false
+}
+
+// hasScope reports whether the (unverified) token's scope claim lists scope. A Keycloak refresh
+// token carries the scopes it was granted.
+func hasScope(token, scope string) bool {
+	for _, s := range strings.Fields(jwtClaims(token).Scope) {
+		if s == scope {
+			return true
+		}
+	}
+	return false
 }
 
 func jwtClaims(token string) claims {
@@ -123,7 +164,18 @@ type Status struct {
 	// RefreshExpires is when the refresh token ends; nil when it has no fixed expiry (an offline
 	// session ends when revoked or after the realm's offline idle timeout, 30 days by default).
 	RefreshExpires *time.Time `json:"refreshExpires,omitempty"`
+	// Tunneling says whether this login can open WireGuard sessions: TunnelingOK (the login was
+	// granted the hub scope), TunnelingRelogin (the realm offers the scope but this login lacks it:
+	// run `tnctl login` once more) or TunnelingNA (the realm does not offer it: nothing to do).
+	Tunneling string `json:"tunneling"`
 }
+
+// Values of Status.Tunneling.
+const (
+	TunnelingOK      = "ok"
+	TunnelingRelogin = "relogin"
+	TunnelingNA      = "n/a"
+)
 
 // Check verifies that the stored login for the domain works: it redeems the refresh token (one
 // rotation; the new tokens are saved) and returns a Status when that succeeds, and an error
@@ -159,6 +211,13 @@ func check(ctx context.Context, domain string, d tokenDeps) (*Status, error) {
 	}
 	if exp, ok := refreshTokenExpiry(a.RefreshToken); ok {
 		st.RefreshExpires = &exp
+	}
+	st.Tunneling = TunnelingNA
+	switch {
+	case hasScope(a.RefreshToken, ztnaScope):
+		st.Tunneling = TunnelingOK
+	case RealmOffersHubScope(ctx, issuerOfTokenURL(tokenURL(domain, a.Realm))):
+		st.Tunneling = TunnelingRelogin
 	}
 	return st, nil
 }
