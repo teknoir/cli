@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/teknoir/cli/pkg/auth"
 	"github.com/teknoir/cli/pkg/config"
 	"golang.org/x/oauth2"
 )
@@ -59,12 +61,9 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	conf := &oauth2.Config{
 		ClientID: clientID,
-		Scopes: []string{
-			"openid",
-			"profile",
-			"email",
-			"offline_access",
-		},
+		// teknoir-ztna (the audience of the WireGuard hub) only when the realm offers it, so
+		// production and airgapped realms get exactly the request they always got.
+		Scopes: auth.LoginScopes(ctx, issuerURL),
 		Endpoint: oauth2.Endpoint{
 			AuthURL:       issuerURL + "/protocol/openid-connect/auth",
 			DeviceAuthURL: issuerURL + "/protocol/openid-connect/auth/device",
@@ -81,7 +80,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		oauth2.S256ChallengeOption(verifier),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to start device authorization: %w", err)
+		return fmt.Errorf("failed to start device authorization: %w", loginError(err))
 	}
 
 	// Always print the URL and the code first: opening a browser is only a convenience,
@@ -106,7 +105,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		oauth2.VerifierOption(verifier),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to complete device authorization: %w", err)
+		return fmt.Errorf("failed to complete device authorization: %w", loginError(err))
 	}
 
 	if w := missingRefreshTokenWarning(token, clientID); w != "" {
@@ -121,6 +120,16 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Successfully logged in! Tokens saved to configuration.")
 	return nil
+}
+
+// loginError replaces an invalid_scope answer (the realm lists the hub scope but the client lacks
+// it) by one clear line; every other error is returned as it is.
+func loginError(err error) error {
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) && re.ErrorCode == "invalid_scope" {
+		return errors.New(auth.HubScopeMissingMessage)
+	}
+	return err
 }
 
 // storeLogin records a completed login in cfg (the caller saves it). The refresh token is replaced

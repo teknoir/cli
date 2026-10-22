@@ -31,3 +31,30 @@ Add Client Scope to the client:
 * Client Scopes -> Add client scope
   * teknoir-cli
   * Default
+
+## Optional client scope `teknoir-ztna` (WireGuard tunneling)
+
+The WireGuard hub (`wg.<domain>`) accepts only tokens whose audience contains `teknoir-ztna`, so the
+token `tnctl` sends to Backstage and the fleet API cannot open tunnel sessions. Create the scope and
+add it to the client as an **optional** scope (never default: a default scope cannot be left out of a
+token):
+
+* Client scope `teknoir-ztna`, Type: Optional, Include in token scope: ON, Display on consent screen: OFF
+* Mapper "By configuration", type Audience, Name `audience-teknoir-ztna`,
+  Included Custom Audience `teknoir-ztna`, Add to access token: ON, Add to ID token: OFF
+* Client `teknoir-cli` -> Client Scopes -> Add client scope -> `teknoir-ztna` -> Optional
+  (the client keeps `offline_access` as optional too)
+
+How `tnctl` uses it:
+
+* `tnctl login` adds the scope to the device login only when the realm lists it in `scopes_supported`
+  (the discovery document). Realms without it (production, airgapped installs) get the same request as
+  before. If the realm lists it but the client does not have it, login ends with a message that names
+  the fix (`invalid_scope`).
+* The access token that `tnctl` caches and sends to Backstage is always renewed **without** the scope
+  (a downscoped refresh), so it has no `teknoir-ztna` audience.
+* For every hub call (session create and each renewal) `tnctl` redeems the refresh token again **with**
+  the scope and sends that fresh token only to `wg.<domain>`. It is never cached; only the rotated
+  refresh token is saved.
+* A login made before the scope existed cannot gain it on refresh (Keycloak leaves it out silently):
+  run `tnctl login` once more. `tnctl login --check` shows `Tunneling: relogin` for such a login.

@@ -243,7 +243,7 @@ func TestCheck(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st.User != "anders" || !st.Offline || st.RefreshExpires != nil || n.Load() != 1 {
+		if st.User != "anders" || !st.Offline || st.RefreshExpires != nil || n.Load() != 2 { // the token request and the discovery for Tunneling
 			t.Errorf("%+v, %d requests", st, n.Load())
 		}
 	})

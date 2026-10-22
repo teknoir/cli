@@ -26,6 +26,10 @@ Plus all [global flags](index.md#global-flags) — notably `--domain`.
 
 1. The issuer URL is derived from the active domain: `https://auth.<domain>/auth/realms/<realm>`.
 2. A device-authorization request is made with PKCE (`S256`) and scopes `openid profile email offline_access`.
+   When the platform offers the optional scope `teknoir-ztna` (it lists it in its discovery document), it is
+   added; this is what lets `ssh`, `exec`, `ansible`, `port-forward` and `wg status` open WireGuard tunnels.
+   `tnctl` keeps that scope out of the token it sends to the fleet API: the hub token is requested again for
+   every tunnel call and never stored. Platforms that do not offer the scope get the plain request.
 3. Your browser opens to approve the login; `tnctl` polls for completion.
 4. On success, the access token, refresh token, expiry, realm, and client ID are saved under the
    domain's entry in `~/.tnctl.yaml`.
@@ -55,7 +59,7 @@ tnctl login --realm customers
 
 ```bash
 tnctl login --check            # human readable
-tnctl login --check -o json    # {"domain","user","accessExpires","offline","refreshExpires"?}
+tnctl login --check -o json    # {"domain","user","accessExpires","offline","refreshExpires"?,"tunneling"}
 ```
 
 `--check` never opens a browser and never prints a token. It always redeems the refresh token, even while
@@ -67,6 +71,14 @@ long job (this rotates the tokens once; the renewed tokens are saved, as every c
 | 0 | The login works. The output names the user, when the access token ends, and (when known) when the login itself ends. |
 | 6 | There is no login, or it has expired: `Your tnctl login has expired. Run: tnctl login` (with `-o json`: `{"error":{"code":"session_expired",...}}`). |
 | 1 | The check could not be made, for example because the platform is not reachable. This does not say the login is dead; try again. |
+
+The `tunneling` field (and the `Tunneling:` line) says whether this login can open WireGuard tunnels:
+
+| Value | Meaning |
+| --- | --- |
+| `ok` | The login was granted the `teknoir-ztna` scope. |
+| `relogin` | The platform offers the scope but this login predates it: run `tnctl login` once more to keep `ssh`, `exec`, `port-forward` and `wg status` working. |
+| `n/a` | The platform does not offer the scope: nothing to do. |
 
 Use it in scripts and agents before a long job: `tnctl login --check || tnctl login --no-browser`.
 
