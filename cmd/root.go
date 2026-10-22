@@ -33,10 +33,27 @@ device management, and namespace-scoped operations.`,
 	},
 }
 
+// versionCmd prints the installed release, as --version does.
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the tnctl version",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		cmd.Printf("tnctl %s\n", Version)
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(versionCmd)
+}
+
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	api.Version = Version
+	// --version and `tnctl version`: which release is installed (goreleaser stamps it; "dev" otherwise)
+	rootCmd.Version = Version
+	rootCmd.SetVersionTemplate("tnctl {{.Version}}\n")
 	err := rootCmd.Execute()
 	if err != nil {
 		var ee *exitError
