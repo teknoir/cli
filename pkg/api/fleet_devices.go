@@ -216,6 +216,18 @@ type FleetDeviceCredentials struct {
 	RSAPrivate   string `json:"rsaPrivate,omitempty"`
 	RSAPublic    string `json:"rsaPublic,omitempty"`
 	PublicSSHKey string `json:"publicSshKey,omitempty"`
+	// Registry is the image registry mirror (Harbor pull-through cache) of the device's teamspace, when the
+	// platform sends one. It is the default of `tnctl bootstrap --registry-mirror` and its credential. Nothing
+	// sends it yet (planned, plans/harbor-proxy-staging.md phase 1b): it is ignored when absent.
+	Registry *FleetRegistry `json:"registry,omitempty"`
+}
+
+// FleetRegistry is the registry mirror a platform offers a device: the Harbor host and a pull-only robot
+// credential, both plain text (not base64). A secret: never log or print it.
+type FleetRegistry struct {
+	Host     string `json:"host"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 // FleetDeviceCredentialsBulk is the answer of the bulk credentials route.

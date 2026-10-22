@@ -23,6 +23,12 @@ var bootstrapCmd = &cobra.Command{
 		if err := templates.ValidateK3SVersion(k3sVersion); err != nil {
 			return err
 		}
+		registryMirror, _ := cmd.Flags().GetString("registry-mirror")
+		registryCredFile, _ := cmd.Flags().GetString("registry-credential-file")
+		// Fail on a bad mirror or an unusable credential file before the platform is asked for anything.
+		if err := checkRegistryFlags(registryMirror, registryCredFile); err != nil {
+			return err
+		}
 		nodeOpts, err := nodeOptionsFromFlags(cmd)
 		if err != nil {
 			return err
@@ -66,6 +72,11 @@ var bootstrapCmd = &cobra.Command{
 			return fmt.Errorf("--force only applies together with --k3s-upgrade")
 		}
 
+		registry, err := registryFromFlags(registryMirror, registryCredFile, bl.registry)
+		if err != nil {
+			return err
+		}
+
 		data := templates.TemplateData{
 			Domain:             domain,
 			Namespace:          namespace,
@@ -81,6 +92,9 @@ var bootstrapCmd = &cobra.Command{
 			K3SVersionExplicit: cmd.Flags().Changed("k3s-version"),
 			K3SUpgrade:         k3sUpgrade,
 			K3SForce:           force,
+			RegistryMirror:     registry.Mirror,
+			RegistryUsername:   registry.Username,
+			RegistryPassword:   registry.Password,
 		}
 
 		if err := templates.ValidateTemplateData(data); err != nil {
@@ -89,14 +103,7 @@ var bootstrapCmd = &cobra.Command{
 
 		serverData, agentData := nodes.apply(data)
 
-		generate := func(tmpl *template.Template, filename string, data templates.TemplateData) error {
-			f, err := os.Create(filename)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			return tmpl.Execute(f, data)
-		}
+		generate := writeBootstrapScript
 
 		agentFile := fmt.Sprintf("bootstrap_agent_%s.sh", deviceName)
 		serverFile := fmt.Sprintf("bootstrap_server_%s.sh", deviceName)
@@ -117,6 +124,13 @@ var bootstrapCmd = &cobra.Command{
 		fmt.Printf("- %s\n", serverFile)
 		fmt.Printf("- %s\n", dockerServerFile)
 		fmt.Print(nodes.describe(agentFile, serverFile))
+		switch registry.Mirror {
+		case "":
+		case templates.RegistryMirrorNone:
+			fmt.Printf("%s and %s remove a registries.yaml that an earlier script wrote (registry mirror none)\n", agentFile, serverFile)
+		default:
+			fmt.Printf("%s and %s configure the registry mirror %s (/etc/rancher/k3s/registries.yaml); they contain its credential, keep them private\n", agentFile, serverFile, registry.Mirror)
+		}
 
 		skipUpload, _ := cmd.Flags().GetBool("skip-upload")
 		if !skipUpload {
@@ -130,6 +144,8 @@ var bootstrapCmd = &cobra.Command{
 // bootstrapLogin is the decoded login of a device that the bootstrap scripts install.
 type bootstrapLogin struct {
 	rsaPrivate, rsaPublic, username, password, publicSSHKey string
+	// registry is the registry mirror the platform offers the device, nil when it sends none.
+	registry *api.FleetRegistry
 }
 
 // loadBootstrapLogin asks the platform for the login of a device and decodes it. The platform gives
@@ -170,6 +186,7 @@ func loadBootstrapLogin(ctx context.Context, fl *api.Fleet, namespace, deviceNam
 	if bl.publicSSHKey, err = decode("publicsshkey", c.PublicSSHKey); err != nil {
 		return nil, err
 	}
+	bl.registry = c.Registry
 	return &bl, nil
 }
 
@@ -191,5 +208,24 @@ func init() {
 		"with --k3s-upgrade: allow an upgrade over more than one minor version (TN_K3S_FORCE=true is the default in the scripts)")
 	addNodeFlags(bootstrapCmd)
 	bootstrapCmd.Flags().String("docker-secret", "", "The contents of the .dockerconfigjson")
+	bootstrapCmd.Flags().String("registry-mirror", "",
+		"pull images through this Harbor host (pull-through cache projects dockerhub, ghcr, gcr, quay, k8s, nvcr), with the upstream registry as the fallback: the scripts write /etc/rancher/k3s/registries.yaml before the k3s installer. \"none\" removes a file the scripts wrote. Without it the file is left alone (or follows the registry that the platform sends with the device credentials, when it sends one)")
+	bootstrapCmd.Flags().String("registry-credential-file", "",
+		"file with the Harbor credential for --registry-mirror, one line username:password (a robot account of the teamspace), readable by you only. The password goes into the generated scripts and is never printed")
 	rootCmd.AddCommand(bootstrapCmd)
+}
+
+// writeBootstrapScript renders a bootstrap script to filename with mode 0600: the scripts hold the device
+// password, the k3s token and the teamspace's Harbor robot password. A file that already exists (written with
+// 0644 by an earlier tnctl) is chmodded too, because OpenFile's mode applies to new files only.
+func writeBootstrapScript(tmpl *template.Template, filename string, data templates.TemplateData) error {
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	return tmpl.Execute(f, data)
 }

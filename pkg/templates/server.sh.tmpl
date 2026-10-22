@@ -124,7 +124,7 @@ fs.inotify.max_user_instances=1024
 EOF
 sysctl --system
 
-download k3s_installer.sh https://get.k3s.io
+{{template "registries.sh.tmpl" .}}download k3s_installer.sh https://get.k3s.io
 $SUDO chmod +x k3s_installer.sh
 
 if [ ${OS_BUILD} ] || [ ${INSECURE} ]; then

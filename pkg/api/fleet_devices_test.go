@@ -378,3 +378,26 @@ func TestNoCatalogCallsInTheSource(t *testing.T) {
 		t.Errorf("code that calls the catalog: %v", hits)
 	}
 }
+
+// The registry field of the device credentials is optional (phase 1b of plans/harbor-proxy-staging.md):
+// absent it is nil, present it decodes as plain text.
+func TestFleetDeviceCredentials_RegistryIsOptional(t *testing.T) {
+	var c FleetDeviceCredentials
+	if err := json.Unmarshal([]byte(`{"name":"d","namespace":"ns","username":"dQ=="}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Registry != nil {
+		t.Fatalf("registry %+v without the field", c.Registry)
+	}
+	if err := json.Unmarshal([]byte(`{"name":"d","namespace":"ns","registry":{"host":"harbor.example.test","username":"robot$ts-ns","password":"pw"}}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Registry == nil || c.Registry.Host != "harbor.example.test" || c.Registry.Username != "robot$ts-ns" || c.Registry.Password != "pw" {
+		t.Fatalf("%+v", c.Registry)
+	}
+	// unchanged encoding when there is none
+	b, _ := json.Marshal(FleetDeviceCredentials{Name: "d"})
+	if strings.Contains(string(b), "registry") {
+		t.Fatalf("empty registry encoded: %s", b)
+	}
+}

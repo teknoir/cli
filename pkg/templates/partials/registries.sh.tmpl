@@ -1,0 +1,52 @@
+{{define "registries.sh.tmpl"}}{{if .RegistryMirror}}# The registry mirror (tnctl bootstrap --registry-mirror): pull images through the Harbor proxy-cache
+# projects, with the upstream registry as the fallback (k3s always tries its default endpoint last, so
+# a Harbor outage never blocks public images). It runs before the k3s installer, so a first start already
+# uses it; a re-run restarts k3s through the installer. The file is written only when it differs, at
+# mode 0600 (it holds the Harbor credential), and a registries.yaml that this script did not write is
+# never touched. The credential is never printed.
+_TN_REG_FILE="${K3S_CONFIG_PATH:-/etc/rancher/k3s}/registries.yaml"
+_TN_REG_MARKER='# managed by tnctl bootstrap'
+# playbooks/registry-mirror.yml (ansible) marks its file differently; it writes the same content, so either is ours.
+_TN_REG_MARKER_PB='# managed by teknoir'
+_TN_REG_HOST='{{.RegistryMirror}}'
+{{if ne .RegistryMirror "none"}}_TN_REG_USER='{{.RegistryUsername}}'
+_TN_REG_PASS='{{.RegistryPassword}}'
+# A double-quoted YAML scalar: backslash and double quote escaped.
+_tn_reg_q() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+{{end}}if [ -e "${_TN_REG_FILE}" ] && ! $SUDO grep -qxF -e "${_TN_REG_MARKER}" -e "${_TN_REG_MARKER_PB}" "${_TN_REG_FILE}"; then
+    warn "${_TN_REG_FILE} exists and was not written by tnctl bootstrap or registry-mirror.yml: keeping it, the registry mirror is not configured"
+{{- if eq .RegistryMirror "none"}}
+elif [ -e "${_TN_REG_FILE}" ]; then
+    $SUDO rm -f "${_TN_REG_FILE}"
+    info "Registry mirror removed (${_TN_REG_FILE}); pulls go to the upstream registries again"
+fi
+{{- else}}
+else
+    $SUDO mkdir -p "$(dirname "${_TN_REG_FILE}")"
+    _tn_reg_tmp=$(umask 077; mktemp "${_TN_REG_FILE}.XXXXXX") || fatal "Cannot create a temporary file next to ${_TN_REG_FILE}"
+    {
+        printf '%s\n' "${_TN_REG_MARKER}"
+        printf '# k3s private registry mirrors: pull-through cache on %s. containerd asks Harbor first and\n' "${_TN_REG_HOST}"
+        printf '# falls back to the upstream registry. Written by tnctl bootstrap --registry-mirror; do not edit.\n'
+        printf 'mirrors:\n'
+        for _tn_reg_m in docker.io=dockerhub ghcr.io=ghcr gcr.io=gcr quay.io=quay registry.k8s.io=k8s nvcr.io=nvcr; do
+            printf '  %s:\n    endpoint:\n      - "https://%s"\n    rewrite:\n      "^(.*)$": "%s/$1"\n' \
+                "${_tn_reg_m%%=*}" "${_TN_REG_HOST}" "${_tn_reg_m#*=}"
+        done
+        printf 'configs:\n  "%s":\n    auth:\n      username: "%s"\n      password: "%s"\n' \
+            "${_TN_REG_HOST}" "$(_tn_reg_q "${_TN_REG_USER}")" "$(_tn_reg_q "${_TN_REG_PASS}")"
+    } > "${_tn_reg_tmp}" || { rm -f "${_tn_reg_tmp}"; fatal "Cannot write ${_TN_REG_FILE}"; }
+    if [ -f "${_TN_REG_FILE}" ] && cmp -s "${_tn_reg_tmp}" "${_TN_REG_FILE}"; then
+        rm -f "${_tn_reg_tmp}"
+        $SUDO chmod 0600 "${_TN_REG_FILE}"
+        info "Registry mirror ${_TN_REG_HOST} already configured"
+    else
+        $SUDO chmod 0600 "${_tn_reg_tmp}"
+        $SUDO mv -f "${_tn_reg_tmp}" "${_TN_REG_FILE}" || { rm -f "${_tn_reg_tmp}"; fatal "Cannot write ${_TN_REG_FILE}"; }
+        info "Registry mirror ${_TN_REG_HOST} configured (${_TN_REG_FILE})"
+    fi
+    unset _tn_reg_tmp _tn_reg_m
+fi
+unset _TN_REG_USER _TN_REG_PASS
+{{- end}}
+{{end}}{{end}}
