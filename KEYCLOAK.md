@@ -49,8 +49,10 @@ How `tnctl` uses it:
 
 * `tnctl login` adds the scope to the device login only when the realm lists it in `scopes_supported`
   (the discovery document). Realms without it (production, airgapped installs) get the same request as
-  before. If the realm lists it but the client does not have it, login ends with a message that names
-  the fix (`invalid_scope`).
+  before. If the realm lists it but the client does not have it (`invalid_scope`, e.g. after the client
+  was reverted to `offline_access` only), `tnctl` warns and runs the login once more without the scope
+  (you confirm a second code); WireGuard access then needs a hub that does not enforce the audience.
+  A hub refresh that gets `invalid_scope` is retried downscoped once, with one warning per process.
 * The access token that `tnctl` caches and sends to Backstage is always renewed **without** the scope
   (a downscoped refresh), so it has no `teknoir-ztna` audience.
 * For every hub call (session create and each renewal) `tnctl` redeems the refresh token again **with**

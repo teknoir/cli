@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -72,6 +73,41 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		},
 	}
 
+	token, err := loginWithFallback(ctx, conf, domain)
+	if err != nil {
+		return err
+	}
+
+	if w := missingRefreshTokenWarning(token, clientID); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
+
+	storeLogin(cfg, domain, token, realm, clientID)
+
+	if err := cfg.Save(); err != nil {
+		return fmt.Errorf("failed to save tokens to config: %w", err)
+	}
+
+	fmt.Println("Successfully logged in! Tokens saved to configuration.")
+	return nil
+}
+
+// loginWithFallback runs the device flow. When the realm lists teknoir-ztna but the client lost it
+// (a rolled-back realm change: invalid_scope), it runs the flow once more without the scope, with a
+// warning. The device code is spent, so the user confirms a new one. The login then works for
+// everything but the hub audience (a hub in enforce mode refuses it).
+func loginWithFallback(ctx context.Context, conf *oauth2.Config, domain string) (*oauth2.Token, error) {
+	token, err := deviceLogin(ctx, conf, domain)
+	var scopeErr *hubScopeMissingError
+	if errors.As(err, &scopeErr) && dropZTNAScope(conf) {
+		fmt.Fprintln(os.Stderr, "Warning: "+auth.HubScopeMissingMessage+" Logging in again without it; WireGuard access (ssh, exec, port-forward) needs the scope on a hub that enforces the audience.")
+		return deviceLogin(ctx, conf, domain)
+	}
+	return token, err
+}
+
+// deviceLogin runs one device authorization flow with conf and returns the token.
+func deviceLogin(ctx context.Context, conf *oauth2.Config, domain string) (*oauth2.Token, error) {
 	verifier := oauth2.GenerateVerifier()
 
 	fmt.Printf("Starting device authorization for %s...\n", domain)
@@ -80,7 +116,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		oauth2.S256ChallengeOption(verifier),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to start device authorization: %w", loginError(err))
+		return nil, fmt.Errorf("failed to start device authorization: %w", loginError(err))
 	}
 
 	// Always print the URL and the code first: opening a browser is only a convenience,
@@ -105,31 +141,39 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		oauth2.VerifierOption(verifier),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to complete device authorization: %w", loginError(err))
+		return nil, fmt.Errorf("failed to complete device authorization: %w", loginError(err))
 	}
-
-	if w := missingRefreshTokenWarning(token, clientID); w != "" {
-		fmt.Fprintln(os.Stderr, w)
-	}
-
-	storeLogin(cfg, domain, token, realm, clientID)
-
-	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("failed to save tokens to config: %w", err)
-	}
-
-	fmt.Println("Successfully logged in! Tokens saved to configuration.")
-	return nil
+	return token, nil
 }
+
+// hubScopeMissingError is the invalid_scope answer to a login that asked for teknoir-ztna: the
+// realm lists the scope but the client lacks it. Its text is the one clear line for the user.
+type hubScopeMissingError struct{ cause error }
+
+func (e *hubScopeMissingError) Error() string { return auth.HubScopeMissingMessage }
+func (e *hubScopeMissingError) Unwrap() error { return e.cause }
 
 // loginError replaces an invalid_scope answer (the realm lists the hub scope but the client lacks
 // it) by one clear line; every other error is returned as it is.
 func loginError(err error) error {
 	var re *oauth2.RetrieveError
 	if errors.As(err, &re) && re.ErrorCode == "invalid_scope" {
-		return errors.New(auth.HubScopeMissingMessage)
+		return &hubScopeMissingError{cause: err}
 	}
 	return err
+}
+
+// dropZTNAScope removes teknoir-ztna from conf.Scopes and reports whether it was there.
+func dropZTNAScope(conf *oauth2.Config) bool {
+	kept := conf.Scopes[:0:0]
+	for _, sc := range conf.Scopes {
+		if sc != auth.ZTNAScope {
+			kept = append(kept, sc)
+		}
+	}
+	dropped := len(kept) != len(conf.Scopes)
+	conf.Scopes = kept
+	return dropped
 }
 
 // storeLogin records a completed login in cfg (the caller saves it). The refresh token is replaced

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -24,14 +25,15 @@ type idp struct {
 	t   *testing.T
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	forms    []url.Values
-	n        int
-	status   int    // token endpoint status (0: 200)
-	errBody  string // token endpoint body for a non-200 status
-	scopes   string // scopes_supported of the discovery document ("" none)
-	discHits int
-	discCode int // discovery status (0: 200)
+	mu         sync.Mutex
+	forms      []url.Values
+	n          int
+	refuseZTNA bool   // token endpoint answers invalid_scope to a request with teknoir-ztna (a rolled-back realm)
+	status     int    // token endpoint status (0: 200)
+	errBody    string // token endpoint body for a non-200 status
+	scopes     string // scopes_supported of the discovery document ("" none)
+	discHits   int
+	discCode   int // discovery status (0: 200)
 }
 
 func newIDP(t *testing.T) *idp {
@@ -52,6 +54,11 @@ func newIDP(t *testing.T) *idp {
 		case "/realms/master/protocol/openid-connect/token":
 			_ = r.ParseForm()
 			p.forms = append(p.forms, r.PostForm)
+			if p.refuseZTNA && strings.Contains(r.PostForm.Get("scope"), "teknoir-ztna") {
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"error":"invalid_scope","error_description":"Invalid scopes: teknoir-ztna"}`))
+				return
+			}
 			if p.status != 0 {
 				w.WriteHeader(p.status)
 				_, _ = w.Write([]byte(p.errBody))
@@ -294,6 +301,58 @@ func TestInvalidScopeOnRefreshIsNotSessionExpiry(t *testing.T) {
 	_, _, err := hubAccessToken(context.Background(), "teknoir.cloud", s.deps())
 	if err == nil || errors.Is(err, ErrSessionExpired) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A rolled-back realm change: teknoir-cli lost the optional scope but the stored refresh token still
+// lists it. The hub refresh retries once downscoped, with one warning, and the login keeps working.
+func TestHubTokenFallsBackWithoutTheScopeWhenTheRealmRefusesIt(t *testing.T) {
+	p := newIDP(t)
+	p.refuseZTNA = true
+	var warned bytes.Buffer
+	oldW := warnWriter
+	warnWriter = &warned
+	warnedHubScope.Store(false)
+	t.Cleanup(func() { warnWriter = oldW; warnedHubScope.Store(false) })
+
+	s := newStore(zLogin(t))
+	for i := 0; i < 2; i++ { // two calls, like a create and a renewal: one warning
+		tok, ztna, err := hubAccessToken(context.Background(), "teknoir.cloud", s.deps())
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if ztna || hasAudience(tok, ztnaAudience) {
+			t.Fatalf("call %d: the fallback token has the hub audience", i)
+		}
+	}
+	scopes := []string{}
+	for _, f := range p.tokenForms() {
+		scopes = append(scopes, f.Get("scope"))
+	}
+	want := []string{hubScope, mainScope, hubScope, mainScope}
+	if fmt.Sprint(scopes) != fmt.Sprint(want) {
+		t.Fatalf("scopes sent %q, want %q", scopes, want)
+	}
+	if n := strings.Count(warned.String(), "Warning:"); n != 1 || !strings.Contains(warned.String(), "teknoir-ztna") {
+		t.Fatalf("warnings: %q", warned.String())
+	}
+	if s.saves == 0 {
+		t.Fatal("the rotated refresh token was not saved")
+	}
+}
+
+func TestMainTokenStillRefreshesWhenTheRealmRefusesTheHubScope(t *testing.T) {
+	p := newIDP(t)
+	p.refuseZTNA = true
+	a := zLogin(t)
+	a.Expiry = "" // force a refresh
+	s := newStore(a)
+	tok, err := accessToken(context.Background(), "teknoir.cloud", s.deps())
+	if err != nil || hasAudience(tok, ztnaAudience) {
+		t.Fatalf("main token: %v", err)
+	}
+	if f := p.tokenForms(); len(f) != 1 || f[0].Get("scope") != mainScope {
+		t.Fatalf("forms: %v", f)
 	}
 }
 

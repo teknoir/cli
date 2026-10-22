@@ -82,6 +82,8 @@ func usableRefreshToken(refreshToken string) error {
 const (
 	// ztnaScope is the optional Keycloak client scope that adds the audience ztnaAudience.
 	ztnaScope = "teknoir-ztna"
+	// ZTNAScope is ztnaScope for callers outside the package (the login command).
+	ZTNAScope = ztnaScope
 	// ztnaAudience is the audience the WireGuard hub requires (the aud of a hub token).
 	ztnaAudience = "teknoir-ztna"
 	// mainScope is what the main token is (re)issued with: no hub audience.

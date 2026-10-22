@@ -2,9 +2,12 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/viper"
@@ -163,13 +166,41 @@ func hubAccessToken(ctx context.Context, domain string, d tokenDeps) (string, bo
 	return token.AccessToken, hasAudience(token.AccessToken, ztnaAudience), nil
 }
 
-// redeemHubToken redeems the refresh token with the hub scope when the login was granted it.
+// redeemHubToken redeems the refresh token with the hub scope when the login was granted it. When
+// the realm refuses the scope (invalid_scope: the realm change was rolled back and teknoir-cli lost
+// the optional scope), it redeems once more downscoped, with a warning: the token then has no hub
+// audience, which a hub in transition mode still accepts and one in enforce mode refuses (a clear
+// "run tnctl login" / "ask an admin" then, not an unusable tnctl).
 func redeemHubToken(ctx context.Context, domain string, a config.AuthConfig) (*oauth2.Token, error) {
-	scope := ""
-	if hasScope(a.RefreshToken, ztnaScope) {
-		scope = hubScope
+	if !hasScope(a.RefreshToken, ztnaScope) {
+		return redeemRefreshToken(ctx, domain, a, "")
 	}
-	return redeemRefreshToken(ctx, domain, a, scope)
+	token, err := redeemRefreshToken(ctx, domain, a, hubScope)
+	if !isInvalidScope(err) {
+		return token, err
+	}
+	warnHubScopeRefused()
+	return redeemRefreshToken(ctx, domain, a, mainScope)
+}
+
+// isInvalidScope reports whether err is the token endpoint's invalid_scope answer.
+func isInvalidScope(err error) bool {
+	var re *oauth2.RetrieveError
+	return errors.As(err, &re) && re.ErrorCode == "invalid_scope"
+}
+
+// warnWriter and warnedHubScope serve warnHubScopeRefused: one warning per process, however many
+// renewals a long-lived wg-proxy does.
+var (
+	warnWriter     io.Writer = os.Stderr
+	warnedHubScope atomic.Bool
+)
+
+func warnHubScopeRefused() {
+	if warnedHubScope.Swap(true) {
+		return
+	}
+	_, _ = fmt.Fprintln(warnWriter, "Warning: the realm refused the scope teknoir-ztna for this client (invalid_scope); continuing without the hub audience. A WireGuard hub that enforces the audience will refuse this login: ask a platform admin to add teknoir-ztna to the optional scopes of the teknoir-cli client.")
 }
 
 func accessToken(ctx context.Context, domain string, d tokenDeps) (string, error) {

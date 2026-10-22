@@ -237,3 +237,66 @@ func tokenAud(t *testing.T, tok string) string {
 }
 
 var base64RawURL = base64.RawURLEncoding
+
+// A rolled-back realm: the device authorization is accepted with teknoir-ztna but the token grant
+// answers invalid_scope. loginWithFallback runs the flow once more without the scope.
+func TestLoginRetriesWithoutTheScopeOnInvalidScope(t *testing.T) {
+	var mu sync.Mutex
+	var scopes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/device"):
+			mu.Lock()
+			scopes = append(scopes, r.PostForm.Get("scope"))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"UC","verification_uri":"https://x/verify","expires_in":60,"interval":1}`))
+		default:
+			var sc string
+			mu.Lock()
+			sc = scopes[len(scopes)-1]
+			mu.Unlock()
+			if strings.Contains(sc, "teknoir-ztna") {
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"error":"invalid_scope","error_description":"Invalid scopes: teknoir-ztna"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":300}`))
+		}
+	}))
+	defer srv.Close()
+	conf := &oauth2.Config{
+		ClientID: "teknoir-cli",
+		Scopes:   []string{"openid", "profile", "email", "offline_access", "teknoir-ztna"},
+		Endpoint: oauth2.Endpoint{DeviceAuthURL: srv.URL + "/device", TokenURL: srv.URL + "/token", AuthStyle: oauth2.AuthStyleInParams},
+	}
+	noBrowser = true
+	tok, err := loginWithFallback(context.Background(), conf, "teknoir.cloud")
+	if err != nil || tok.AccessToken != "at" {
+		t.Fatalf("tok=%v err=%v", tok, err)
+	}
+	if len(scopes) != 2 || !strings.Contains(scopes[0], "teknoir-ztna") || strings.Contains(scopes[1], "teknoir-ztna") {
+		t.Fatalf("device scopes: %q", scopes)
+	}
+}
+
+// Without the hub scope there is nothing to drop: invalid_scope stays the one clear line.
+func TestLoginInvalidScopeWithoutTheHubScopeIsNotRetried(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/device") {
+			calls++
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":"invalid_scope"}`))
+		}
+	}))
+	defer srv.Close()
+	conf := &oauth2.Config{ClientID: "c", Scopes: []string{"openid"},
+		Endpoint: oauth2.Endpoint{DeviceAuthURL: srv.URL + "/device", TokenURL: srv.URL + "/token"}}
+	_, err := loginWithFallback(context.Background(), conf, "teknoir.cloud")
+	if err == nil || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+}
