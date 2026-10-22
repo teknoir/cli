@@ -2764,6 +2764,11 @@ spec:
         control-plane: controller-manager
     spec:
       priorityClassName: high-priority-toe
+      # TOE mounts the device keys from hostPath /etc/teknoir and signs its MQTT JWT with them, so
+      # it must run on the k3s server node (the device identity). k3s labels server nodes with
+      # node-role.kubernetes.io/control-plane=true; joined agent nodes do not carry it.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       containers:
       - args:
         - --health-probe-bind-address=:8081
