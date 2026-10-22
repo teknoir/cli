@@ -221,6 +221,30 @@ func TestRegistries_ForeignFileIsKept(t *testing.T) {
 	}
 }
 
+// playbooks/registry-mirror.yml (ansible) writes the same content under its own first line; tnctl treats
+// that file as its own: it replaces it (a stale credential must not stay) and `none` removes it.
+func TestRegistries_AcceptsThePlaybooksMarker(t *testing.T) {
+	const pbMarker = "# managed by teknoir"
+	dir := t.TempDir()
+	p := filepath.Join(dir, "registries.yaml")
+	if err := os.WriteFile(p, []byte(pbMarker+"\nmirrors: {}\nconfigs:\n  \"old.example\":\n    auth:\n      password: \"stale\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := runRegistries(t, dir, regData("harbor.example.test")).mustOK(t)
+	got := readFile(t, p)
+	if strings.Contains(r.output, "[WARN]") || strings.Contains(got, "stale") || !strings.HasPrefix(got, regMarker+"\n") || !strings.Contains(got, regPassword) {
+		t.Errorf("the playbook's file was not replaced:\n%s\n%s", r.output, got)
+	}
+	if err := os.WriteFile(p, []byte(pbMarker+"\nmirrors: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r = runRegistries(t, dir, regData("none")).mustOK(t)
+	if _, err := os.Stat(p); !os.IsNotExist(err) || !strings.Contains(r.output, "Registry mirror removed") {
+		t.Errorf("none did not remove the playbook's file: %v\n%s", err, r.output)
+	}
+	noPassword(t, "output", r.output)
+}
+
 func TestRegistries_NoneRemovesAManagedFile(t *testing.T) {
 	dir := t.TempDir()
 	r := runRegistries(t, dir, regData("harbor.example.test")).mustOK(t)

@@ -172,8 +172,10 @@ tnctl bootstrap edge-01 --registry-mirror harbor.teknoir.cloud --registry-creden
 - **What is written.** The server and agent scripts write `/etc/rancher/k3s/registries.yaml` (mode `0600`,
   first line `# managed by tnctl bootstrap`) before the k3s installer runs, so the first start already uses
   it. On a re-run the installer restarts k3s. The file is written only when it differs.
-- **A file you wrote is never touched.** A `registries.yaml` without the marker line is kept, with a
-  warning, and the mirror is not configured. `--registry-mirror none` removes a file that the scripts wrote
+- **A file you wrote is never touched.** A `registries.yaml` without the marker line (`# managed by tnctl
+  bootstrap`, or `# managed by teknoir`, which the Ansible playbook `registry-mirror.yml` writes) is kept, with
+  a warning, and the mirror is not configured. A file with either marker is replaced, so a re-bootstrapped
+  robot never keeps a stale credential. `--registry-mirror none` removes a file that the scripts wrote
   (and keeps yours). Without `--registry-mirror` the scripts leave the file alone.
 - **The credential** is a Harbor robot account that can only pull from the proxy projects. It is embedded in
   the scripts (like the device keys, so keep the scripts private) and the scripts never print it. The file

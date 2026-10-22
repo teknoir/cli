@@ -914,13 +914,15 @@ info "Install Rancher K3s Agent"
 # never touched. The credential is never printed.
 _TN_REG_FILE="${K3S_CONFIG_PATH:-/etc/rancher/k3s}/registries.yaml"
 _TN_REG_MARKER='# managed by tnctl bootstrap'
+# playbooks/registry-mirror.yml (ansible) marks its file differently; it writes the same content, so either is ours.
+_TN_REG_MARKER_PB='# managed by teknoir'
 _TN_REG_HOST='harbor.example.test'
 _TN_REG_USER='robot$golden'
 _TN_REG_PASS='TEST-ONLY-registry-password'
 # A double-quoted YAML scalar: backslash and double quote escaped.
 _tn_reg_q() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-if [ -e "${_TN_REG_FILE}" ] && ! $SUDO grep -qxF "${_TN_REG_MARKER}" "${_TN_REG_FILE}"; then
-    warn "${_TN_REG_FILE} exists and was not written by tnctl bootstrap: keeping it, the registry mirror is not configured"
+if [ -e "${_TN_REG_FILE}" ] && ! $SUDO grep -qxF -e "${_TN_REG_MARKER}" -e "${_TN_REG_MARKER_PB}" "${_TN_REG_FILE}"; then
+    warn "${_TN_REG_FILE} exists and was not written by tnctl bootstrap or registry-mirror.yml: keeping it, the registry mirror is not configured"
 else
     $SUDO mkdir -p "$(dirname "${_TN_REG_FILE}")"
     _tn_reg_tmp=$(umask 077; mktemp "${_TN_REG_FILE}.XXXXXX") || fatal "Cannot create a temporary file next to ${_TN_REG_FILE}"
