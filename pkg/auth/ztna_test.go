@@ -329,7 +329,7 @@ func TestHubTokenFallsBackWithoutTheScopeWhenTheRealmRefusesIt(t *testing.T) {
 	for _, f := range p.tokenForms() {
 		scopes = append(scopes, f.Get("scope"))
 	}
-	want := []string{hubScope, mainScope, hubScope, mainScope}
+	want := []string{fullScope, mainScope, fullScope, mainScope}
 	if fmt.Sprint(scopes) != fmt.Sprint(want) {
 		t.Fatalf("scopes sent %q, want %q", scopes, want)
 	}
@@ -458,5 +458,48 @@ func TestHasAudienceAndScopeParsing(t *testing.T) {
 	}
 	if !hasScope(jwtRaw(t, `{"scope":"openid  teknoir-ztna"}`), "teknoir-ztna") || hasScope(jwtRaw(t, `{"scope":"teknoir-ztna-status"}`), "teknoir-ztna") {
 		t.Error("scope parsing")
+	}
+}
+
+// A login granted the hub scope but not offline_access (a user without that role): Keycloak answers
+// invalid_scope to a refresh that asks for more than the refresh token holds, so both tokens are
+// requested with the scopes of the refresh token itself.
+func TestScopesFollowTheRefreshTokenWithoutOfflineAccess(t *testing.T) {
+	const granted = "openid profile email teknoir-ztna"
+	login := func() config.AuthConfig {
+		a := zLogin(t)
+		a.RefreshToken = jwtRaw(t, fmt.Sprintf(`{"typ":"Refresh","scope":%q,"jti":"rt-login"}`, granted))
+		return a
+	}
+	p := newIDP(t)
+	if _, err := accessToken(context.Background(), "teknoir.cloud", forceRefresh(newStore(login()).deps())); err != nil {
+		t.Fatal(err)
+	}
+	s := newStore(login())
+	if _, ztna, err := hubAccessToken(context.Background(), "teknoir.cloud", s.deps()); err != nil || !ztna {
+		t.Fatalf("hub: ztna=%v err=%v", ztna, err)
+	}
+	forms := p.tokenForms()
+	if len(forms) != 2 || forms[0].Get("scope") != "openid profile email" || forms[1].Get("scope") != granted {
+		t.Fatalf("scopes sent: %v", forms)
+	}
+
+	// The realm-refused fallback also stays within the granted scopes.
+	p.refuseZTNA = true
+	warnedHubScope.Store(true) // keep the test output quiet
+	t.Cleanup(func() { warnedHubScope.Store(false) })
+	if _, ztna, err := hubAccessToken(context.Background(), "teknoir.cloud", newStore(login()).deps()); err != nil || ztna {
+		t.Fatalf("fallback: ztna=%v err=%v", ztna, err)
+	}
+	forms = p.tokenForms()
+	if got := forms[len(forms)-1].Get("scope"); got != "openid profile email" {
+		t.Fatalf("fallback scope %q", got)
+	}
+}
+
+func TestScopesForTokenWithoutScopeClaim(t *testing.T) {
+	m, h := scopesFor("opaque")
+	if m != mainScope || h != mainScope+" teknoir-ztna" {
+		t.Fatalf("%q %q", m, h)
 	}
 }

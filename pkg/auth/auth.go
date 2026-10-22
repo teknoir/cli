@@ -59,7 +59,7 @@ func GetValidToken(ctx context.Context, domain string, auth config.AuthConfig) (
 	// exactly as before.
 	scope := ""
 	if hasScope(auth.RefreshToken, ztnaScope) {
-		scope = mainScope
+		scope, _ = scopesFor(auth.RefreshToken)
 	}
 	return redeemRefreshToken(ctx, domain, auth, scope)
 }
@@ -86,12 +86,29 @@ const (
 	ZTNAScope = ztnaScope
 	// ztnaAudience is the audience the WireGuard hub requires (the aud of a hub token).
 	ztnaAudience = "teknoir-ztna"
-	// mainScope is what the main token is (re)issued with: no hub audience.
-	mainScope = "openid profile email offline_access"
-	// hubScope is mainScope plus the hub scope.
-	hubScope   = mainScope + " " + ztnaScope
+	// mainScope is what a login requests for the main token: no hub audience.
+	mainScope  = "openid profile email offline_access"
 	maxTokenIO = 1 << 20
 )
+
+// scopesFor derives the scopes to redeem a refresh token with from the scope claim of that token
+// itself: Keycloak answers invalid_scope to a refresh that asks for more than the token was
+// granted, so a hard-coded list breaks a login that lacks one of them (a user without the
+// offline_access role). main is the claim without the hub scope, hub is the claim with it. A token
+// without a scope claim yields mainScope and mainScope plus the hub scope.
+func scopesFor(refreshToken string) (main, hub string) {
+	var keep []string
+	for _, sc := range strings.Fields(jwtClaims(refreshToken).Scope) {
+		if sc != ztnaScope {
+			keep = append(keep, sc)
+		}
+	}
+	if len(keep) == 0 {
+		keep = strings.Fields(mainScope)
+	}
+	main = strings.Join(keep, " ")
+	return main, main + " " + ztnaScope
+}
 
 // redeemRefreshToken redeems the refresh token at the realm's token endpoint. scope is sent only
 // when not empty (a refresh without scope returns the originally granted scopes). Errors from the

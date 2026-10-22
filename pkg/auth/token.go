@@ -175,12 +175,13 @@ func redeemHubToken(ctx context.Context, domain string, a config.AuthConfig) (*o
 	if !hasScope(a.RefreshToken, ztnaScope) {
 		return redeemRefreshToken(ctx, domain, a, "")
 	}
-	token, err := redeemRefreshToken(ctx, domain, a, hubScope)
+	mainSc, hubSc := scopesFor(a.RefreshToken)
+	token, err := redeemRefreshToken(ctx, domain, a, hubSc)
 	if !isInvalidScope(err) {
 		return token, err
 	}
 	warnHubScopeRefused()
-	return redeemRefreshToken(ctx, domain, a, mainScope)
+	return redeemRefreshToken(ctx, domain, a, mainSc)
 }
 
 // isInvalidScope reports whether err is the token endpoint's invalid_scope answer.
