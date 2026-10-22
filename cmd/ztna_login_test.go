@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/teknoir/cli/pkg/auth"
+	"github.com/teknoir/cli/pkg/config"
 	"golang.org/x/oauth2"
 )
 
@@ -298,5 +299,82 @@ func TestLoginInvalidScopeWithoutTheHubScopeIsNotRetried(t *testing.T) {
 	_, err := loginWithFallback(context.Background(), conf, "teknoir.cloud")
 	if err == nil || calls != 1 {
 		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+}
+
+// A device login that was granted the hub scope returns a hub-audience access token. What a login
+// stores as access_token is the main token (Backstage and the fleet API see it), so it is replaced
+// at once by a downscoped redemption: the saved file never holds a token with the hub audience.
+func TestLoginStoresAMainTokenWithoutTheHubAudience(t *testing.T) {
+	p := newZTNAIDP(t, true)
+	now := time.Now()
+	deviceAT := testJWT(t, map[string]any{"aud": []string{"teknoir-cli", "teknoir-ztna"}, "exp": now.Add(5 * time.Minute).Unix()})
+	deviceRT := testJWT(t, map[string]any{"typ": "Offline", "scope": zFull, "jti": "device-rt"})
+	device := &oauth2.Token{AccessToken: deviceAT, RefreshToken: deviceRT, Expiry: now.Add(5 * time.Minute)}
+
+	tok, err := auth.MainLoginToken(context.Background(), "teknoir.cloud", "master", "teknoir-cli", device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.scopes(); len(got) != 1 || got[0] != zMain {
+		t.Fatalf("redeemed with scopes %v, want one downscoped request %q", got, zMain)
+	}
+	cfg := &config.Config{Auths: map[string]config.AuthConfig{}}
+	storeLogin(cfg, "teknoir.cloud", tok, "master", "teknoir-cli")
+	a := cfg.Auths[config.SanitizeDomain("teknoir.cloud")]
+	if aud := tokenAud(t, a.AccessToken); strings.Contains(aud, "teknoir-ztna") {
+		t.Fatalf("the saved access_token has the hub audience: %s", aud)
+	}
+	if a.AccessToken == deviceAT || a.RefreshToken == "" || a.RefreshToken == deviceRT {
+		t.Fatalf("saved %+v: want the redeemed access token and the rotated refresh token", a)
+	}
+	if !hasScopeClaim(t, a.RefreshToken, "teknoir-ztna") {
+		t.Fatal("the rotated refresh token lost the hub scope, hub tokens could no longer be minted")
+	}
+}
+
+func hasScopeClaim(t *testing.T, rt, scope string) bool {
+	t.Helper()
+	return strings.Contains(" "+scopeOfRefresh(rt)+" ", " "+scope+" ")
+}
+
+// A login without the hub audience (production, airgapped, a realm without the scope), or without a
+// refresh token to redeem, is stored as it is, with no request.
+func TestLoginKeepsATokenThatHasNoHubAudience(t *testing.T) {
+	p := newZTNAIDP(t, false)
+	now := time.Now()
+	plainAT := testJWT(t, map[string]any{"aud": []string{"teknoir-cli"}, "exp": now.Add(5 * time.Minute).Unix()})
+	for name, in := range map[string]*oauth2.Token{
+		"no hub audience":  {AccessToken: plainAT, RefreshToken: "rt", Expiry: now.Add(time.Minute)},
+		"opaque token":     {AccessToken: "opaque", RefreshToken: "rt", Expiry: now.Add(time.Minute)},
+		"no refresh token": {AccessToken: testJWT(t, map[string]any{"aud": []string{"teknoir-ztna"}}), Expiry: now.Add(time.Minute)},
+	} {
+		out, err := auth.MainLoginToken(context.Background(), "teknoir.cloud", "master", "teknoir-cli", in)
+		if err != nil || out != in {
+			t.Errorf("%s: out=%v err=%v", name, out, err)
+		}
+	}
+	if got := p.scopes(); len(got) != 0 {
+		t.Errorf("unexpected token requests %v", got)
+	}
+}
+
+// When the downscoped redemption fails the hub-audience token is not stored: the login fails.
+func TestLoginDoesNotStoreAHubTokenWhenTheDownscopeFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"error":"invalid_scope"}`))
+	}))
+	defer srv.Close()
+	defer auth.SetTokenURLForTest(func(string, string) string { return srv.URL })()
+	now := time.Now()
+	in := &oauth2.Token{
+		AccessToken:  testJWT(t, map[string]any{"aud": []string{"teknoir-ztna"}}),
+		RefreshToken: testJWT(t, map[string]any{"scope": zFull}),
+		Expiry:       now.Add(time.Minute),
+	}
+	out, err := auth.MainLoginToken(context.Background(), "teknoir.cloud", "master", "teknoir-cli", in)
+	if err == nil || out != nil {
+		t.Fatalf("out=%v err=%v", out, err)
 	}
 }

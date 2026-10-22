@@ -31,7 +31,10 @@ Plus all [global flags](index.md#global-flags) — notably `--domain`.
    `tnctl` keeps that scope out of the token it sends to the fleet API: the hub token is requested again for
    every tunnel call and never stored. Platforms that do not offer the scope get the plain request.
 3. Your browser opens to approve the login; `tnctl` polls for completion.
-4. On success, the access token, refresh token, expiry, realm, and client ID are saved under the
+4. The device flow's own access token then carries the hub audience, so `tnctl` replaces it at once by a
+   downscoped redemption of the refresh token. The saved access token never has the hub audience; if the
+   redemption fails the login fails and nothing is saved.
+5. On success, the access token, refresh token, expiry, realm, and client ID are saved under the
    domain's entry in `~/.tnctl.yaml`.
 
 ```mermaid

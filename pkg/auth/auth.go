@@ -64,6 +64,27 @@ func GetValidToken(ctx context.Context, domain string, auth config.AuthConfig) (
 	return redeemRefreshToken(ctx, domain, auth, scope)
 }
 
+// MainLoginToken turns the token a device login returned into the main token to store. The login
+// asks for the hub scope so that one browser confirmation yields a refresh token that may mint hub
+// tokens, which also puts the hub audience into that first access token. The stored access token is
+// the one Backstage and the fleet API see and must never have it, so such a token is replaced at
+// once by a downscoped redemption of the refresh token (the rotated refresh token comes with it).
+// A token without the hub audience, or without a refresh token to redeem, is returned as it is.
+func MainLoginToken(ctx context.Context, domain, realm, clientID string, token *oauth2.Token) (*oauth2.Token, error) {
+	if token == nil || token.RefreshToken == "" || !hasAudience(token.AccessToken, ztnaAudience) {
+		return token, nil
+	}
+	mainSc, _ := scopesFor(token.RefreshToken)
+	main, err := redeemRefreshToken(ctx, domain, config.AuthConfig{Realm: realm, ClientID: clientID, RefreshToken: token.RefreshToken}, mainSc)
+	if err != nil {
+		return nil, fmt.Errorf("could not obtain the main token after login: %w", err)
+	}
+	if hasAudience(main.AccessToken, ztnaAudience) {
+		return nil, fmt.Errorf("the realm still puts the %s audience into the main token (scope %q); not storing it", ztnaAudience, mainSc)
+	}
+	return main, nil
+}
+
 // usableRefreshToken is a SessionExpiredError for a refresh token that is missing or known to be
 // expired (it cannot be redeemed: skip the request), nil otherwise. Keycloak has the last word on a
 // token that expired only moments ago: this host's clock may run ahead of it, so only a token that

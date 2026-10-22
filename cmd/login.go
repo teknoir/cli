@@ -82,6 +82,13 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, w)
 	}
 
+	// The stored access token is the main token (Backstage, fleet API): never the hub-audience one
+	// the device flow returns when it was granted the hub scope.
+	token, err = auth.MainLoginToken(ctx, domain, realm, clientID, token)
+	if err != nil {
+		return err
+	}
+
 	storeLogin(cfg, domain, token, realm, clientID)
 
 	if err := cfg.Save(); err != nil {
