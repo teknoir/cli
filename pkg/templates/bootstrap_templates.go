@@ -60,6 +60,32 @@ type TemplateData struct {
 	Server string
 	// TLSSANs are extra --tls-san values of the server script, after the two it always adds.
 	TLSSANs []string
+	// RegistryMirror is the Harbor host the device pulls images through (`tnctl bootstrap --registry-mirror`):
+	// the scripts write /etc/rancher/k3s/registries.yaml with the six proxy-cache mirrors (docker.io,
+	// ghcr.io, gcr.io, quay.io, registry.k8s.io, nvcr.io) and the upstream registry as the fallback.
+	// "none" removes a file that the scripts wrote. Empty leaves registries.yaml alone and renders no code.
+	RegistryMirror string
+	// RegistryUsername and RegistryPassword are the Harbor robot credential for RegistryMirror. They are
+	// embedded in single quotes in the script and never printed by it; ValidateTemplateData allows a `$`
+	// here (a Harbor robot is called robot$name) but no quote, backslash, newline or control character.
+	RegistryUsername string
+	RegistryPassword string
+}
+
+// registryHostRE is a Harbor host name, optionally with a port: what the k3s mirror endpoint
+// https://<host> can hold.
+var registryHostRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$`)
+
+// RegistryMirrorNone is the value of RegistryMirror that removes a registries.yaml written by the scripts.
+const RegistryMirrorNone = "none"
+
+// ValidateRegistryMirror accepts "" (no registry mirror), "none", or a host name with an optional port.
+// The value ends up in a shell script and in a YAML file, so nothing else is let through.
+func ValidateRegistryMirror(v string) error {
+	if v == "" || v == RegistryMirrorNone || registryHostRE.MatchString(v) {
+		return nil
+	}
+	return fmt.Errorf("invalid registry mirror %q: want a host name such as harbor.teknoir.cloud (optionally with :port), or %q", v, RegistryMirrorNone)
 }
 
 func (d TemplateData) k3sVersion() string {

@@ -14,5 +14,9 @@ func goldenData() TemplateData {
 		PublicSSHKey: "ssh-ed25519 TEST-ONLY-ssh-public golden@example.test",
 		K3SToken:     "TEST-ONLY-k3s-token",
 		DockerSecret: "TEST-ONLY-docker-secret",
+		// the registry mirror, so the golden files cover registries.sh.tmpl
+		RegistryMirror:   "harbor.example.test",
+		RegistryUsername: "robot$golden",
+		RegistryPassword: "TEST-ONLY-registry-password",
 	}
 }

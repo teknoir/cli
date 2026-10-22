@@ -45,7 +45,7 @@ $SUDO cp ${CONFIG_PATH}/rsa_public.pem /usr/local/share/ca-certificates/${_DEVIC
 $SUDO update-ca-certificates
 
 info "Install Rancher K3s Agent"
-download k3s_installer.sh https://get.k3s.io
+{{template "registries.sh.tmpl" .}}download k3s_installer.sh https://get.k3s.io
 $SUDO chmod +x k3s_installer.sh
 
 if [ "${OS_BUILD}" ] || [ "${INSECURE}" ]; then

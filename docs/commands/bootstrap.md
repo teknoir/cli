@@ -19,6 +19,8 @@ The device may be given as an argument, via the `--device` global flag, or selec
 | `--k3s-upgrade` | `false` | Let the scripts replace an installed k3s with `--k3s-version` (sets `TN_K3S_UPGRADE=true` as the script's default). Without it a re-run **keeps** the installed k3s. See [Re-running a script](#re-running-a-script-the-installed-k3s-is-kept). |
 | `--force` | `false` | Only with `--k3s-upgrade`: allow an upgrade over more than one minor version (`TN_K3S_FORCE=true`). A downgrade is never allowed. |
 | `--docker-secret` | `""` | Contents of the `.dockerconfigjson` to embed. |
+| `--registry-mirror HOST\|none` | `""` | Pull images through the Harbor host `HOST` (its proxy-cache projects), with the upstream registry as the fallback. The server and agent scripts write `/etc/rancher/k3s/registries.yaml` before the k3s installer. `none` removes a file the scripts wrote. Empty leaves `registries.yaml` alone. See [Registry mirror](#registry-mirror-harbor-pull-through-cache). |
+| `--registry-credential-file FILE` | `""` | The Harbor credential for `--registry-mirror`: one line `username:password` (a robot account of the teamspace), readable by you only. It goes into the generated scripts and is never printed. |
 | `--robot` | `""` | Name of the robot (the multi-computer cluster) the computers belong to. Becomes the node label `teknoir.org/robot` and, together with a role, the node name `<robot>-<role>`. See [Robots with several computers](#robots-with-several-computers). |
 | `--role` | `""` | Node role of the **server** script (a DNS label such as `vision` or `io`). Becomes the node label `teknoir.org/node-role`. |
 | `--node-name` | `""` | Node name of the server script. Default: `<robot>-<role>` with `--robot` and `--role`, otherwise `teknoir-master` as before. |
@@ -150,6 +152,39 @@ The agent script uses the same two files; `--server` only changes the `K3S_URL` 
 Without any of these flags the scripts are exactly what they were before (`teknoir-master` for the
 server, the host name for the agent, no labels). The docker server script (`k3s < 1.24`) does not take
 node roles.
+
+## Registry mirror (Harbor pull-through cache)
+
+With `--registry-mirror HOST` the robot pulls its images through the platform's Harbor instead of straight
+from the internet: Docker Hub, GitHub (`ghcr.io`), `gcr.io`, `quay.io`, `registry.k8s.io` and `nvcr.io` map
+to the Harbor projects `dockerhub`, `ghcr`, `gcr`, `quay`, `k8s` and `nvcr`. Private `ghcr.io/teknoir/*`
+images then reach the robot without a GitHub token on the device, and a popular image is downloaded once
+per site instead of once per robot.
+
+```bash
+printf 'robot$ts-my-teamspace:%s\n' "$HARBOR_ROBOT_SECRET" > harbor-pull && chmod 600 harbor-pull
+tnctl bootstrap edge-01 --registry-mirror harbor.teknoir.cloud --registry-credential-file harbor-pull
+```
+
+- **Fallback.** k3s always tries the upstream registry last. When Harbor is down or slow to fail, public
+  images still come from the internet; a private image that is not on the device yet does not (the robots
+  have no upstream credential).
+- **What is written.** The server and agent scripts write `/etc/rancher/k3s/registries.yaml` (mode `0600`,
+  first line `# managed by tnctl bootstrap`) before the k3s installer runs, so the first start already uses
+  it. On a re-run the installer restarts k3s. The file is written only when it differs.
+- **A file you wrote is never touched.** A `registries.yaml` without the marker line is kept, with a
+  warning, and the mirror is not configured. `--registry-mirror none` removes a file that the scripts wrote
+  (and keeps yours). Without `--registry-mirror` the scripts leave the file alone.
+- **The credential** is a Harbor robot account that can only pull from the proxy projects. It is embedded in
+  the scripts (like the device keys, so keep the scripts private) and the scripts never print it. The file
+  must not be readable by group or others.
+- The Docker-mode script (`bootstrap_docker_server_<device>.sh`) is not changed.
+- For a robot that is already running, the Ansible playbook `registry-mirror.yml` (repository `ansible`)
+  does the same, with a probe before anything changes and a rollback.
+
+The platform may later send the registry and the credential together with the device login; `tnctl` then
+uses them as the default of `--registry-mirror` and its credential (a `registry` field in the device
+credentials response, ignored when absent).
 
 ## The k3s version
 
@@ -311,6 +346,9 @@ tnctl bootstrap --docker-secret "$(cat dockerconfig.json)"
 
 # Generate but do not upload
 tnctl bootstrap edge-01 --skip-upload
+
+# Pull images through Harbor (credential in a file, never printed)
+tnctl bootstrap edge-01 --registry-mirror harbor.teknoir.cloud --registry-credential-file harbor-pull
 
 # A single-computer robot with a GPU: the server script gets the role vision
 tnctl bootstrap vision-station-01 --robot vision-station-01 --role vision --label teknoir.org/gpu=nvidia
