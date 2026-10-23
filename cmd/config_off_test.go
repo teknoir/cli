@@ -291,7 +291,7 @@ func TestConfigOffNoopAppNeedsNoConfirm(t *testing.T) {
 	if strings.Contains(writeQuery, "confirm") {
 		t.Errorf("a noop write must not carry a confirmation: %q", writeQuery)
 	}
-	if !strings.HasPrefix(out, "Nothing changed: every resource of apps/mock-vision already is off on vision-station-01.") {
+	if !strings.HasPrefix(out, "Nothing changed in apps/mock-vision on vision-station-01.") {
 		t.Errorf("stdout:\n%s", out)
 	}
 }
@@ -937,5 +937,106 @@ func TestConfigGetShowsOff(t *testing.T) {
 	out, _, err = runCLI(t, e, "config", "get", "vision-station-01", "-o", "json")
 	if err != nil || !strings.Contains(out, `"status": "off"`) || !strings.Contains(out, `"off": true`) {
 		t.Errorf("%v\n%s", err, out)
+	}
+}
+
+// ---------- review fixes: noop of the application route, off items, orphans, owners ----------
+
+func appNoopAnswer(skipped, warning string) string {
+	return `{"dryRun":false,"revision":"r2","overrides":{},"warnings":[` + warning + `],"ids":[],"noop":true,"skipped":[` + skipped + `]}`
+}
+
+func TestConfigOffAppNoopOverlayOnlyWaitsForNothing(t *testing.T) {
+	p := newFakePlatform(t)
+	p.on("GET", "/config/vision-station-01", 200, jsonOf(t, offView("", false)))
+	p.onFunc("PATCH", appOffPath, func(r rec) (int, string) {
+		return 200, appNoopAnswer(`{"identity":"HelmChart-notebook-default","reason":"only adds values to it; turn off fleet-app instead"}`, `"nothing to turn off: the application only adds values"`)
+	})
+	e, _ := testEnv(t, p, nil)
+	out, errs, err := runCLI(t, e, "config", "off", "vision-station-01", "--app", "apps/mock-vision", "--wait=published", "--timeout", "10s")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if !strings.Contains(errs, "nothing to turn off: the application only adds values") || strings.Contains(out, "already is off") {
+		t.Errorf("stdout:\n%s\nstderr:\n%s", out, errs)
+	}
+}
+
+func TestConfigOffAppNoopAlreadyOffFollowsThoseItems(t *testing.T) {
+	p := newFakePlatform(t)
+	sequence(t, p, offView(api.StateOff, true), offView(api.StateOff, true), offView(api.StatePending, true), offView(api.StateOff, true))
+	p.onFunc("PATCH", appOffPath, func(r rec) (int, string) {
+		return 200, appNoopAnswer(`{"identity":"HelmChart-notebook-default","reason":"already off"}`, "")
+	})
+	e, _ := testEnv(t, p, nil)
+	_, errs, err := runCLI(t, e, "config", "off", "vision-station-01", "--app", "apps/mock-vision", "--wait=published")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if !strings.Contains(errs, "waiting for the controller to turn HelmChart/default/notebook off") {
+		t.Errorf("it must wait for the already-off item:\n%s", errs)
+	}
+}
+
+func TestConfigSetWaitAppliedOnAnOffItem(t *testing.T) {
+	p := newFakePlatform(t)
+	p.on("PATCH", patchPath, 200, writeOK(nbID, "r2"))
+	sequence(t, p, viewAt("r2", "active", ""))
+	d := notebookDetail(nil)
+	d.Resource.Status = api.StatusOff
+	p.on("GET", "/config/vision-station-01/resource", 200, jsonOf(t, d))
+	ex := &fakeExec{run: func(script string) (execResult, error) {
+		return execResult{}, errors.New("an off item must not be probed: " + script)
+	}}
+	e, _ := testEnv(t, p, ex)
+	_, errs, err := setWait(t, e, "--wait=applied")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if !strings.Contains(errs, "off on this robot: the values apply when it is turned on") {
+		t.Errorf("stderr:\n%s", errs)
+	}
+}
+
+func TestConfigOnOrphanOffWaitApplied(t *testing.T) {
+	// The identity is in no layer any more: no row, the override state is no-target.
+	p := newFakePlatform(t)
+	p.onFunc("PATCH", patchPath, func(r rec) (int, string) {
+		return 200, offWrite(nbID, false, false, offImpact(""))
+	})
+	orphan := offView(api.StateNoTarget, false)
+	orphan.Configuration.Effective = orphan.Configuration.Effective[1:]
+	orphan.Configuration.Resources = orphan.Configuration.Resources[1:]
+	sequence(t, p, orphan)
+	ex := &fakeExec{run: func(script string) (execResult, error) {
+		return execResult{}, errors.New("an orphan must not be probed: " + script)
+	}}
+	e, _ := testEnv(t, p, ex)
+	_, errs, err := runCLI(t, e, "config", "on", "vision-station-01", nbID, "--wait=applied", "--timeout", "10s")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if !strings.Contains(errs, "no layer provides it any more: nothing to install") {
+		t.Errorf("stderr:\n%s", errs)
+	}
+}
+
+func TestResourcesOfAppUsesTheOwnerNotTheOverlay(t *testing.T) {
+	fleet := &api.GitOpsApplicationView{GitOpsApplicationRef: api.GitOpsApplicationRef{RepoURL: "https://github.com/teknoir/teknoir-demo-gitops", Path: "apps/fleet"}}
+	robot := &api.GitOpsApplicationView{GitOpsApplicationRef: api.GitOpsApplicationRef{RepoURL: "https://github.com/teknoir/teknoir-demo-gitops", Path: "apps/robot"}}
+	base := helmResource("notebook", "fleet", "test", "0.0.5", nil)
+	base.Application = fleet
+	over := helmResource("notebook", "robot", "vision-station-01", "0.0.5", nil)
+	over.Application, over.Overlay = robot, true
+	v := &api.ConfigTargetView{Configuration: api.RobotConfigurationView{
+		Resources: []api.FleetConfigResource{base, over},
+		Effective: []api.FleetConfigResource{over},
+	}}
+	repo := "https://github.com/teknoir/teknoir-demo-gitops"
+	if ids := resourcesOfApp(v, repo, "apps/robot"); len(ids) != 0 {
+		t.Errorf("an overlay-only app owns nothing: %v", ids)
+	}
+	if ids := resourcesOfApp(v, repo, "apps/fleet"); len(ids) != 1 || ids[0] != nbID {
+		t.Errorf("the fleet app owns the chart: %v", ids)
 	}
 }

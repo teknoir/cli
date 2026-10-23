@@ -258,6 +258,22 @@ func (w *waiter) wait(ctx context.Context, info writeInfo) error {
 				}
 			}
 		}
+		if err == nil && info.off.on && (w.level == waitApplied || w.level == waitReady) && w.lastView != nil {
+			// An orphan off has no row in any layer: there is nothing to install on the robot.
+			rows := map[string]bool{}
+			for _, r := range w.lastView.Configuration.Effective {
+				rows[r.ID()] = true
+			}
+			var kept []string
+			for _, id := range info.resources {
+				if rows[id] {
+					kept = append(kept, id)
+					continue
+				}
+				w.progress(id, "no layer provides it any more: nothing to install")
+			}
+			info.resources = kept
+		}
 		if err == nil && info.off.on && (w.level == waitApplied || w.level == waitReady) && len(info.resources) > 0 {
 			// An item turned on again is checked like an added one: the published stamp, a new helm
 			// Job, a release. The stamp is the one the configuration published just now carries.
@@ -445,7 +461,9 @@ func (w *waiter) waitDevice(ctx context.Context, info writeInfo) error {
 			}
 			return err
 		}
-		checks = append(checks, c)
+		if c != nil {
+			checks = append(checks, c)
+		}
 	}
 	var tr transient
 	for {
@@ -500,6 +518,11 @@ func (w *waiter) expectation(ctx context.Context, id string, info writeInfo) (*d
 	d, _, err := w.fl.ConfigResource(ctx, w.target, id, false)
 	if err != nil {
 		return nil, classify(err)
+	}
+	if d.Resource.Status == api.StatusOff {
+		// Off on this robot: nothing is installed to check; the values apply when it is turned on.
+		w.progress(id, "off on this robot: the values apply when it is turned on")
+		return nil, nil
 	}
 	c := &devCheck{id: id, kind: kind, ns: ns, name: name}
 	if st := info.stamps[id]; st != "" {

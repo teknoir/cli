@@ -254,6 +254,17 @@ func (e *cliEnv) runOffOn(cmd *cobra.Command, args []string, f *offFlags, off bo
 			ids := []string{id}
 			if f.app != "" {
 				ids = resourcesOfApp(view, repo, path)
+			} else if !off && (s.level == waitApplied || s.level == waitReady) {
+				// An orphan off has no row, so no release to take a baseline of.
+				if v, _, verr := s.fl.ConfigTarget(ctx, target); verr == nil {
+					has := false
+					for _, r := range v.Configuration.Effective {
+						has = has || r.ID() == id
+					}
+					if !has {
+						ids = nil
+					}
+				}
 			}
 			if err := w.prepareOffOn(ctx, ids); err != nil {
 				return err
@@ -266,13 +277,32 @@ func (e *cliEnv) runOffOn(cmd *cobra.Command, args []string, f *offFlags, off bo
 
 	ids := offIDs(res, appRes, id)
 	if f.app != "" {
-		if len(ids) > 0 {
-			// The application route answers with dash identities; everything below follows ids.
-			if ids, err = followIDs(ctx, s.fl, target, ids, view); err != nil {
-				return err
+		if res != nil && res.Noop {
+			// Nothing was written: follow only the items the platform says already are in the state.
+			ids = nil
+		}
+		if len(ids) == 0 {
+			// A noop (or an answer without ids) follows only the items skipped because they already
+			// are in the requested state; an application that owns nothing here follows nothing.
+			reason := "already off"
+			if !off {
+				reason = "not off"
 			}
-		} else {
-			ids = resourcesOfApp(view, repo, path)
+			var idents []string
+			for _, sk := range skippedOf(appRes) {
+				if sk.Reason == reason {
+					idents = append(idents, sk.Identity)
+				}
+			}
+			ids = nil
+			if len(idents) > 0 {
+				if ids, err = followIDs(ctx, s.fl, target, idents, view); err != nil {
+					return err
+				}
+			}
+		} else if ids, err = followIDs(ctx, s.fl, target, ids, view); err != nil {
+			// The application route answers with dash identities; everything below follows ids.
+			return err
 		}
 	}
 	impacts := offImpacts(res, appRes)
@@ -571,7 +601,7 @@ func printOffWrite(out io.Writer, ids []string, target string, dry, noop bool, a
 	if noop {
 		// "Turned off ... sent to the robot" would contradict the platform's own answer.
 		if app != "" {
-			fmt.Fprintf(out, "Nothing changed: every resource of %s already is off on %s.\n", app, target)
+			fmt.Fprintf(out, "Nothing changed in %s on %s.\n", app, target)
 		} else {
 			fmt.Fprintf(out, "Nothing changed: %s is already off on %s.\n", whatIDs(ids), target)
 		}
@@ -591,7 +621,7 @@ func printOffWrite(out io.Writer, ids []string, target string, dry, noop bool, a
 func printOnWrite(out io.Writer, ids []string, target string, dry, noop bool, app string, impacts []api.OffImpact) {
 	if noop {
 		if app != "" {
-			fmt.Fprintf(out, "Nothing changed: every resource of %s already is on %s.\n", app, target)
+			fmt.Fprintf(out, "Nothing changed in %s on %s.\n", app, target)
 		} else {
 			fmt.Fprintf(out, "Nothing changed: %s is not off on %s.\n", whatIDs(ids), target)
 		}
@@ -754,6 +784,11 @@ func offStates(v *api.ConfigTargetView, o *offWait) (bool, string, error) {
 			}
 			if st.State == api.StateInvalid || st.State == api.StateNotApplicable {
 				return false, "", newErr(codeRejected, "%s was not turned on: the platform reports it as %s", shownID(id), stateMessage(st))
+			}
+			if _, has := rows[id]; !has && (st.State == "" || st.State == api.StateNoTarget) {
+				// An orphan off (the identity is no longer in any layer): there never is a row. The
+				// write removed the stored off, which is all there is to publish.
+				continue
 			}
 			if rows[id] != api.StatusWinner {
 				return false, fmt.Sprintf("waiting for the controller to publish %s (row status: %s)", shownID(id), orDash(rows[id])), nil
