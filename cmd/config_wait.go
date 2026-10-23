@@ -88,6 +88,22 @@ type writeInfo struct {
 	added []*addedItem
 	// hashBefore is the config hash device-controller had published before the first write of added.
 	hashBefore string
+	// off: the write turned resources off or on; published means the controller reports the state.
+	off *offWait
+	// stamps: resource id -> the teknoir.org/config-changed-at value the robot's copy must carry
+	// (a resource turned on again is checked like an added local item).
+	stamps map[string]string
+}
+
+// offWait follows an off (or on) write: the override keys it wrote, and, for off + applied, the
+// items that must disappear from the robot.
+type offWait struct {
+	ids []string
+	on  bool
+	// revision is the overrides revision the write left behind: published means the controller
+	// evaluated that revision (or a later one), not the state of an older one.
+	revision string
+	gone     []*goneItem
 }
 
 // waiter follows a change: published through the fleet API, applied and ready on the device.
@@ -232,7 +248,38 @@ func (w *waiter) wait(ctx context.Context, info writeInfo) error {
 
 	w.stage = "published"
 	var err error
-	if info.gone != nil {
+	if info.off != nil {
+		err = w.waitOffPublished(ctx, info.off)
+		if err == nil && w.level == waitApplied && len(info.off.gone) > 0 {
+			w.stage = string(w.level)
+			for _, g := range info.off.gone {
+				if err = w.waitGoneDevice(ctx, g); err != nil {
+					break
+				}
+			}
+		}
+		if err == nil && info.off.on && (w.level == waitApplied || w.level == waitReady) && w.lastView != nil {
+			// An orphan off has no row in any layer: there is nothing to install on the robot.
+			rows := map[string]bool{}
+			for _, r := range w.lastView.Configuration.Effective {
+				rows[r.ID()] = true
+			}
+			var kept []string
+			for _, id := range info.resources {
+				if rows[id] {
+					kept = append(kept, id)
+					continue
+				}
+				w.progress(id, "no layer provides it any more: nothing to install")
+			}
+			info.resources = kept
+		}
+		if err == nil && info.off.on && (w.level == waitApplied || w.level == waitReady) && len(info.resources) > 0 {
+			// An item turned on again is checked like an added one: the published stamp, a new helm
+			// Job, a release. The stamp is the one the configuration published just now carries.
+			w.stampExpectations(ctx, info)
+		}
+	} else if info.gone != nil {
 		err = w.waitGonePublished(ctx, info.gone)
 		if err == nil && (w.level == waitApplied || w.level == waitReady) && info.gone.revertsTo == "" {
 			w.stage = string(w.level)
@@ -366,7 +413,9 @@ func (w *waiter) publishedState(v *api.ConfigTargetView, info writeInfo) (bool, 
 			continue // evaluated, nothing reported: treat as in effect
 		}
 		switch s.State {
-		case api.StateActive, api.StateRedundant:
+		case api.StateActive, api.StateRedundant, api.StateOff:
+			// off is the controller's final verdict too: it published the configuration without the
+			// item, so there is nothing left to wait for.
 		case api.StatePending, "":
 			allFinal = false
 			w.progress(t, "pending")
@@ -412,7 +461,9 @@ func (w *waiter) waitDevice(ctx context.Context, info writeInfo) error {
 			}
 			return err
 		}
-		checks = append(checks, c)
+		if c != nil {
+			checks = append(checks, c)
+		}
 	}
 	var tr transient
 	for {
@@ -468,13 +519,23 @@ func (w *waiter) expectation(ctx context.Context, id string, info writeInfo) (*d
 	if err != nil {
 		return nil, classify(err)
 	}
+	if d.Resource.Status == api.StatusOff {
+		// Off on this robot: nothing is installed to check; the values apply when it is turned on.
+		w.progress(id, "off on this robot: the values apply when it is turned on")
+		return nil, nil
+	}
 	c := &devCheck{id: id, kind: kind, ns: ns, name: name}
+	if st := info.stamps[id]; st != "" {
+		// A resource turned on again is checked like an added local item: the robot's copy must
+		// carry the stamp the platform published, a new helm Job must succeed, a release must exist.
+		c.added, c.stamp = true, st
+	}
 	want := ""
 	if sel, ok := info.image[id]; ok {
 		want = pickImage(d.Images, sel)
 	}
 	if kind == "HelmChart" {
-		h := &expectedHelm{targetNS: ns, wantImage: want}
+		h := &expectedHelm{targetNS: ns, wantImage: want, stamp: c.stamp}
 		if vc := digStr(d.Rendered, "spec", "valuesContent"); vc != "" {
 			h.values = parseValuesYAML(vc)
 			if h.values == nil {

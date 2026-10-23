@@ -27,10 +27,17 @@ An override is stored on the robot's Device, wins over every git layer and needs
 | Chart version | `config set --version` |
 | Container image | `config set --image` |
 | Revision of an application | `config try` / `config untry` |
+| Whether it runs at all on this robot | `config off` / `config on` |
 
-Values and version apply to HelmCharts. A workload (Deployment and so on) takes an image override. Turning an application off on one robot is not possible yet.
+Values and version apply to HelmCharts. A workload (Deployment and so on) takes an image override. Whether a resource runs at all is an override too: `config off` / `config on`.
 
 Use overrides for testing. When a change works, `config promote` prints the YAML to commit. After it is merged, `config reset` the override.
+
+### Turning an app off on one robot
+
+`tnctl config off <target> <resource>` (or `--app <path>` for every item of an application) turns a resource that the robot type, a fleet or the robot's apps put on the robot off **on that one robot**. The platform stores `off: true` in the robot's override, device-controller leaves the item out of the robot's configuration, and the robot deletes it: the item and the data it owns go. A HelmChart's release is uninstalled and with it what the release created (its own PersistentVolumeClaims included); a PersistentVolumeClaim item is deleted; a Namespace takes everything in it. What Kubernetes keeps is kept: a StatefulSet's `volumeClaimTemplates` volumes stay. Nothing changes for the other robots, and nothing in git changes. The item must be in the robot's configuration; `--dry-run` shows what would happen, and when data goes the command asks for a `--confirm` text (usually the item's name, or the application's path) before it writes anything.
+
+`tnctl config on <target> <resource>` turns it on again: it is a **fresh install**, from what git (or the robot type, a fleet or the robot's apps) yields, with this robot's override applied; what the item owned before is gone, while a StatefulSet's `volumeClaimTemplates` volumes are reused. A resource that an application adds later is not off (turning an application off covers the items it adds now). Local items cannot be turned off, they are removed with `config remove`. The platform refuses an off of its own items (the WireGuard agent and so on), of CRDs, and of a Namespace whose items stay on, with exit 8 and the reason. `config get` shows the state: `off` once the controller published the configuration without the item, `invalid: <why>` when the controller refuses it and the item stays. `--wait=published` follows the controller's state; `--wait=applied` also checks over WireGuard SSH that the object and a HelmChart's release are gone (`on`: that the item is back, with the published `teknoir.org/config-changed-at` stamp where it carries one, and its helm Job succeeded).
 
 ### Remove an override
 

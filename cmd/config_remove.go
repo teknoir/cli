@@ -269,10 +269,20 @@ type goneItem struct {
 	id, kind, ns, name string
 	// targetNS is where a HelmChart's release secrets live.
 	targetNS string
+	// releaseName is the helm release of a HelmChart; "" means the item's name.
+	releaseName string
 	// hash is the config hash device-controller had published before the delete; device is the device's name.
 	hash, device string
 	// revertsTo is the layer of the git copy that takes over; "" when the item is just gone.
 	revertsTo string
+}
+
+// release is the helm release name of the item.
+func (g *goneItem) release() string {
+	if g.releaseName != "" {
+		return g.releaseName
+	}
+	return g.name
 }
 
 // stillThereError ends --wait of a removal that ran out of time: the config was not published, or the
@@ -390,7 +400,10 @@ func goneProbeScript(g *goneItem) string {
 	}
 	fmt.Fprintf(&b, "echo %s; %s -n %s get %s %s -o name --ignore-not-found 2>&1\n", shq(sectionMark+"obj"), k, shq(g.ns), shq(res), shq(g.name))
 	if g.kind == "HelmChart" {
-		fmt.Fprintf(&b, "echo %s; %s -n %s get secrets -l %s -o name 2>&1\n", shq(sectionMark+"release"), k, shq(g.targetNS), shq("owner=helm,name="+g.name))
+		rel := g.release()
+		fmt.Fprintf(&b, "echo %s; %s -n %s get secrets -l %s -o name 2>&1\n", shq(sectionMark+"release"), k, shq(g.targetNS), shq("owner=helm,name="+rel))
+		// helm-controller uninstalls the release with this Job; it is what the robot runs to delete it.
+		fmt.Fprintf(&b, "echo %s; %s -n %s get job %s -o json --ignore-not-found 2>&1\n", shq(sectionMark+"deletejob"), k, shq(g.ns), shq("helm-delete-"+rel))
 	}
 	b.WriteString("true\n")
 	return b.String()
@@ -403,10 +416,19 @@ func evalGone(g *goneItem, out string) checkResult {
 	if sudoProblem(have) {
 		return checkResult{checkFatal, sudoMessage(have)}
 	}
-	if have != "" && !strings.Contains(have, "NotFound") && !strings.Contains(have, "doesn't have a resource type") {
-		if strings.HasPrefix(strings.ToLower(have), "error") {
-			return pending("cannot read %s on the device: %s", g.kind, firstNonEmptyLine(have))
+	present := have != "" && !strings.Contains(have, "NotFound") && !strings.Contains(have, "doesn't have a resource type")
+	if present && strings.HasPrefix(strings.ToLower(have), "error") {
+		return pending("cannot read %s on the device: %s", g.kind, firstNonEmptyLine(have))
+	}
+	release := g.release()
+	// helm-controller keeps the HelmChart (Terminating) while its uninstall Job runs, so a failed
+	// uninstall is visible here first: without this the wait would run into its timeout.
+	if present && g.kind == "HelmChart" {
+		if job, _ := parseObj(secs["deletejob"]); helmJobFailed(job) {
+			return unhealthy("the HelmChart is still on the robot (Terminating) and its uninstall Job helm-delete-%s failed: the release may still be installed in namespace %s", release, g.targetNS)
 		}
+	}
+	if present {
 		return pending("%s is still on the robot", shownID(g.id))
 	}
 	if g.kind != "HelmChart" {
@@ -416,20 +438,37 @@ func evalGone(g *goneItem, out string) checkResult {
 	if sudoProblem(rel) {
 		return checkResult{checkFatal, sudoMessage(rel)}
 	}
-	prefix := "sh.helm.release.v1." + g.name + "."
+	prefix := "sh.helm.release.v1." + release + "."
 	var found []string
 	for _, line := range strings.Split(rel, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.Contains(line, prefix) {
 			found = append(found, line)
 		} else if strings.HasPrefix(strings.ToLower(line), "error") {
-			return pending("cannot read the helm release of %s: %s", g.name, line)
+			return pending("cannot read the helm release of %s: %s", release, line)
 		}
 	}
 	if len(found) > 0 {
-		return pending("the HelmChart is gone, helm release %s is still installed in namespace %s (%d release secret(s)); waiting for helm-controller to uninstall it", g.name, g.targetNS, len(found))
+		return pending("the HelmChart is gone, helm release %s is still installed in namespace %s (%d release secret(s)); waiting for helm-controller to uninstall it", release, g.targetNS, len(found))
 	}
-	return done("%s is gone from the robot and its helm release is uninstalled", shownID(g.id))
+	msg := fmt.Sprintf("%s is gone from the robot and its helm release is uninstalled", shownID(g.id))
+	// Only a completed Job is reported here: a failed Job left over from an earlier attempt does
+	// not make a successful removal unhealthy.
+	if job, _ := parseObj(secs["deletejob"]); job != nil && evalJobComplete(job).state == checkDone {
+		msg += fmt.Sprintf(" (helm-delete-%s Job Complete)", release)
+	}
+	return done("%s", msg)
+}
+
+// helmJobFailed reports whether a helm Job is beyond retrying: its Failed condition (the backoff
+// limit is used up), or too many failed attempts in a row.
+func helmJobFailed(job obj) bool {
+	return job != nil && (jobFailedCondition(job) || digInt(job, "status", "failed") >= helmJobFailedAttempts)
+}
+
+// helmDeleteJobLogScript is the log tail of helm-controller's uninstall Job.
+func helmDeleteJobLogScript(ns, release string) string {
+	return fmt.Sprintf("%s -n %s logs job/%s --tail=30 2>&1; true\n", kubectlOnDevice, shq(ns), shq("helm-delete-"+release))
 }
 
 // waitGoneDevice waits until the item is gone on the robot. When it stays, the error says how to
@@ -449,6 +488,12 @@ func (w *waiter) waitGoneDevice(ctx context.Context, g *goneItem) error {
 			case checkDone:
 				w.progress(g.id, r.msg)
 				return nil
+			case checkUnhealthy:
+				// The uninstall Job failed: the robot's own log says why.
+				if lr, lerr := ex.Run(ctx, remoteShell(helmDeleteJobLogScript(g.ns, g.release()))); lerr == nil && strings.TrimSpace(lr.Stdout) != "" {
+					r.msg += "; last log lines:\n" + indent(strings.TrimSpace(lr.Stdout), "    ")
+				}
+				return newErr(codeUnhealthy, "%s: %s", shownID(g.id), r.msg)
 			case checkFatal:
 				return newErr(codeError, "%s: %s", shownID(g.id), r.msg)
 			}

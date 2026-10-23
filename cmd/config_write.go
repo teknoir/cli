@@ -239,7 +239,8 @@ func (e *cliEnv) runSet(cmd *cobra.Command, args []string, f *setFlags) error {
 	var raw json.RawMessage
 
 	w := s.waiter()
-	if !f.dryRun {
+	if !f.dryRun && !(s.level != waitNone && s.level != waitPublished && isOffNow(getDetail())) {
+		// (an item that is off on the robot has no release to take a baseline of)
 		if err := w.prepare(ctx, []string{id}); err != nil {
 			w.close()
 			return err
@@ -546,7 +547,12 @@ layer and Helm then also drops the chart's own default for it. To take back an o
 				patch.Ops = append(patch.Ops, api.ValueOp{Op: "delete", Path: valuepath.EscapePath(segs)})
 			}
 			w := s.waiter()
-			if !f.dryRun {
+			offNow := false
+			if !f.dryRun && (s.level == waitApplied || s.level == waitReady) {
+				d, _, _ := s.fl.ConfigResource(ctx, target, id, false)
+				offNow = isOffNow(d)
+			}
+			if !f.dryRun && !offNow {
 				if err := w.prepare(ctx, []string{id}); err != nil {
 					w.close()
 					return err
@@ -657,15 +663,17 @@ what a reset changes.`,
 }
 
 // overrideTargets lists the status targets of all overrides of a view and the effective
-// resources that carry one (only those can be checked on the device).
+// resources that carry one (only those can be checked on the device). A resource that is turned
+// off on the robot is not on it: applied and ready must not wait for that one.
 func overrideTargets(v *api.ConfigTargetView) (targets, resources []string) {
-	effective := map[string]bool{}
+	effective := map[string]string{} // id -> status of the effective row
 	for _, r := range v.Configuration.Effective {
-		effective[r.ID()] = true
+		effective[r.ID()] = r.Status
 	}
+	on := func(id string) bool { st, ok := effective[id]; return ok && st != api.StatusOff }
 	for id := range v.Overrides.Resources {
 		targets = append(targets, id)
-		if effective[id] {
+		if on(id) {
 			resources = append(resources, id)
 		}
 	}
@@ -673,7 +681,11 @@ func overrideTargets(v *api.ConfigTargetView) (targets, resources []string) {
 	sort.Strings(resources)
 	for _, a := range v.Overrides.Applications {
 		targets = append(targets, appKey(a.RepoURL, a.Path))
-		resources = append(resources, resourcesOfApp(v, a.RepoURL, a.Path)...)
+		for _, id := range resourcesOfApp(v, a.RepoURL, a.Path) {
+			if on(id) {
+				resources = append(resources, id)
+			}
+		}
 	}
 	return targets, dedupe(resources)
 }
@@ -753,14 +765,41 @@ func knownApps(v *api.ConfigTargetView) []api.GitOpsApplicationRef {
 	return apps
 }
 
-// resourcesOfApp lists the effective resources that come from an application.
+// isOffNow reports whether the effective row of a resource says it is off on the robot.
+func isOffNow(d *api.ConfigResourceDetail) bool {
+	return d != nil && d.Resource.Status == api.StatusOff
+}
+
+// ownerOf is the application that owns an effective resource: the one of the highest copy that is
+// not an overlay (the last such row of the identity). An application that only adds values to a
+// chart owns nothing. When the view has no copies of the identity, the effective row speaks.
+func ownerOf(v *api.ConfigTargetView, eff api.FleetConfigResource) *api.GitOpsApplicationView {
+	var owner *api.GitOpsApplicationView
+	found := false
+	for _, r := range v.Configuration.Resources {
+		if r.Identity != eff.Identity {
+			continue
+		}
+		found = true
+		if !r.Overlay {
+			owner = r.Application
+		}
+	}
+	if !found && !eff.Overlay {
+		return eff.Application
+	}
+	return owner
+}
+
+// resourcesOfApp lists the effective resources that the application owns.
 func resourcesOfApp(v *api.ConfigTargetView, repo, path string) []string {
 	var ids []string
 	for _, r := range v.Configuration.Effective {
-		if r.Application == nil || normRepo(r.Application.RepoURL) != normRepo(repo) {
+		app := ownerOf(v, r)
+		if app == nil || normRepo(app.RepoURL) != normRepo(repo) {
 			continue
 		}
-		if p := normAppPath(path); p != "" && normAppPath(r.Application.Path) != p {
+		if p := normAppPath(path); p != "" && normAppPath(app.Path) != p {
 			continue
 		}
 		ids = append(ids, r.ID())
@@ -999,7 +1038,8 @@ applied it but it fails (the helm Job failed, a pod is in CrashLoopBackOff or Im
 			} else {
 				info.statusTargets, info.resources = overrideTargets(view)
 				for _, r := range view.Configuration.Effective {
-					if r.Override != nil && r.Override.Storage == api.StorageLocalItem {
+					// an item that is off is not on the robot: there is nothing to check on it
+					if r.Override != nil && r.Override.Storage == api.StorageLocalItem && r.Status != api.StatusOff {
 						info.resources = append(info.resources, r.ID())
 					}
 				}
