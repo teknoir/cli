@@ -110,6 +110,34 @@ func (f *Fleet) PatchResourceOverride(ctx context.Context, target, id string, pa
 	return &r, raw, err
 }
 
+// SetResourceOff turns one resource off (or on) on a robot. Off is a resource that the robot type,
+// a fleet or the robot's own apps put there: it is left out of the robot's configuration and deleted
+// on the robot. confirm is the text an earlier dry run asked for; "" sends no confirm.
+func (f *Fleet) SetResourceOff(ctx context.Context, target, id string, off bool, note string, dryRun bool, confirm string) (*OverrideWriteResult, json.RawMessage, error) {
+	q := writeQuery(id, dryRun)
+	if confirm != "" {
+		q.Set("confirm", confirm)
+	}
+	r, raw, err := decode[OverrideWriteResult](f.Do(ctx, "PATCH", configPath(target, "overrides", "resource"), q, OverrideResourcePatch{Off: &off, Note: note}))
+	return &r, raw, err
+}
+
+// SetApplicationOff turns a whole application off (or on) on a robot: every item it adds.
+func (f *Fleet) SetApplicationOff(ctx context.Context, target, repoURL, path string, off bool, note string, dryRun bool, confirm string) (*ApplicationOffResult, json.RawMessage, error) {
+	q := url.Values{"repo_url": {repoURL}}
+	if path != "" {
+		q.Set("path", path)
+	}
+	if dryRun {
+		q.Set("dryRun", "1")
+	}
+	if confirm != "" {
+		q.Set("confirm", confirm)
+	}
+	r, raw, err := decode[ApplicationOffResult](f.Do(ctx, "PATCH", configPath(target, "overrides", "application", "off"), q, OffRequest{Off: off, Note: note}))
+	return &r, raw, err
+}
+
 // PutResourceOverride replaces the whole override of one resource.
 func (f *Fleet) PutResourceOverride(ctx context.Context, target, id string, o ResourceOverride, dryRun bool) (*OverrideWriteResult, json.RawMessage, error) {
 	r, raw, err := decode[OverrideWriteResult](f.Do(ctx, "PUT", configPath(target, "overrides", "resource"), writeQuery(id, dryRun), o))

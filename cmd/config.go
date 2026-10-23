@@ -20,9 +20,10 @@ import (
 const configLong = `Read and override the configuration of a robot or device.
 
 A robot's configuration is layered: platform < type < fleet < robot < local < override. The
-override layer is yours: per-robot changes of chart values, chart version, container images and
-the revision of an application, written through the platform, no git commit needed. An
-override always wins, and 'reset' puts the robot back to what git says.
+override layer is yours: per-robot changes of chart values, chart version, container images, the
+revision of an application and whether a resource runs at all (off/on), written through the
+platform, no git commit needed. An override always wins, and 'reset' puts the robot back to what
+git says.
 
   <target>    a robot name or a device name (a device that backs a robot is the same as the robot)
   <resource>  Kind/namespace/name (HelmChart/default/notebook), Kind/name or a unique name (notebook)
@@ -36,6 +37,8 @@ Typical loop for developing on one robot:
   tnctl config add vision-station-01 -f whoami.yaml --wait=applied      add a local resource (any supported kind)
   tnctl config edit vision-station-01 Deployment/default/whoami         edit a local item in $EDITOR, checked
   tnctl config remove vision-station-01 local-llm                       delete a local item
+  tnctl config off vision-station-01 notebook                           turn it off on this robot (deletes its data)
+  tnctl config on vision-station-01 notebook                            install it again, fresh
   tnctl config promote vision-station-01 notebook                       the YAML to commit when it works
 
 --wait[=LEVEL] on a write follows the change; without it the command returns as soon as the
@@ -44,7 +47,8 @@ platform has stored it:
   applied    the robot has it: HelmChart values/version on the device and the helm Job succeeded;
              workload: image and generation match
   ready      applied, and the pods are Ready on the new image and have not restarted for 20 s
-A bare --wait means ready. applied and ready check the robot over WireGuard SSH. --timeout 5m.
+A bare --wait means ready (applied for off). applied and ready check the robot over WireGuard
+SSH. --timeout 5m.
 
 Value paths are dot separated keys; escape a dot inside a key with a backslash:
   nodeSelector.teknoir\.org/node-role=vision
@@ -81,7 +85,8 @@ func newConfigCmd(e *cliEnv) *cobra.Command {
 	}
 	c.AddCommand(
 		newConfigGetCmd(e), newConfigSetCmd(e), newConfigUnsetCmd(e), newConfigDeleteCmd(e),
-		newConfigResetCmd(e), newConfigAddCmd(e), newConfigEditCmd(e), newConfigKindsCmd(e), newConfigRemoveCmd(e), newConfigTryCmd(e), newConfigUntryCmd(e), newConfigDiffCmd(e),
+		newConfigResetCmd(e), newConfigAddCmd(e), newConfigEditCmd(e), newConfigKindsCmd(e), newConfigRemoveCmd(e),
+		newConfigOffCmd(e), newConfigOnCmd(e), newConfigTryCmd(e), newConfigUntryCmd(e), newConfigDiffCmd(e),
 		newConfigWaitCmd(e), newConfigLinksCmd(e), newConfigPromoteCmd(e),
 	)
 	return c
@@ -248,13 +253,19 @@ func resourceWhat(r api.FleetConfigResource) string {
 }
 
 func overrideState(r api.FleetConfigResource) string {
-	if r.Override == nil {
-		return "-"
+	if r.Override != nil {
+		switch {
+		case r.Override.State != "":
+			return r.Override.State
+		case r.Override.Off:
+			return api.StateOff
+		}
+		return "set"
 	}
-	if r.Override.State != "" {
-		return r.Override.State
+	if r.Status == api.StatusOff {
+		return api.StateOff
 	}
-	return "set"
+	return "-"
 }
 
 func printTargetView(w io.Writer, v *api.ConfigTargetView, f getFlags) {
@@ -323,6 +334,10 @@ func printOverrides(w io.Writer, v *api.ConfigTargetView) {
 // describeOverride is a one-line summary of what an override changes.
 func describeOverride(o api.ResourceOverride) string {
 	var parts []string
+	if o.Off {
+		// The item is off on this robot; what the override still holds applies when it is turned on.
+		parts = append(parts, api.StateOff)
+	}
 	if o.ValuesContent != "" {
 		var m map[string]any
 		if yaml.Unmarshal([]byte(o.ValuesContent), &m) == nil {

@@ -174,3 +174,69 @@ func TestOverridePatchJSON(t *testing.T) {
 }
 
 func strp(s string) *string { return &s }
+
+func TestOffRoutes(t *testing.T) {
+	ctx := context.Background()
+	f, s := fleetServer(t, 200, `{}`)
+
+	f.SetResourceOff(ctx, "vs", "HelmChart/default/notebook", true, "why", true, "")
+	if s.method != "PATCH" || !strings.HasSuffix(s.path, "/config/vs/overrides/resource") ||
+		s.query != "dryRun=1&id=HelmChart%2Fdefault%2Fnotebook" || s.body != `{"note":"why","off":true}` {
+		t.Errorf("off dry run: %+v", s)
+	}
+	f.SetResourceOff(ctx, "vs", "HelmChart/default/notebook", false, "", false, "delete it")
+	if s.query != "confirm=delete+it&id=HelmChart%2Fdefault%2Fnotebook" || s.body != `{"off":false}` {
+		t.Errorf("on with confirm: %+v", s)
+	}
+	f.SetApplicationOff(ctx, "vs", "https://github.com/teknoir/teknoir-demo-gitops", "apps/mock-vision", true, "", false, "yes")
+	if s.method != "PATCH" || !strings.HasSuffix(s.path, "/config/vs/overrides/application/off") ||
+		s.query != "confirm=yes&path=apps%2Fmock-vision&repo_url=https%3A%2F%2Fgithub.com%2Fteknoir%2Fteknoir-demo-gitops" || s.body != `{"off":true}` {
+		t.Errorf("application off: %+v", s)
+	}
+	f.SetApplicationOff(ctx, "vs", "https://github.com/teknoir/teknoir-demo-gitops", "apps/mock-vision", false, "back", true, "")
+	if s.query != "dryRun=1&path=apps%2Fmock-vision&repo_url=https%3A%2F%2Fgithub.com%2Fteknoir%2Fteknoir-demo-gitops" || s.body != `{"off":false,"note":"back"}` {
+		t.Errorf("application on dry run: %+v", s)
+	}
+}
+
+func TestOffJSON(t *testing.T) {
+	// an old-style PUT of a whole override never sends off (a stored off stays on the platform)
+	if b, err := json.Marshal(ResourceOverride{ValuesContent: "a: 1\n"}); err != nil || strings.Contains(string(b), "off") {
+		t.Errorf("ResourceOverride: %s (%v)", b, err)
+	}
+	if b, _ := json.Marshal(ResourceOverride{Off: true}); !strings.Contains(string(b), `"off":true`) {
+		t.Errorf("ResourceOverride with off: %s", b)
+	}
+	// a patch: on is off:false, and a patch that does not touch off does not send it
+	no := false
+	if b, _ := json.Marshal(OverrideResourcePatch{Off: &no}); string(b) != `{"off":false}` {
+		t.Errorf("patch off:false: %s", b)
+	}
+	if b, _ := json.Marshal(OverrideResourcePatch{Note: "x"}); strings.Contains(string(b), "off") {
+		t.Errorf("patch without off: %s", b)
+	}
+	// the view carries the state and the rows their status
+	var v ConfigTargetView
+	if err := json.Unmarshal([]byte(`{"configuration":{"effective":[{"kind":"HelmChart","name":"n","namespace":"default","status":"off"}]},
+	  "overrides":{"resources":{"HelmChart/default/n":{"off":true}}},
+	  "overrideStatus":[{"target":"HelmChart/default/n","state":"off"}]}`), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.OverrideStatus[0].State != StateOff || v.Configuration.Effective[0].Status != StatusOff || !v.Overrides.Resources["HelmChart/default/n"].Off {
+		t.Errorf("view: %+v", v)
+	}
+}
+
+func TestApplicationOffResultDecodes(t *testing.T) {
+	f, _ := fleetServer(t, 200, `{"dryRun":false,"ids":["HelmChart/default/a"],"skipped":[{"identity":"Deployment-x-default","reason":"not yours"}],
+	  "impacts":[{"identity":"HelmChart-a-default","kind":"HelmChart","deletesData":"yes","confirm":"c"}],
+	  "confirm":"c","previousByKey":{"HelmChart/default/a":{"valuesContent":"a: 1\n","off":true}}}`)
+	r, _, err := f.SetApplicationOff(context.Background(), "vs", "https://x/y", "apps/a", true, "", false, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.IDs) != 1 || r.Skipped[0].Identity != "Deployment-x-default" || len(r.Impacts) != 1 ||
+		r.Confirm != "c" || !r.PreviousByKey["HelmChart/default/a"].Off {
+		t.Errorf("result: %+v", r)
+	}
+}

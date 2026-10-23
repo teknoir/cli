@@ -17,6 +17,7 @@ const (
 )
 
 // Override states (Device status config.overrides[].state; "pending" is client side only).
+// StateOff: the controller published the configuration without the item, so the robot deleted it.
 const (
 	StateActive        = "active"
 	StateRedundant     = "redundant"
@@ -24,7 +25,11 @@ const (
 	StateInvalid       = "invalid"
 	StateNotApplicable = "not-applicable"
 	StatePending       = "pending"
+	StateOff           = "off"
 )
+
+// StatusOff is the status of an effective row whose resource is off on the robot.
+const StatusOff = "off"
 
 // Override storage: where an override of a resource lives.
 const (
@@ -163,6 +168,8 @@ type ResourceOverrideInfo struct {
 	Paths   []string          `json:"paths"`
 	Version string            `json:"version,omitempty"`
 	Images  map[string]string `json:"images,omitempty"`
+	// Off: the resource is turned off on this robot.
+	Off bool `json:"off,omitempty"`
 }
 
 // FleetValues are the merged values of a HelmChart with provenance per leaf.
@@ -225,6 +232,9 @@ type ResourceOverride struct {
 	Note          string            `json:"note,omitempty"`
 	SetBy         string            `json:"setBy,omitempty"`
 	SetAt         string            `json:"setAt,omitempty"`
+	// Off keeps the item out of the robot's configuration: the robot deletes it and its data.
+	// Omitted when false: a whole override written with PUT keeps the stored off on the platform.
+	Off bool `json:"off,omitempty"`
 }
 
 // ApplicationOverride is a "try another revision" entry.
@@ -347,6 +357,9 @@ type OverrideResourcePatch struct {
 	// Note sets the note; ClearNote removes it.
 	Note      string
 	ClearNote bool
+	// Off turns the resource off (true) or on again (false) on this robot. A pointer: "on" must be
+	// sent as off:false, and a patch that does not touch off must not send it at all.
+	Off *bool
 }
 
 // MarshalJSON writes only what is set; "version" and "note" are null when cleared.
@@ -373,13 +386,16 @@ func (p OverrideResourcePatch) MarshalJSON() ([]byte, error) {
 	case p.Note != "":
 		m["note"] = p.Note
 	}
+	if p.Off != nil {
+		m["off"] = *p.Off
+	}
 	return json.Marshal(m)
 }
 
 // Empty reports whether the patch changes nothing.
 func (p OverrideResourcePatch) Empty() bool {
 	return len(p.Ops) == 0 && p.Version == "" && !p.ClearVersion && len(p.Images) == 0 &&
-		p.Image == nil && p.Note == "" && !p.ClearNote
+		p.Image == nil && p.Note == "" && !p.ClearNote && p.Off == nil
 }
 
 // OverrideWriteResult is the answer of every override write.
@@ -393,6 +409,79 @@ type OverrideWriteResult struct {
 	After     *FleetConfigResource `json:"after,omitempty"`
 	Overrides DeviceOverrides      `json:"overrides"`
 	Warnings  []string             `json:"warnings"`
+	// Noop: the resource already is in the requested state; nothing changed.
+	Noop bool `json:"noop,omitempty"`
+	// Impact: what turning the resource off or on does on the robot (an off/on dry run and write).
+	Impact *OffImpact `json:"impact,omitempty"`
+}
+
+// OffSource is the layer and source a resource that is turned off comes from.
+type OffSource struct {
+	Layer  string `json:"layer"`
+	Source string `json:"source,omitempty"`
+	URL    string `json:"url,omitempty"`
+}
+
+// OffRelease is the helm release a HelmChart that is turned off uninstalls.
+type OffRelease struct {
+	Name            string `json:"name"`
+	TargetNamespace string `json:"targetNamespace,omitempty"`
+	Chart           string `json:"chart,omitempty"`
+	Version         string `json:"version,omitempty"`
+	Repo            string `json:"repo,omitempty"`
+}
+
+// OffTOE is whether the robot's agent can delete the item, and what it lacks if not.
+type OffTOE struct {
+	Capable bool     `json:"capable"`
+	Version string   `json:"version,omitempty"`
+	Missing []string `json:"missing,omitempty"`
+}
+
+// OffImpact describes what turning a resource off (or on) does on the robot.
+type OffImpact struct {
+	Identity string      `json:"identity"`
+	Kind     string      `json:"kind"`
+	Source   *OffSource  `json:"source,omitempty"`
+	Release  *OffRelease `json:"release,omitempty"`
+	// DeletesData is yes, no or unknown; DataReasons says why.
+	DeletesData    string   `json:"deletesData,omitempty"`
+	DataReasons    []string `json:"dataReasons,omitempty"`
+	NamespaceItems []string `json:"namespaceItems,omitempty"`
+	// Dependents are the items that use this one; Keeps are the items that stay on the robot.
+	Dependents []string `json:"dependents,omitempty"`
+	Keeps      []string `json:"keeps,omitempty"`
+	Warnings   []string `json:"warnings,omitempty"`
+	TOE        *OffTOE  `json:"toe,omitempty"`
+	// Confirm, when set, must be sent back as ?confirm=<exactly this text> for the write to happen.
+	Confirm string `json:"confirm,omitempty"`
+}
+
+// OffSkipped is an item of an application that was not turned off (or on), and why.
+type OffSkipped struct {
+	Identity string `json:"identity"`
+	Reason   string `json:"reason"`
+}
+
+// OffRequest is the body of an off/on write: off always, a note when given.
+type OffRequest struct {
+	Off  bool   `json:"off"`
+	Note string `json:"note,omitempty"`
+}
+
+// ApplicationOffResult is the answer of an off/on write of a whole application.
+type ApplicationOffResult struct {
+	OverrideWriteResult
+	// IDs are the identities that were written.
+	IDs []string `json:"ids,omitempty"`
+	// Skipped are the items of the application that were not written, with the reason.
+	Skipped []OffSkipped `json:"skipped,omitempty"`
+	// Impacts describe what the write does, one per item.
+	Impacts []OffImpact `json:"impacts,omitempty"`
+	// Confirm, when set, applies to the whole request: send it back as ?confirm=<text>.
+	Confirm string `json:"confirm,omitempty"`
+	// PreviousByKey is the override each key had before the write.
+	PreviousByKey map[string]ResourceOverride `json:"previousByKey,omitempty"`
 }
 
 // LocalRemoveResult is the answer of DELETE config/:target/local.
