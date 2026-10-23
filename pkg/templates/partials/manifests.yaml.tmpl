@@ -737,10 +737,16 @@ spec:
         volumeMounts:
         - name: toe-volume
           mountPath: /etc/teknoir
+        # The TOE image is pinned by digest: a moving tag with imagePullPolicy: Always can turn a
+        # changed or unpullable image into a watchdog reboot loop. Bump it together with the robots
+        # (ansible playbooks/toe-image.yml). The digest is the multi-arch (amd64 + arm64) index
+        # copied from ghcr.io/teknoir/toe-app:sha-4c366dae.
+        # Keep `command: - /manager`, `image:` and `imagePullPolicy:` on consecutive lines: the playbook
+        # finds the toe container by exactly that sequence (ansible playbooks/vars/toe-manifest.yml toe_re).
         command:
         - /manager
-        image: docker.io/tekn0ir/toe:toe_v4
-        imagePullPolicy: Always
+        image: docker.io/tekn0ir/toe:toe_v4.2-4c366dae@sha256:c83116d0829561afc639eec90a75b82ee10e565b08e65dcb36e122a830935207
+        imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
             path: /healthz
