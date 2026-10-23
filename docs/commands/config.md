@@ -50,7 +50,7 @@ and on again (`config on`); a local item is removed with `config remove`.
 | `config edit <target> <resource>` | Edit a local item in `$EDITOR`, checked by the platform before it is saved |
 | `config kinds` | The kinds `add` supports, the refused ones with reasons, and starter manifests |
 | `config remove <target> <resource>` | Remove a local item (written straight to the robot, for example by Devstudio) |
-| `config off <target> <resource>\|--app <path>` | Turn a resource (or a whole application) off on this robot; the robot deletes it, data included |
+| `config off <target> <resource>\|--app <path>` | Turn a resource (or a whole application) off on this robot; the robot deletes it, with the data it owns |
 | `config on <target> <resource>\|--app <path>` | Turn an item that is off on this robot on again, a fresh install |
 | `config try <target> <app-path> <revision>` | Run another branch, tag or commit of an application |
 | `config untry <target> <app-path>` | Back to the application's own revision |
@@ -327,16 +327,19 @@ tnctl config on  <target> <resource>|--app <path> [--repo URL] [--note TEXT] [--
 ```bash
 tnctl config off vision-station-01 notebook --dry-run                        # what it does on the robot
 tnctl config off vision-station-01 HelmChart/default/notebook --wait         # off, wait until the robot has deleted it
-tnctl config off vision-station-01 notebook --confirm "delete notebook volumes"
+tnctl config off vision-station-01 notebook --confirm notebook
 tnctl config off vision-station-01 --app apps/mock-vision --note "not used at this site"
 tnctl config on vision-station-01 notebook --wait=applied                   # install it again
 ```
 
 `off` turns a resource that the robot type, a fleet or the robot's own apps put on the robot off **on this
 robot only**: the platform stores `off: true` in the robot's override, device-controller leaves the item out
-of the robot's configuration and the robot deletes it. A HelmChart's release is uninstalled and the data in
-its volumes is deleted; other objects are deleted. Nothing changes for the other robots, and nothing in git
-changes. The item has to be in the robot's configuration (otherwise exit 3); the item is sent as the canonical
+of the robot's configuration and the robot deletes it. What goes is the item and the data it owns: a
+HelmChart's release is uninstalled and with it what the release created (its own PersistentVolumeClaims
+included), a PersistentVolumeClaim item is deleted, and a Namespace takes everything in it on the robot.
+What Kubernetes keeps is kept: the volumes a StatefulSet made from its `volumeClaimTemplates` stay, and a
+turned-on StatefulSet reuses them. Nothing changes for the other robots, and nothing in git changes. The item
+has to be in the robot's configuration (otherwise exit 3); the item is sent as the canonical
 `Kind/namespace/name`.
 
 `--app <path>` turns off every item the application at that path adds, instead of one resource. The repository
@@ -349,7 +352,9 @@ deletes data, the answer carries a confirmation text: tnctl prints the impact an
 `Turning off <id> deletes data on the robot (<reasons>). Run it again with --confirm <text> to go ahead.` to
 stderr, writes nothing, and exits 2. Repeat it with exactly that `--confirm` text and the write happens with
 `?confirm=<text>`. If the platform asks for another confirmation by then (something changed in between), the
-write is refused: exit 8 with the platform's message. `on` never asks.
+write is refused: exit 8, and the message says to run it again with the new `--confirm` text. `on` never
+asks, and a noop (the item already is off, or an application with nothing to write) asks nothing either
+even when the answer still carries a `confirm`.
 
 **Impact.** The dry run and the write answer with what the item is and what happens to it: where it comes from
 (`from <layer> <source>`, with the repository URL), for a HelmChart the release that is uninstalled
@@ -358,31 +363,35 @@ the items that use it (`uses it: <id>`) and the items that stay (`stays: <id>`);
 stderr. `-o json|yaml` prints the whole answer (`impact`, `ids`, `skipped`, `previousByKey`).
 
 **`on`** turns the item on again: the copy git (or the robot type, a fleet or the robot's apps) yields is
-installed fresh, with this robot's override (values, chart version, images) applied. The data it had before it
-was turned off is **not** restored.
+installed fresh, with this robot's override (values, chart version, images) applied. What the item owned when
+it was turned off is **not** restored; a StatefulSet's `volumeClaimTemplates` volumes are, because Kubernetes
+kept them.
 
 | Result line | Meaning |
 | --- | --- |
 | `Turned off <id> on <target>: sent to the robot.` | the write is stored; without `--wait` that is all |
 | `Would turn off <id> on <target>.` | `--dry-run`: nothing was written |
 | `Turned on <id> on <target>: sent to the robot.` | the item is on its way back |
+| `Nothing changed: <id> is already off on <target>.` | a noop (also `already is on`, and `every resource of <app>` for `--app`) |
 | `skipped: <identity> (<reason>)` | (`--app`) an item of the application was not turned off, and why |
 
-A write that changes nothing (the item already is off, or on) is a noop: exit 0, the platform's warning on
-stderr, and nothing to wait for.
+A write that changes nothing (the item already is off, or on) is a noop: exit 0 and the platform's warning on
+stderr. `--wait` still follows a noop: it returns at once when the robot already is in that state, and reports
+an off the controller refused (exit 5) instead of staying silent.
 
 **`--wait`** (default `--timeout` 5m; exit 4 when it runs out). A bare `--wait` is `applied` for `off` and
 `ready` for `on`; write `--wait=published` to stop at the platform. `off` has no `ready`: the item is gone.
 
 | Level | Reached when |
 | --- | --- |
-| `published` | the controller reports the override of every written item as `off` (`on`: no longer `off`, and the row's status is not `off`) |
-| `applied` | (`off`) the object is gone on the robot, checked over WireGuard SSH, and for a HelmChart its release secrets are gone in the release's target namespace; a `helm-delete-<name>` Job that completed is reported. (`on`) the robot's copy carries the published `teknoir.org/config-changed-at` stamp, a new `helm-install-<name>` Job succeeded and a release exists; a workload has the published images and its controller has seen the latest generation |
+| `published` | the controller has evaluated the revision the write left behind (or a later one) and reports the override of every written item as `off` (`on`: no longer `off`, and the effective row's status is `winner` — not `pending`, not `off`) |
+| `applied` | (`off`) the object is gone on the robot, checked over WireGuard SSH, and for a HelmChart its release secrets are gone in the release's target namespace; a `helm-delete-<name>` Job that completed is reported (a failed one, with the HelmChart still Terminating, is exit 7 with the Job's log tail). (`on`) the robot's copy exists and carries the published `teknoir.org/config-changed-at` stamp where the published item carries one, a new `helm-install-<name>` Job succeeded and the release is installed; a workload has the published images and its controller has seen the latest generation |
 | `ready` | (`on`) applied, and the pods are Ready and have not restarted for 20 s |
 
 The state `invalid` or `not-applicable` ends the wait with exit 5 and the controller's message: the item
-stays as it was. `applied` and `ready` need WireGuard SSH to the robot, which is checked before anything is
-written (a robot that cannot be reached means nothing is written; use `--wait=published`).
+stays as it was. So does any other final off state (`active`, `redundant`, `no-target`): the message says the
+controller did not turn the item off. `applied` and `ready` need WireGuard SSH to the robot, which is checked
+before anything is written (a robot that cannot be reached means nothing is written; use `--wait=published`).
 
 Refusals are exit 8 when the platform declines (a platform item, a local item, a CRD, `teknoir.org/required`,
 a Namespace with items that stay on, a TOE too old, or a missing confirmation) and the message says why; a
@@ -468,7 +477,7 @@ are on stderr. Errors with `-o json` are `{"error":{"code":"timeout","message":"
 | 2 | usage: bad arguments or flags, ambiguous resource name |
 | 3 | not found: no such robot, device or resource |
 | 4 | timeout: `--wait` ran out of time (the change itself is written) |
-| 5 | rejected: the platform refused it (invalid values or manifest, unknown revision, no such target, not overridable) |
+| 5 | rejected: the platform refused it (invalid values or manifest, unknown revision, no such target, not overridable), or device-controller refused an off and the item stays on the robot |
 | 6 | not logged in, login expired (`-o json` code `session_expired`), token rejected, or not allowed: run `tnctl login` |
 | 7 | applied but unhealthy: the helm Job failed or pods crash or cannot pull the image |
 | 8 | conflict: someone else changed the same robot's overrides at the same time; run the command again. For `add`: the local item exists already (use `--replace`) or the identity is not yours to replace. For `remove`, `edit` and `get --manifest`: the item is not local, the message says where to remove it. For `off`/`on`: the platform refuses the change (a platform item, a local item, a CRD, a Namespace with items that stay on, a TOE too old) or the confirmation changed in between |

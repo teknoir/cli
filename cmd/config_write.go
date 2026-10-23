@@ -657,15 +657,17 @@ what a reset changes.`,
 }
 
 // overrideTargets lists the status targets of all overrides of a view and the effective
-// resources that carry one (only those can be checked on the device).
+// resources that carry one (only those can be checked on the device). A resource that is turned
+// off on the robot is not on it: applied and ready must not wait for that one.
 func overrideTargets(v *api.ConfigTargetView) (targets, resources []string) {
-	effective := map[string]bool{}
+	effective := map[string]string{} // id -> status of the effective row
 	for _, r := range v.Configuration.Effective {
-		effective[r.ID()] = true
+		effective[r.ID()] = r.Status
 	}
+	on := func(id string) bool { st, ok := effective[id]; return ok && st != api.StatusOff }
 	for id := range v.Overrides.Resources {
 		targets = append(targets, id)
-		if effective[id] {
+		if on(id) {
 			resources = append(resources, id)
 		}
 	}
@@ -673,7 +675,11 @@ func overrideTargets(v *api.ConfigTargetView) (targets, resources []string) {
 	sort.Strings(resources)
 	for _, a := range v.Overrides.Applications {
 		targets = append(targets, appKey(a.RepoURL, a.Path))
-		resources = append(resources, resourcesOfApp(v, a.RepoURL, a.Path)...)
+		for _, id := range resourcesOfApp(v, a.RepoURL, a.Path) {
+			if on(id) {
+				resources = append(resources, id)
+			}
+		}
 	}
 	return targets, dedupe(resources)
 }
@@ -999,7 +1005,8 @@ applied it but it fails (the helm Job failed, a pod is in CrashLoopBackOff or Im
 			} else {
 				info.statusTargets, info.resources = overrideTargets(view)
 				for _, r := range view.Configuration.Effective {
-					if r.Override != nil && r.Override.Storage == api.StorageLocalItem {
+					// an item that is off is not on the robot: there is nothing to check on it
+					if r.Override != nil && r.Override.Storage == api.StorageLocalItem && r.Status != api.StatusOff {
 						info.resources = append(info.resources, r.ID())
 					}
 				}

@@ -31,6 +31,10 @@ const (
 // StatusOff is the status of an effective row whose resource is off on the robot.
 const StatusOff = "off"
 
+// StatusWinner is the status of an effective row that is in the configuration published to the
+// robot: the row won its layer and is not pending.
+const StatusWinner = "winner"
+
 // Override storage: where an override of a resource lives.
 const (
 	StorageDeviceOverrides = "device-overrides"

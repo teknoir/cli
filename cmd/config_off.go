@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -28,45 +30,56 @@ const offLong = `Turn a resource off on this robot only. The resource stays in t
 robot type, a fleet, the robot's own apps) on every other robot; on this one the platform leaves it
 out of the configuration and the robot deletes it.
 
-A HelmChart's release is uninstalled and the data in its volumes is deleted. Other objects are
-deleted. For items that come from git, use this instead of editing git when one robot should not run
-them; a local item is removed with 'tnctl config remove' instead.
+What goes: the item itself, and the data it owns. A HelmChart's release is uninstalled and with it
+what the release created (its own PersistentVolumeClaims included); a PersistentVolumeClaim item is
+deleted; a Namespace takes everything in it on the robot. What Kubernetes keeps is kept: the volumes
+a StatefulSet made from its volumeClaimTemplates stay, and a turned-on StatefulSet reuses them.
+For items that come from git, use this instead of editing git when one robot should not run them; a
+local item is removed with 'tnctl config remove' instead.
 
   <resource>      Kind/namespace/name, Kind/name or a unique name, as in the other config commands
   --app <path>    turn off every item of an application (its path in its repository), instead of
                   one resource; --repo picks the repository when the path exists in several
   --note TEXT     why; shown to everyone who looks at the robot
   --dry-run       show what turning it off does on the robot, write nothing
-  --confirm TEXT  the text a dry run asked for, when turning it off deletes data
-  --wait[=LEVEL]  published: the controller published a configuration without the item
+  --confirm TEXT  the text a dry run asked for, when turning it off deletes data (usually the
+                  item's name, or the application's path)
+  --wait[=LEVEL]  published: the controller evaluated the write and published a configuration
+                  without the item (the effective row's status is off)
                   applied (a bare --wait): also the object is gone on the robot, and for a
                   HelmChart its release is uninstalled (checked over WireGuard SSH)
   --timeout T     how long --wait may take (default 5m; exit code 4 when it runs out)
 
 Unless --dry-run, the command first asks the platform what turning the item off does. When that
 deletes data it prints the impact and exits 2 with the --confirm text to repeat it with; nothing is
-written until the confirmation matches.
+written until the confirmation matches. A noop (the item already is off) needs no confirmation, and
+--wait follows it too: it returns at once when the robot is in that state, and reports an off the
+controller refused.
 
 Local items cannot be turned off: they are removed with 'tnctl config remove'. A resource that an
 application adds later is not off (an application's items are turned off together with it).`
 
 const onLong = `Turn a resource that is off on this robot on again. The copy that git (or the robot type, a fleet or
 the robot's own apps) yields is installed fresh, with this robot's override (values, chart version,
-images) applied: data the item had before it was turned off is not restored.
+images) applied: what the item owned when it was turned off is not restored; a StatefulSet's
+volumeClaimTemplates volumes are, because Kubernetes kept them.
 
   <resource>      Kind/namespace/name, Kind/name or a unique name, as in the other config commands
   --app <path>    turn on every item of an application, instead of one resource; --repo picks the
                   repository when the path exists in several
   --note TEXT     why; shown to everyone who looks at the robot
   --dry-run       show what turning it on does, write nothing
-  --wait[=LEVEL]  published: the controller published a configuration with the item in it again
-                  applied: the robot has it (a HelmChart's helm Job succeeded, a release exists)
+  --wait[=LEVEL]  published: the controller evaluated the write and published a configuration with
+                  the item in it again (the effective row's status is winner, not off)
+                  applied: the robot's copy exists (the published teknoir.org/config-changed-at
+                  stamp, where the item carries one), a new helm-install-<name> Job succeeded and
+                  the release is installed (checked over WireGuard SSH)
                   ready (a bare --wait): also the pods are Ready and have not restarted for 20 s
   --timeout T     how long --wait may take (default 5m; exit code 4 when it runs out)`
 
 const offExample = `  tnctl config off vision-station-01 notebook --dry-run
   tnctl config off vision-station-01 HelmChart/default/notebook --wait
-  tnctl config off vision-station-01 notebook --confirm "delete notebook volumes"
+  tnctl config off vision-station-01 notebook --confirm notebook
   tnctl config off vision-station-01 --app apps/mock-vision --note "not used at this site"
 
   tnctl config on vision-station-01 notebook --wait=applied`
@@ -76,7 +89,7 @@ func newConfigOffCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
 		SilenceUsage: true,
 		Use:          "off <target> <resource> | --app <path> [--dry-run] [--confirm TEXT] [--wait=published|applied]",
-		Short:        "Turn a resource off on one robot: the robot deletes it, its data included",
+		Short:        "Turn a resource off on one robot: the robot deletes it, with the data it owns",
 		Long:         offLong,
 		Example:      offExample,
 		Args:         argsRange(1, 2, "off needs a robot or device name and a resource (or --app <path>)"),
@@ -91,7 +104,7 @@ func newConfigOnCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
 		SilenceUsage: true,
 		Use:          "on <target> <resource> | --app <path> [--dry-run] [--wait[=published|applied|ready]]",
-		Short:        "Turn a resource that is off on this robot on again (a fresh install, its data is not restored)",
+		Short:        "Turn a resource that is off on this robot on again (a fresh install)",
 		Long:         onLong,
 		Example: `  tnctl config on vision-station-01 notebook
   tnctl config on vision-station-01 --app apps/mock-vision --wait=applied`,
@@ -191,13 +204,13 @@ func (e *cliEnv) runOffOn(cmd *cobra.Command, args []string, f *offFlags, off bo
 		if f.app != "" {
 			r, raw, err := s.fl.SetApplicationOff(ctx, target, repo, path, off, f.note, dryRun, confirm)
 			if err != nil {
-				return nil, nil, nil, classify(err)
+				return nil, nil, nil, offConfirmHint(classify(err))
 			}
 			return &r.OverrideWriteResult, r, raw, nil
 		}
 		r, raw, err := s.fl.SetResourceOff(ctx, target, id, off, f.note, dryRun, confirm)
 		if err != nil {
-			return nil, nil, nil, classify(err)
+			return nil, nil, nil, offConfirmHint(classify(err))
 		}
 		return r, nil, raw, nil
 	}
@@ -218,19 +231,20 @@ func (e *cliEnv) runOffOn(cmd *cobra.Command, args []string, f *offFlags, off bo
 		if f.dryRun {
 			res, appRes, raw = dr, dapp, draw
 		} else {
-			confirm := offConfirm(dr, dapp)
-			if confirm != "" && confirm != f.confirm {
-				return e.refuseOffConfirmation(cmd, s, dr, dapp, draw)
+			confirm := ""
+			// A noop (the item already is off) and an application that would write nothing need no
+			// confirmation, even when the answer still carries a confirm text.
+			if offNeedsConfirm(dr, dapp, f.app != "") {
+				confirm = offConfirm(dr, dapp)
+				if confirm != f.confirm {
+					return e.refuseOffConfirmation(cmd, s, dr, dapp, draw)
+				}
 			}
 			// The robot has to be reachable before anything is written (--wait=applied).
 			if err := w.prepareOffOn(ctx, nil); err != nil {
 				return err
 			}
-			writeConfirm := ""
-			if confirm != "" {
-				writeConfirm = confirm
-			}
-			if res, appRes, raw, err = do(false, writeConfirm); err != nil {
+			if res, appRes, raw, err = do(false, confirm); err != nil {
 				return err
 			}
 		}
@@ -251,11 +265,22 @@ func (e *cliEnv) runOffOn(cmd *cobra.Command, args []string, f *offFlags, off bo
 	}
 
 	ids := offIDs(res, appRes, id)
-	if f.app != "" && len(ids) == 0 {
-		ids = resourcesOfApp(view, repo, path)
+	if f.app != "" {
+		if len(ids) > 0 {
+			// The application route answers with dash identities; everything below follows ids.
+			if ids, err = followIDs(ctx, s.fl, target, ids, view); err != nil {
+				return err
+			}
+		} else {
+			ids = resourcesOfApp(view, repo, path)
+		}
 	}
 	impacts := offImpacts(res, appRes)
-	info := writeInfo{off: &offWait{ids: ids, on: !off}, stamps: map[string]string{}}
+	revision := ""
+	if res != nil {
+		revision = res.Revision
+	}
+	info := writeInfo{off: &offWait{ids: ids, on: !off, revision: revision}, stamps: map[string]string{}}
 	if off && s.level == waitApplied {
 		for _, i := range ids {
 			if g := goneFor(i, impacts); g != nil {
@@ -271,11 +296,19 @@ func (e *cliEnv) runOffOn(cmd *cobra.Command, args []string, f *offFlags, off bo
 		}
 	}
 
+	app := ""
+	if f.app != "" {
+		app = path
+		if app == "" {
+			app = repo // "." with --repo: every application of the repository
+		}
+	}
 	return s.finishOff(res, raw, impactWarnings(impacts), info, w, func(out io.Writer) {
+		noop := res != nil && res.Noop
 		if off {
-			printOffWrite(out, ids, target, res != nil && res.DryRun, impacts)
+			printOffWrite(out, ids, target, res != nil && res.DryRun, noop, app, impacts)
 		} else {
-			printOnWrite(out, ids, target, res != nil && res.DryRun, impacts)
+			printOnWrite(out, ids, target, res != nil && res.DryRun, noop, app, impacts)
 		}
 		for _, sk := range skippedOf(appRes) {
 			fmt.Fprintf(out, "skipped: %s (%s)\n", sk.Identity, sk.Reason)
@@ -284,7 +317,8 @@ func (e *cliEnv) runOffOn(cmd *cobra.Command, args []string, f *offFlags, off bo
 }
 
 // finishOff prints the result of an off or on write, follows it with --wait and prints the structured
-// answer. A write that changed nothing (the platform's noop) is not waited for.
+// answer. A noop is waited for too: it returns at once when the robot is already in the state, and
+// reports an off the controller refused instead of staying silent.
 func (s *session) finishOff(res *api.OverrideWriteResult, raw json.RawMessage, warnings []string, info writeInfo, w *waiter, human func(io.Writer)) error {
 	out, errw := s.cmd.OutOrStdout(), s.cmd.ErrOrStderr()
 	for _, wn := range warnings {
@@ -298,7 +332,7 @@ func (s *session) finishOff(res *api.OverrideWriteResult, raw json.RawMessage, w
 	if s.format == "table" {
 		human(out)
 	}
-	waiting := w != nil && !s.dryRun && s.level != waitNone && (res == nil || !res.Noop)
+	waiting := w != nil && !s.dryRun && s.level != waitNone
 	var werr error
 	start := s.e.clock()
 	switch {
@@ -365,6 +399,81 @@ func offConfirm(res *api.OverrideWriteResult, app *api.ApplicationOffResult) str
 	return ""
 }
 
+// offNeedsConfirm reports whether the dry run says the write must carry a confirmation. A noop
+// (the item already is off) never does, and neither does an application route that would write
+// nothing: a confirmation on such an answer asks for a write that changes nothing.
+func offNeedsConfirm(res *api.OverrideWriteResult, app *api.ApplicationOffResult, appRoute bool) bool {
+	if res == nil || res.Noop {
+		return false
+	}
+	if appRoute && app != nil && len(app.IDs) == 0 {
+		return false
+	}
+	return offConfirm(res, app) != ""
+}
+
+// sendConfirm is the platform's way of asking for a confirmation: "send confirm=X".
+var sendConfirm = regexp.MustCompile(`send confirm=([^\n]+)`)
+
+// offConfirmHint rewrites that wording into the flag to run, so the exit-8 message from a write
+// whose confirmation changed in between tells the user what to do.
+func offConfirmHint(err error) error {
+	var ae *api.Error
+	if errors.As(err, &ae) && ae.Status == http.StatusConflict {
+		ae.Message = sendConfirm.ReplaceAllString(ae.Message, "run it again with --confirm $1")
+	}
+	return err
+}
+
+// followIDs maps the dash identities the application route answers with (<Kind>-<name>-<namespace>)
+// to the override ids the rest of the command follows (Kind/namespace/name). The view read after the
+// write names the items that are there; the view from before it still names the ones an off has just
+// taken out of the configuration.
+func followIDs(ctx context.Context, fl *api.Fleet, target string, identities []string, before *api.ConfigTargetView) ([]string, error) {
+	var views []*api.ConfigTargetView
+	if v, _, err := fl.ConfigTarget(ctx, target); err != nil {
+		return nil, classify(err)
+	} else {
+		views = append(views, v)
+	}
+	views = append(views, before)
+	ids := make([]string, 0, len(identities))
+	for _, identity := range identities {
+		id, ok := idForIdentity(identity, views...)
+		if !ok {
+			return nil, newErr(codeError, "cannot follow %s: it is not in the robot's configuration view", identity)
+		}
+		ids = append(ids, id)
+	}
+	return dedupe(ids), nil
+}
+
+// idForIdentity finds the id of a dash identity (<Kind>-<name>-<namespace>) in the configuration
+// views, the newest first: the effective rows, then every layer's copy.
+func idForIdentity(identity string, views ...*api.ConfigTargetView) (string, bool) {
+	for _, v := range views {
+		if v == nil {
+			continue
+		}
+		for _, r := range v.Configuration.Effective {
+			if r.Identity == identity {
+				return r.ID(), true
+			}
+		}
+	}
+	for _, v := range views {
+		if v == nil {
+			continue
+		}
+		for _, r := range v.Configuration.Resources {
+			if r.Identity == identity {
+				return r.ID(), true
+			}
+		}
+	}
+	return "", false
+}
+
 func skippedOf(app *api.ApplicationOffResult) []api.OffSkipped {
 	if app == nil {
 		return nil
@@ -372,21 +481,21 @@ func skippedOf(app *api.ApplicationOffResult) []api.OffSkipped {
 	return app.Skipped
 }
 
-// impactFor finds the impact of an item: by identity, else by kind and release name.
+// impactFor finds the impact of an item by its dash identity <Kind>-<name>-<namespace>, the form
+// the platform answers with. Matching on anything looser (a release name, a part of the identity)
+// picks the wrong item when two items share a name.
 func impactFor(id string, impacts []api.OffImpact) *api.OffImpact {
-	kind, _, name, err := checkID(id)
+	kind, ns, name, err := checkID(id)
 	if err != nil {
 		return nil
 	}
+	if ns == "" {
+		ns = "default"
+	}
+	dash := kind + "-" + name + "-" + ns
 	for i := range impacts {
-		im := &impacts[i]
-		switch {
-		case im.Identity == id:
-			return im
-		case im.Release != nil && im.Release.Name == name:
-			return im
-		case im.Kind == kind && strings.Contains(im.Identity, "-"+name+"-"):
-			return im
+		if impacts[i].Identity == dash {
+			return &impacts[i]
 		}
 	}
 	return nil
@@ -436,7 +545,7 @@ func offConfirmMessage(ids []string, impacts []api.OffImpact, confirm string) st
 	for _, im := range impacts {
 		reasons = append(reasons, im.DataReasons...)
 	}
-	why := "its data is deleted"
+	why := "what it owns is deleted"
 	if r := dedupe(reasons); len(r) > 0 {
 		why = strings.Join(r, "; ")
 	}
@@ -456,7 +565,18 @@ func whatIDs(ids []string) string {
 	return fmt.Sprintf("%d resources", len(ids))
 }
 
-func printOffWrite(out io.Writer, ids []string, target string, dry bool, impacts []api.OffImpact) {
+// printOffWrite is the table answer of an off. noop means the item already is off and app is the
+// application path of the --app route ("" for one resource).
+func printOffWrite(out io.Writer, ids []string, target string, dry, noop bool, app string, impacts []api.OffImpact) {
+	if noop {
+		// "Turned off ... sent to the robot" would contradict the platform's own answer.
+		if app != "" {
+			fmt.Fprintf(out, "Nothing changed: every resource of %s already is off on %s.\n", app, target)
+		} else {
+			fmt.Fprintf(out, "Nothing changed: %s is already off on %s.\n", whatIDs(ids), target)
+		}
+		return
+	}
 	if dry {
 		fmt.Fprintf(out, "Would turn off %s on %s.\n", whatIDs(ids), target)
 	} else {
@@ -468,7 +588,15 @@ func printOffWrite(out io.Writer, ids []string, target string, dry bool, impacts
 	}
 }
 
-func printOnWrite(out io.Writer, ids []string, target string, dry bool, impacts []api.OffImpact) {
+func printOnWrite(out io.Writer, ids []string, target string, dry, noop bool, app string, impacts []api.OffImpact) {
+	if noop {
+		if app != "" {
+			fmt.Fprintf(out, "Nothing changed: every resource of %s already is on %s.\n", app, target)
+		} else {
+			fmt.Fprintf(out, "Nothing changed: %s is not off on %s.\n", whatIDs(ids), target)
+		}
+		return
+	}
 	if dry {
 		fmt.Fprintf(out, "Would turn on %s on %s.\n", whatIDs(ids), target)
 	} else {
@@ -517,6 +645,9 @@ func printImpact(out io.Writer, im api.OffImpact) {
 			line += " (" + strings.Join(im.DataReasons, "; ") + ")"
 		}
 		fmt.Fprintln(out, line)
+	}
+	for _, it := range im.NamespaceItems {
+		fmt.Fprintf(out, "  in it: %s\n", it)
 	}
 	for _, d := range im.Dependents {
 		fmt.Fprintf(out, "  uses it: %s\n", d)
@@ -599,8 +730,10 @@ func (w *waiter) waitOffPublished(ctx context.Context, o *offWait) error {
 	}
 }
 
-// offStates judges one view for an off (or on) wait: (reached, what is missing, error). An invalid or
-// not-applicable state ends the wait with exit 5: the controller refused, the item stays as it was.
+// offStates judges one view for an off (or on) wait: (reached, what is missing, error). The wait
+// only counts a state the controller reached for our write: an older revision is still pending. An
+// off the controller refused (any final state other than off) ends the wait with exit 5, as does an
+// on it refused.
 func offStates(v *api.ConfigTargetView, o *offWait) (bool, string, error) {
 	states := map[string]api.OverrideStatus{}
 	for _, s := range v.OverrideStatus {
@@ -610,25 +743,32 @@ func offStates(v *api.ConfigTargetView, o *offWait) (bool, string, error) {
 	for _, r := range v.Configuration.Effective {
 		rows[r.ID()] = r.Status
 	}
+	if o.revision != "" && v.OverridesRevision != o.revision && !revisionSuperseded(v.OverridesRevision, o.revision) {
+		return false, fmt.Sprintf("waiting for the controller to evaluate revision %s (it has %s)", o.revision, orDash(v.OverridesRevision)), nil
+	}
 	for _, id := range o.ids {
 		st := states[id]
-		isOff := st.State == api.StateOff || rows[id] == api.StatusOff
 		if o.on {
-			if isOff {
+			if st.State == api.StateOff || rows[id] == api.StatusOff {
 				return false, fmt.Sprintf("waiting for the controller to install %s again (it is off)", shownID(id)), nil
 			}
 			if st.State == api.StateInvalid || st.State == api.StateNotApplicable {
 				return false, "", newErr(codeRejected, "%s was not turned on: the platform reports it as %s", shownID(id), stateMessage(st))
 			}
+			if rows[id] != api.StatusWinner {
+				return false, fmt.Sprintf("waiting for the controller to publish %s (row status: %s)", shownID(id), orDash(rows[id])), nil
+			}
 			continue
 		}
-		if st.State == api.StateOff {
+		switch st.State {
+		case api.StateOff:
 			continue
+		case api.StatePending, "":
+			return false, fmt.Sprintf("waiting for the controller to turn %s off (state: %s)", shownID(id), orDash(st.State)), nil
 		}
-		if st.State == api.StateInvalid || st.State == api.StateNotApplicable {
-			return false, "", newErr(codeRejected, "%s was not turned off: the platform reports it as %s (it stays on the robot)", shownID(id), stateMessage(st))
-		}
-		return false, fmt.Sprintf("waiting for the controller to turn %s off (state: %s)", shownID(id), orDash(st.State)), nil
+		// Any other final state means the controller looked at our off and did not take the item
+		// off the robot (invalid, not-applicable, no-target, active, redundant).
+		return false, "", newErr(codeRejected, "the controller did not turn %s off: %s", shownID(id), stateMessage(st))
 	}
 	return true, "", nil
 }

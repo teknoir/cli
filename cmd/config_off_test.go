@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -52,11 +53,13 @@ func offRequests(t *testing.T, p *fakePlatform, method, path string) []rec {
 	return p.seen(method, path)
 }
 
-// offView is the standard view plus the controller's state of the notebook override.
+// offView is the standard view plus the controller's state of the notebook override. The write
+// answers revision r2, and the controller has evaluated it.
 func offView(state string, off bool) *api.ConfigTargetView {
 	v := standardView()
 	v.Published = &api.PublishedInfo{Hash: "h1"}
 	v.Overrides = api.DeviceOverrides{Revision: "r2", Resources: map[string]api.ResourceOverride{nbID: {Off: off}}}
+	v.OverridesRevision = "r2"
 	if state != "" {
 		v.OverrideStatus = []api.OverrideStatus{{Target: nbID, State: state}}
 	}
@@ -196,7 +199,7 @@ func TestConfigOffConfirmChangedInBetween(t *testing.T) {
 	})
 	e, _ := testEnv(t, p, nil)
 	_, _, err := runCLI(t, e, "config", "off", "vision-station-01", nbID)
-	if exitCodeOf(err) != codeConflict || !strings.Contains(err.Error(), "send confirm=delete notebook volumes") {
+	if exitCodeOf(err) != codeConflict || !strings.Contains(err.Error(), "run it again with --confirm delete notebook volumes") {
 		t.Errorf("exit %d: %v", exitCodeOf(err), err)
 	}
 }
@@ -221,15 +224,75 @@ func TestConfigOffNoop(t *testing.T) {
 		}
 		return 200, `{"id":"` + nbID + `","dryRun":false,"noop":true,"overrides":{},"warnings":["HelmChart/default/notebook is already off on vision-station-01"]}`
 	})
-	// a wait would time out on the view below: a noop has nothing to wait for
-	sequence(t, p, offView(api.StateOff, true))
+	// The controller reports the stored off as invalid. A noop is waited for like any write, so
+	// --wait=published ends with exit 5 instead of claiming success.
+	sequence(t, p, offView(api.StateInvalid, true))
 	e, _ := testEnv(t, p, nil)
 	_, errs, err := runCLI(t, e, "config", "off", "vision-station-01", nbID, "--wait=published")
-	if err != nil {
-		t.Fatalf("%v", err)
+	if exitCodeOf(err) != codeRejected || !strings.Contains(err.Error(), "did not turn HelmChart/default/notebook off") {
+		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
 	}
 	if !strings.Contains(errs, "already off") {
 		t.Errorf("stderr:\n%s", errs)
+	}
+	// without --wait a noop is exit 0 and says the robot already is in that state
+	e2, _ := testEnv(t, p, nil)
+	out, _, err := runCLI(t, e2, "config", "off", "vision-station-01", nbID)
+	if err != nil {
+		t.Fatalf("noop without a wait: %v", err)
+	}
+	if !strings.HasPrefix(out, "Nothing changed: HelmChart/default/notebook is already off on vision-station-01.") {
+		t.Errorf("stdout:\n%s", out)
+	}
+}
+
+func TestConfigOffNoopNeedsNoConfirm(t *testing.T) {
+	// The backend still sends a confirm text on a noop dry run: a repeat off must not exit 2.
+	p := newFakePlatform(t)
+	var writeQuery string
+	p.onFunc("PATCH", patchPath, func(r rec) (int, string) {
+		if strings.Contains(r.Query, "dryRun=1") {
+			body := offWrite(nbID, true, true, offImpact("delete notebook volumes"))
+			return 200, body
+		}
+		writeQuery = r.Query
+		return 200, offWrite(nbID, false, true, offImpact(""))
+	})
+	e, _ := testEnv(t, p, nil)
+	out, _, err := runCLI(t, e, "config", "off", "vision-station-01", nbID)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if strings.Contains(writeQuery, "confirm") {
+		t.Errorf("a noop write must not carry a confirmation: %q", writeQuery)
+	}
+	if !strings.HasPrefix(out, "Nothing changed: ") {
+		t.Errorf("stdout:\n%s", out)
+	}
+}
+
+func TestConfigOffNoopAppNeedsNoConfirm(t *testing.T) {
+	// An application route that would write nothing asks for no confirmation either.
+	p := newFakePlatform(t)
+	p.on("GET", "/config/vision-station-01", 200, jsonOf(t, standardView()))
+	var writeQuery string
+	p.onFunc("PATCH", appOffPath, func(r rec) (int, string) {
+		if strings.Contains(r.Query, "dryRun=1") {
+			return 200, `{"dryRun":true,"revision":"r2","overrides":{},"warnings":[],"ids":[],"confirm":"delete the app's volumes"}`
+		}
+		writeQuery = r.Query
+		return 200, `{"dryRun":false,"revision":"r2","overrides":{},"warnings":[],"ids":[],"noop":true}`
+	})
+	e, _ := testEnv(t, p, nil)
+	out, _, err := runCLI(t, e, "config", "off", "vision-station-01", "--app", "apps/mock-vision")
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if strings.Contains(writeQuery, "confirm") {
+		t.Errorf("a noop write must not carry a confirmation: %q", writeQuery)
+	}
+	if !strings.HasPrefix(out, "Nothing changed: every resource of apps/mock-vision already is off on vision-station-01.") {
+		t.Errorf("stdout:\n%s", out)
 	}
 }
 
@@ -315,6 +378,8 @@ func TestConfigOffRefusesWaitReady(t *testing.T) {
 
 const appOffPath = "/config/vision-station-01/overrides/application/off"
 
+// appOffAnswer is the answer of the application route: the ids are dash identities
+// (<Kind>-<name>-<namespace>), as the platform sends them, not override keys.
 func appOffAnswer(dry bool, confirm string) string {
 	c := ""
 	if confirm != "" {
@@ -322,7 +387,7 @@ func appOffAnswer(dry bool, confirm string) string {
 	}
 	return `{"target":{"kind":"robot","name":"vision-station-01","device":"vision-station-01"},"dryRun":` + boolStr(dry) +
 		`,"revision":"r2","overrides":{},"warnings":[],` +
-		`"ids":["HelmChart/default/notebook"],` +
+		`"ids":["HelmChart-notebook-default"],` +
 		`"skipped":[{"identity":"Deployment-whoami-default","reason":"the item is a robot app on this robot"}],` +
 		`"impacts":[` + offImpact("") + `]` + c + `}`
 }
@@ -380,6 +445,65 @@ func TestConfigOffAppAmbiguousPath(t *testing.T) {
 	p.onFunc("PATCH", appOffPath, func(rec) (int, string) { return 200, appOffAnswer(false, "") })
 	if _, _, err := runCLI(t, e, "config", "off", "vision-station-01", "--app", "apps/mock-vision", "--repo", "https://github.com/teknoir/other-gitops"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConfigOffAppWaitPublished(t *testing.T) {
+	// The application route answers dash identities; the wait follows the override key they map to.
+	p := newFakePlatform(t)
+	sequence(t, p, offView(api.StatePending, true), offView(api.StateOff, true))
+	p.onFunc("PATCH", appOffPath, func(r rec) (int, string) {
+		return 200, appOffAnswer(strings.Contains(r.Query, "dryRun=1"), "")
+	})
+	e, _ := testEnv(t, p, nil)
+	_, errs, err := runCLI(t, e, "config", "off", "vision-station-01", "--app", "apps/mock-vision", "--wait=published")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if !strings.Contains(errs, "published after") {
+		t.Errorf("stderr:\n%s", errs)
+	}
+}
+
+func TestConfigOnAppWaitPublishedStaysOff(t *testing.T) {
+	// The write says the revision changed, but the view still shows the item off: not success.
+	p := newFakePlatform(t)
+	sequence(t, p, offView(api.StateOff, true))
+	p.onFunc("PATCH", appOffPath, func(r rec) (int, string) {
+		return 200, appOffAnswer(false, "")
+	})
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "on", "vision-station-01", "--app", "apps/mock-vision", "--wait=published", "--timeout", "10s")
+	if exitCodeOf(err) != codeTimeout || !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestConfigOffAppWaitAppliedChecksTheRobot(t *testing.T) {
+	p := newFakePlatform(t)
+	sequence(t, p, offView(api.StateOff, true))
+	p.onFunc("PATCH", appOffPath, func(r rec) (int, string) {
+		return 200, appOffAnswer(strings.Contains(r.Query, "dryRun=1"), "")
+	})
+	var probes int
+	ex := &fakeExec{run: func(script string) (execResult, error) {
+		probes++
+		if !strings.Contains(script, "helmcharts.helm.cattle.io notebook") || !strings.Contains(script, "owner=helm,name=notebook") {
+			t.Errorf("probe script: %s", script)
+		}
+		return execResult{Stdout: sectionMark + "obj\n\n" + sectionMark + "release\nNo resources found in notebook-ns namespace.\n" +
+			sectionMark + "deletejob\n" + `{"metadata":{"name":"helm-delete-notebook"},"status":{"conditions":[{"type":"Complete","status":"True"}],"succeeded":1}}` + "\n"}, nil
+	}}
+	e, _ := testEnv(t, p, ex)
+	_, errs, err := runCLI(t, e, "config", "off", "vision-station-01", "--app", "apps/mock-vision", "--wait")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if probes != 1 {
+		t.Errorf("%d probes, want the one after publish", probes)
+	}
+	if !strings.Contains(errs, "helm-delete-notebook Job Complete") {
+		t.Errorf("stderr:\n%s", errs)
 	}
 }
 
@@ -444,15 +568,17 @@ func TestConfigOffWaitInvalid(t *testing.T) {
 	p := offPlatform(t, offView(api.StateInvalid, true))
 	e, _ := testEnv(t, p, nil)
 	_, _, err := runCLI(t, e, "config", "off", "vision-station-01", nbID, "--wait=published")
-	if exitCodeOf(err) != codeRejected || !strings.Contains(err.Error(), "it stays on the robot") {
+	if exitCodeOf(err) != codeRejected || !strings.Contains(err.Error(), "the controller did not turn HelmChart/default/notebook off: invalid") {
 		t.Errorf("exit %d: %v", exitCodeOf(err), err)
 	}
-	// not-applicable too
-	p2 := offPlatform(t, offView(api.StateNotApplicable, true))
-	e2, _ := testEnv(t, p2, nil)
-	_, _, err = runCLI(t, e2, "config", "off", "vision-station-01", nbID, "--wait=published")
-	if exitCodeOf(err) != codeRejected || !strings.Contains(err.Error(), "not-applicable") {
-		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	// not-applicable too, and a final state the controller reached for some other reason
+	for _, state := range []string{api.StateNotApplicable, api.StateRedundant, api.StateActive, api.StateNoTarget} {
+		p2 := offPlatform(t, offView(state, true))
+		e2, _ := testEnv(t, p2, nil)
+		_, _, err = runCLI(t, e2, "config", "off", "vision-station-01", nbID, "--wait=published")
+		if exitCodeOf(err) != codeRejected || !strings.Contains(err.Error(), state) {
+			t.Errorf("%s: exit %d: %v", state, exitCodeOf(err), err)
+		}
 	}
 }
 
@@ -497,12 +623,15 @@ func TestConfigOffWaitApplied(t *testing.T) {
 }
 
 func TestConfigOffWaitAppliedDeleteJobFailed(t *testing.T) {
+	// helm-controller keeps the HelmChart (Terminating) while its uninstall Job runs, so the probe
+	// still sees the object and its release secret; the failed Job is the verdict.
 	p := offPlatform(t, offView(api.StateOff, true))
 	ex := &fakeExec{run: func(script string) (execResult, error) {
 		if strings.Contains(script, "logs job/helm-delete-notebook") {
 			return execResult{Stdout: "Error: uninstall: failed to delete release: context deadline exceeded\n"}, nil
 		}
-		return execResult{Stdout: sectionMark + "obj\n\n" + sectionMark + "release\nNo resources found in notebook-ns namespace.\n" +
+		return execResult{Stdout: sectionMark + "obj\nhelmchart.helm.cattle.io/notebook\n" +
+			sectionMark + "release\nsecret/sh.helm.release.v1.notebook.v1\n" +
 			sectionMark + "deletejob\n" + `{"metadata":{"name":"helm-delete-notebook"},"status":{"conditions":[{"type":"Failed","status":"True"}],"failed":1}}` + "\n"}, nil
 	}}
 	e, _ := testEnv(t, p, ex)
@@ -510,6 +639,22 @@ func TestConfigOffWaitAppliedDeleteJobFailed(t *testing.T) {
 	if exitCodeOf(err) != codeUnhealthy || !strings.Contains(err.Error(), "uninstall Job helm-delete-notebook failed") ||
 		!strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestConfigOffWaitAppliedOldFailedJobIsNotUnhealthy(t *testing.T) {
+	// Everything is gone: a failed Job left over from an earlier attempt is not the verdict.
+	p := offPlatform(t, offView(api.StateOff, true))
+	ex := &fakeExec{run: func(script string) (execResult, error) {
+		if strings.Contains(script, "logs job/") {
+			t.Errorf("a leftover failed Job must not print a log tail: %s", script)
+		}
+		return execResult{Stdout: sectionMark + "obj\n\n" + sectionMark + "release\nNo resources found in notebook-ns namespace.\n" +
+			sectionMark + "deletejob\n" + `{"metadata":{"name":"helm-delete-notebook"},"status":{"conditions":[{"type":"Failed","status":"True"}],"failed":1}}` + "\n"}, nil
+	}}
+	e, _ := testEnv(t, p, ex)
+	if _, errs, err := runCLI(t, e, "config", "off", "vision-station-01", nbID, "--wait=applied"); err != nil {
+		t.Fatalf("%v\n%s", err, errs)
 	}
 }
 
@@ -542,6 +687,212 @@ func TestConfigOnWaitPublished(t *testing.T) {
 	}
 	if !strings.Contains(errs, "waiting for the controller to install HelmChart/default/notebook again (it is off)") || !strings.Contains(errs, "published after") {
 		t.Errorf("stderr:\n%s", errs)
+	}
+}
+
+func TestConfigOffWaitPublishedNeedsTheWriteRevision(t *testing.T) {
+	// The view still reports off, but for the revision before the write: still waiting.
+	p := newFakePlatform(t)
+	p.onFunc("PATCH", patchPath, func(r rec) (int, string) {
+		return 200, offWrite(nbID, strings.Contains(r.Query, "dryRun=1"), false, offImpact(""))
+	})
+	old := offView(api.StateOff, true)
+	old.OverridesRevision = "r1"
+	sequence(t, p, old)
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "off", "vision-station-01", nbID, "--wait=published", "--timeout", "10s")
+	if exitCodeOf(err) != codeTimeout || !strings.Contains(err.Error(), "waiting for the controller to evaluate revision r2") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestConfigOffAppUnmappableIdentity(t *testing.T) {
+	// The answer names an item the view does not know: the wait cannot follow it (exit 1).
+	p := newFakePlatform(t)
+	p.on("GET", "/config/vision-station-01", 200, jsonOf(t, standardView()))
+	p.onFunc("PATCH", appOffPath, func(r rec) (int, string) {
+		return 200, `{"dryRun":false,"revision":"r2","overrides":{},"warnings":[],"ids":["HelmChart-gone-default"]}`
+	})
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "off", "vision-station-01", "--app", "apps/mock-vision", "--wait=published", "--timeout", "10s")
+	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "cannot follow HelmChart-gone-default: it is not in the robot's configuration view") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestConfigOnWaitPublishedNeedsTheWriteRevision(t *testing.T) {
+	// The row says winner and the state is active, but for an older revision: still waiting.
+	p := newFakePlatform(t)
+	p.onFunc("PATCH", patchPath, func(r rec) (int, string) {
+		return 200, offWrite(nbID, false, false, offImpact(""))
+	})
+	old := offView(api.StateActive, false)
+	old.Configuration.Effective[0].Status = api.StatusWinner
+	old.OverridesRevision = "r1"
+	sequence(t, p, old)
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "on", "vision-station-01", nbID, "--wait=published", "--timeout", "10s")
+	if exitCodeOf(err) != codeTimeout || !strings.Contains(err.Error(), "waiting for the controller to evaluate revision r2") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestConfigOnWaitPublishedNeedsTheRowStatus(t *testing.T) {
+	// The revision is evaluated and the state is not off, but the row is not published yet.
+	p := newFakePlatform(t)
+	p.onFunc("PATCH", patchPath, func(r rec) (int, string) {
+		return 200, offWrite(nbID, false, false, offImpact(""))
+	})
+	pending := offView(api.StateActive, false)
+	pending.Configuration.Effective[0].Status = "pending"
+	sequence(t, p, pending)
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "on", "vision-station-01", nbID, "--wait=published", "--timeout", "10s")
+	if exitCodeOf(err) != codeTimeout || !strings.Contains(err.Error(), "row status: pending") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+// onStampedPlatform serves an on write whose published item carries published; the robot's copy
+// carries device. The robot's copy must carry the published stamp (testApplyStamp's value).
+func onStampedPlatform(t *testing.T, published, device string) (*fakePlatform, *fakeExec) {
+	t.Helper()
+	p := newFakePlatform(t)
+	p.onFunc("PATCH", patchPath, func(r rec) (int, string) {
+		return 200, offWrite(nbID, false, false, offImpact(""))
+	})
+	on := offView(api.StateActive, false)
+	on.Configuration.Effective[0].Status = api.StatusWinner
+	sequence(t, p, on)
+	rendered := map[string]any{
+		"apiVersion": "helm.cattle.io/v1", "kind": "HelmChart",
+		"metadata": map[string]any{"name": "notebook", "namespace": "default",
+			"annotations": map[string]any{changedAtAnnotation: published}},
+		"spec": map[string]any{"chart": "notebook", "version": "0.0.5", "targetNamespace": "notebook-ns",
+			"valuesContent": "replicas: 1\n"},
+	}
+	p.on("GET", "/config/vision-station-01/resource", 200, jsonOf(t, api.ConfigResourceDetail{ID: nbID, Rendered: rendered}))
+	chart := map[string]any{
+		"apiVersion": "helm.cattle.io/v1", "kind": "HelmChart",
+		"metadata": map[string]any{"name": "notebook", "namespace": "default",
+			"annotations": map[string]any{changedAtAnnotation: device}},
+		"spec": map[string]any{"chart": "notebook", "version": "0.0.5", "targetNamespace": "notebook-ns",
+			"valuesContent": "replicas: 1\n"},
+	}
+	chartJSON := mustJSON(chart)
+	job := mustJSON(map[string]any{"kind": "Job", "metadata": map[string]any{"name": "helm-install-notebook", "uid": "u1"},
+		"status": map[string]any{"succeeded": 1}})
+	var baseline bool
+	ex := &fakeExec{run: func(script string) (execResult, error) {
+		switch {
+		case strings.Contains(script, "get helmcharts.helm.cattle.io"):
+			if !baseline { // the probe before the write: nothing is there yet
+				baseline = true
+				return execResult{Stdout: sectionMark + "chart\n" + sectionMark + "job\n"}, nil
+			}
+			return execResult{Stdout: sectionMark + "chart\n" + chartJSON + "\n" + sectionMark + "job\n" + job + "\n"}, nil
+		case strings.Contains(script, "get secrets"):
+			return execResult{Stdout: sectionMark + "release\nsecret/sh.helm.release.v1.notebook.v1\n"}, nil
+		case strings.Contains(script, "get deployments,statefulsets,daemonsets"):
+			return execResult{Stdout: sectionMark + "workloads\n" + `{"items":[]}` + "\n"}, nil
+		case strings.Contains(script, "get pods"):
+			return execResult{Stdout: sectionMark + "pods\n" + `{"items":[]}` + "\n"}, nil
+		}
+		return execResult{}, nil
+	}}
+	return p, ex
+}
+
+func TestConfigOnWaitAppliedUsesTheStamp(t *testing.T) {
+	const stamp = "2026-10-23T10:00:00Z"
+	p, ex := onStampedPlatform(t, stamp, stamp)
+	e, _ := testEnv(t, p, ex)
+	_, errs, err := runCLI(t, e, "config", "on", "vision-station-01", nbID, "--wait=applied")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if !strings.Contains(errs, "helm Job succeeded and release notebook is installed in namespace notebook-ns") {
+		t.Errorf("stderr:\n%s", errs)
+	}
+}
+
+func TestConfigOnWaitReadyUsesTheStamp(t *testing.T) {
+	const stamp = "2026-10-23T10:00:00Z"
+	p, ex := onStampedPlatform(t, stamp, stamp)
+	e, _ := testEnv(t, p, ex)
+	_, errs, err := runCLI(t, e, "config", "on", "vision-station-01", nbID, "--wait=ready")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if !strings.Contains(errs, "the release has no Deployment") || !strings.Contains(errs, "ready after") {
+		t.Errorf("stderr:\n%s", errs)
+	}
+}
+
+func TestConfigOnWaitAppliedWithAnotherStampWaits(t *testing.T) {
+	// The robot's copy carries an older version: applied must not accept it.
+	p, ex := onStampedPlatform(t, "2026-10-23T10:00:00Z", "2026-10-22T09:00:00Z")
+	e, _ := testEnv(t, p, ex)
+	_, _, err := runCLI(t, e, "config", "on", "vision-station-01", nbID, "--wait=applied", "--timeout", "10s")
+	if exitCodeOf(err) != codeTimeout || !strings.Contains(err.Error(), "older version of the HelmChart") {
+		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+func TestGoneForMatchesTheDashIdentityOnly(t *testing.T) {
+	// Two HelmCharts called x in different namespaces: each keeps its own release namespace.
+	impacts := []api.OffImpact{
+		{Identity: "HelmChart-x-a", Kind: "HelmChart", Release: &api.OffRelease{Name: "x", TargetNamespace: "ns-a"}},
+		{Identity: "HelmChart-x-b", Kind: "HelmChart", Release: &api.OffRelease{Name: "x", TargetNamespace: "ns-b"}},
+	}
+	for _, c := range []struct{ id, want string }{
+		{"HelmChart/a/x", "ns-a"},
+		{"HelmChart/b/x", "ns-b"},
+	} {
+		g := goneFor(c.id, impacts)
+		if g == nil || g.targetNS != c.want {
+			t.Errorf("%s: %+v, want targetNS %s", c.id, g, c.want)
+		}
+	}
+	if g := goneFor("HelmChart/other/x", impacts); g == nil || g.targetNS != "other" {
+		t.Errorf("an item without an impact keeps its own namespace: %+v", g)
+	}
+}
+
+func TestConfigOffNamespaceShowsWhatIsInIt(t *testing.T) {
+	impact := `{"identity":"Namespace-llm-ns-default","kind":"Namespace","deletesData":"yes",` +
+		`"dataReasons":["the Namespace is deleted"],"namespaceItems":["Deployment llm","PersistentVolumeClaim data"]}`
+	p := newFakePlatform(t)
+	p.onFunc("PATCH", patchPath, func(r rec) (int, string) {
+		return 200, offWrite("Namespace/default/llm-ns", strings.Contains(r.Query, "dryRun=1"), false, impact)
+	})
+	e, _ := testEnv(t, p, nil)
+	out, _, err := runCLI(t, e, "config", "off", "vision-station-01", "Namespace/default/llm-ns", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"  in it: Deployment llm\n", "  in it: PersistentVolumeClaim data\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestConfigWaitWithAnOffItem(t *testing.T) {
+	// An off item is not on the robot: no level may wait for it, and applied/ready never probe it.
+	p := newFakePlatform(t)
+	p.on("GET", "/config/vision-station-01", 200, jsonOf(t, offView(api.StateOff, true)))
+	ex := &fakeExec{run: func(script string) (execResult, error) {
+		return execResult{}, errors.New("an off item must not be probed: " + script)
+	}}
+	e, _ := testEnv(t, p, ex)
+	for _, level := range []string{"published", "applied", "ready"} {
+		if _, _, err := runCLI(t, e, "config", "wait", "vision-station-01", "--for", level, "--timeout", "10s"); err != nil {
+			t.Errorf("%s: %v", level, err)
+		}
+	}
+	if calls := ex.callList(); len(calls) != 0 {
+		t.Errorf("the robot must not be touched: %v", calls)
 	}
 }
 

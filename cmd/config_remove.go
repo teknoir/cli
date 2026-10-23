@@ -416,10 +416,19 @@ func evalGone(g *goneItem, out string) checkResult {
 	if sudoProblem(have) {
 		return checkResult{checkFatal, sudoMessage(have)}
 	}
-	if have != "" && !strings.Contains(have, "NotFound") && !strings.Contains(have, "doesn't have a resource type") {
-		if strings.HasPrefix(strings.ToLower(have), "error") {
-			return pending("cannot read %s on the device: %s", g.kind, firstNonEmptyLine(have))
+	present := have != "" && !strings.Contains(have, "NotFound") && !strings.Contains(have, "doesn't have a resource type")
+	if present && strings.HasPrefix(strings.ToLower(have), "error") {
+		return pending("cannot read %s on the device: %s", g.kind, firstNonEmptyLine(have))
+	}
+	release := g.release()
+	// helm-controller keeps the HelmChart (Terminating) while its uninstall Job runs, so a failed
+	// uninstall is visible here first: without this the wait would run into its timeout.
+	if present && g.kind == "HelmChart" {
+		if job, _ := parseObj(secs["deletejob"]); helmJobFailed(job) {
+			return unhealthy("the HelmChart is still on the robot (Terminating) and its uninstall Job helm-delete-%s failed: the release may still be installed in namespace %s", release, g.targetNS)
 		}
+	}
+	if present {
 		return pending("%s is still on the robot", shownID(g.id))
 	}
 	if g.kind != "HelmChart" {
@@ -429,7 +438,6 @@ func evalGone(g *goneItem, out string) checkResult {
 	if sudoProblem(rel) {
 		return checkResult{checkFatal, sudoMessage(rel)}
 	}
-	release := g.release()
 	prefix := "sh.helm.release.v1." + release + "."
 	var found []string
 	for _, line := range strings.Split(rel, "\n") {
@@ -444,15 +452,18 @@ func evalGone(g *goneItem, out string) checkResult {
 		return pending("the HelmChart is gone, helm release %s is still installed in namespace %s (%d release secret(s)); waiting for helm-controller to uninstall it", release, g.targetNS, len(found))
 	}
 	msg := fmt.Sprintf("%s is gone from the robot and its helm release is uninstalled", shownID(g.id))
-	if job, _ := parseObj(secs["deletejob"]); job != nil {
-		if jobFailedCondition(job) {
-			return unhealthy("the HelmChart is gone but its uninstall Job helm-delete-%s failed: the release may still be installed in namespace %s", release, g.targetNS)
-		}
-		if evalJobComplete(job).state == checkDone {
-			msg += fmt.Sprintf(" (helm-delete-%s Job Complete)", release)
-		}
+	// Only a completed Job is reported here: a failed Job left over from an earlier attempt does
+	// not make a successful removal unhealthy.
+	if job, _ := parseObj(secs["deletejob"]); job != nil && evalJobComplete(job).state == checkDone {
+		msg += fmt.Sprintf(" (helm-delete-%s Job Complete)", release)
 	}
 	return done("%s", msg)
+}
+
+// helmJobFailed reports whether a helm Job is beyond retrying: its Failed condition (the backoff
+// limit is used up), or too many failed attempts in a row.
+func helmJobFailed(job obj) bool {
+	return job != nil && (jobFailedCondition(job) || digInt(job, "status", "failed") >= helmJobFailedAttempts)
 }
 
 // helmDeleteJobLogScript is the log tail of helm-controller's uninstall Job.

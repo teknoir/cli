@@ -98,9 +98,12 @@ type writeInfo struct {
 // offWait follows an off (or on) write: the override keys it wrote, and, for off + applied, the
 // items that must disappear from the robot.
 type offWait struct {
-	ids  []string
-	on   bool
-	gone []*goneItem
+	ids []string
+	on  bool
+	// revision is the overrides revision the write left behind: published means the controller
+	// evaluated that revision (or a later one), not the state of an older one.
+	revision string
+	gone     []*goneItem
 }
 
 // waiter follows a change: published through the fleet API, applied and ready on the device.
@@ -394,7 +397,9 @@ func (w *waiter) publishedState(v *api.ConfigTargetView, info writeInfo) (bool, 
 			continue // evaluated, nothing reported: treat as in effect
 		}
 		switch s.State {
-		case api.StateActive, api.StateRedundant:
+		case api.StateActive, api.StateRedundant, api.StateOff:
+			// off is the controller's final verdict too: it published the configuration without the
+			// item, so there is nothing left to wait for.
 		case api.StatePending, "":
 			allFinal = false
 			w.progress(t, "pending")
@@ -507,7 +512,7 @@ func (w *waiter) expectation(ctx context.Context, id string, info writeInfo) (*d
 		want = pickImage(d.Images, sel)
 	}
 	if kind == "HelmChart" {
-		h := &expectedHelm{targetNS: ns, wantImage: want}
+		h := &expectedHelm{targetNS: ns, wantImage: want, stamp: c.stamp}
 		if vc := digStr(d.Rendered, "spec", "valuesContent"); vc != "" {
 			h.values = parseValuesYAML(vc)
 			if h.values == nil {

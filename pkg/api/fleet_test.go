@@ -228,7 +228,7 @@ func TestOffJSON(t *testing.T) {
 }
 
 func TestApplicationOffResultDecodes(t *testing.T) {
-	f, _ := fleetServer(t, 200, `{"dryRun":false,"ids":["HelmChart/default/a"],"skipped":[{"identity":"Deployment-x-default","reason":"not yours"}],
+	f, _ := fleetServer(t, 200, `{"dryRun":false,"ids":["HelmChart-a-default"],"skipped":[{"identity":"Deployment-x-default","reason":"not yours"}],
 	  "impacts":[{"identity":"HelmChart-a-default","kind":"HelmChart","deletesData":"yes","confirm":"c"}],
 	  "confirm":"c","previousByKey":{"HelmChart/default/a":{"valuesContent":"a: 1\n","off":true}}}`)
 	r, _, err := f.SetApplicationOff(context.Background(), "vs", "https://x/y", "apps/a", true, "", false, "c")
