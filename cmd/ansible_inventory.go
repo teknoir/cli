@@ -119,6 +119,9 @@ func deviceWireGuardActive(d *api.FleetDevice) bool { return d.WireGuardActive()
 // inventoryNeedsLogin reports whether the inventory can reach the device with this transport, which
 // is when its login is worth asking the platform for.
 func inventoryNeedsLogin(d *api.FleetDevice, transport string) bool {
+	if errDeviceDisabled(d, d.Name) != nil {
+		return false
+	}
 	wg := transport != transportTunnel && deviceWireGuardActive(d)
 	tunnel := transport != transportWireGuard && d.LegacyTunnelActive() && d.Tunnel.Legacy.Port != ""
 	return wg || tunnel
@@ -222,6 +225,10 @@ func buildInventory(devices []api.FleetDevice, logins map[string]api.FleetDevice
 		useWG := o.Transport != transportTunnel && hubErr == nil && deviceWireGuardActive(d)
 		port := d.Tunnel.Legacy.Port
 		tunnelOpen := d.LegacyTunnelActive() && port != ""
+		if errDeviceDisabled(d, name) != nil {
+			fmt.Fprintf(warn, "tnctl: device %q is disabled; left out of the inventory\n", name)
+			continue
+		}
 		if !useWG && !(o.Transport != transportWireGuard && tunnelOpen) {
 			fmt.Fprintf(warn, "tnctl: device %q is not reachable (%s); left out of the inventory\n", name, unreachableReason(o.Transport))
 			continue

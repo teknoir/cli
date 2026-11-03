@@ -11,9 +11,9 @@ usage, or follow the links below for full documentation.
 | [`add`](add.md) | | Add a resource (currently `add domain`). |
 | [`domain`](domain.md) | | Select the active domain. |
 | [`ns`](ns.md) | | Select the active namespace from the teamspaces of your account. |
-| [`device`](device.md) | `dev` | Print detailed status for a device. |
+| [`device`](device.md) | `dev` | Print detailed status for a device; `disable`, `enable`, `remove` (teamspace admin). |
 | [`devices`](devices.md) | `devs` | Print a summary list of devices in the namespace. |
-| [`robots`](robots.md) | | List the robots of the teamspace, or show one (`robot <name>`). |
+| [`robots`](robots.md) | | List the robots of the teamspace, or show one (`robot <name>`); `disable`, `enable`, `remove` (teamspace admin). |
 | [`config`](config.md) | | Read and override a robot's configuration: values, images, versions, revisions. |
 | [`exec`](exec.md) | | Run a command on a device over WireGuard and pass its exit code through. |
 | [`logs`](logs.md) | | Show the logs of a workload on a robot. |
@@ -35,6 +35,7 @@ needs in the teamspace:
 | `ns`, `devices`, `device`, `robots`, `robot`, `config get/diff/links`, `logs`, `wg status`, `port-forward <device>` (list services) | Any device role (viewer, developer or admin). |
 | `config set/unset/delete/reset/try/untry/wait/promote`, `exec`, `port-forward` (forward a service over WireGuard) | Developer role; opening a session also needs permission to open terminals (`pods/exec`). |
 | `ssh`, `bootstrap`, `ansible*`, legacy `port-forward`, `socks-proxy` | Developer role **and** permission to open terminals: they read the device login (user name, key, password) from the platform, which gives it only to those. A viewer gets a clear `403`. |
+| `robot`/`device` `disable`, `enable`, `remove` | Teamspace admin. Everyone else gets `403` and exit code 6. |
 
 A device outside your organisation units does not exist for you: the platform answers `404`, the same as for
 a name that is not there.
@@ -49,6 +50,7 @@ a name that is not there.
 | `the platform refused the request: not logged in, the token was rejected, or your account may not do this here` (exit 6) | An older gateway answers 401 and 403 alike with a redirect to the login page, so `tnctl` cannot tell which one it was. | `tnctl login` first; if that does not help, ask a teamspace owner. |
 | `this platform does not support tnctl <version> yet` (exit 2) | The platform has no fleet API (production and airgapped installs on the classic portal). | Use `tnctl v0.0.9-beta` there (see [Installation](../installation.md#older-versions)) or ask your platform admin to update. |
 | `too many requests` (HTTP 429, exit 9) | Device logins are limited to 30 calls per minute and user. | Wait the `Retry-After` time. |
+| `device <d> is disabled...` (exit 5, `-o json` code `device_disabled`) | A teamspace admin disabled the device: its MQTT key and sessions are withdrawn and Tunneling is off, so it cannot be reached. Its apps keep running. | A teamspace admin enables it with `tnctl device enable <d>`. |
 
 Every request carries `User-Agent: tnctl/<version> (<os>/<arch>)`, so the platform's logs show which `tnctl`
 made a call.

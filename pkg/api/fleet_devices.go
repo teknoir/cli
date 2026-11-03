@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	wgapi "github.com/teknoir/wg-tunnel/pkg/api"
 )
@@ -127,6 +128,79 @@ type FleetOrgPlacement struct {
 	} `json:"path"`
 }
 
+// FleetDisabled is the disabled state of a device (FleetDisabled in the platform's contract). The
+// object is set only while the device is disabled or on its way in or out of it; it is absent when
+// the device is enabled.
+type FleetDisabled struct {
+	// State is disabling (an admin disabled it and device-controller has not confirmed yet),
+	// disabled (confirmed) or enabling (an admin enabled it and device-controller has not confirmed).
+	State string `json:"state"`
+	// At is the RFC 3339 time of the disable; absent while enabling.
+	At string `json:"at,omitempty"`
+	// By is who disabled the device (an email); absent while enabling.
+	By string `json:"by,omitempty"`
+	// Reason is why it was disabled; absent while enabling or when none was given.
+	Reason string `json:"reason,omitempty"`
+	// SessionsClosed is the number of MQTT sessions device-controller closed.
+	SessionsClosed int `json:"sessionsClosed,omitempty"`
+	// Message is device-controller's last message, for people.
+	Message string `json:"message,omitempty"`
+	// Error is set when device-controller could not finish (a key or session, or Tunneling still on).
+	Error bool `json:"error,omitempty"`
+}
+
+// States of FleetDisabled.State.
+const (
+	DisabledStateDisabling = "disabling"
+	DisabledStateDisabled  = "disabled"
+	DisabledStateEnabling  = "enabling"
+)
+
+// Label is the short state shown in the Tunnel column and the tables: disabled, disabling, enabling,
+// not fully disabled (disabled or disabling with Error) or enabling failed (enabling with Error).
+func (d *FleetDisabled) Label() string {
+	if d == nil {
+		return ""
+	}
+	switch d.State {
+	case DisabledStateDisabling:
+		if d.Error {
+			return "not fully disabled"
+		}
+		return "disabling"
+	case DisabledStateDisabled:
+		if d.Error {
+			return "not fully disabled"
+		}
+		return "disabled"
+	case DisabledStateEnabling:
+		if d.Error {
+			return "enabling failed"
+		}
+		return "enabling"
+	}
+	return d.State
+}
+
+// Detail is " by <by> on <YYYY-MM-DD>: <reason>" for the parts the platform sent, empty when it sent
+// none. It describes a disable, not an enable.
+func (d *FleetDisabled) Detail() string {
+	if d == nil {
+		return ""
+	}
+	var b strings.Builder
+	if d.By != "" {
+		b.WriteString(" by " + d.By)
+	}
+	if t, err := time.Parse(time.RFC3339, d.At); err == nil {
+		b.WriteString(" on " + t.Format("2006-01-02"))
+	}
+	if d.Reason != "" {
+		b.WriteString(": " + d.Reason)
+	}
+	return b.String()
+}
+
 // FleetDevice is a device as the fleet API lists it (FleetDeviceSummary).
 type FleetDevice struct {
 	Name       string             `json:"name"`
@@ -145,6 +219,8 @@ type FleetDevice struct {
 	Services        []wgapi.ServiceSpec `json:"services,omitempty"`
 	ServicesInvalid bool                `json:"servicesInvalid,omitempty"`
 	Org             *FleetOrgPlacement  `json:"org,omitempty"`
+	// Disabled is set only while the device is disabled or on its way in or out of it.
+	Disabled *FleetDisabled `json:"disabled,omitempty"`
 }
 
 // WireGuardActive reports whether the device's WireGuard tunnel is usable.

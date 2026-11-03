@@ -37,8 +37,8 @@ The exit status of the remote command is the exit status of `tnctl exec`, whatev
 stdout and stderr as it comes. `<device>` is a device name or a robot name; the platform says which device
 runs the command. `tnctl` itself exits 1 when the device cannot be reached (no active WireGuard tunnel, the
 hub denies access, ssh cannot connect, which ssh reports as 255; a remote command that exits 255 looks the
-same), 2 for a usage mistake (no `--`, no command), 3 for an unknown robot or device, 4 on `--timeout`, 6 when
-you are not logged in. An exit code of the remote command can therefore look like one of these (3 to 9 are
+same), 2 for a usage mistake (no `--`, no command), 3 for an unknown robot or device, 4 on `--timeout`, 5 when
+the device is disabled (`-o json` code `device_disabled`), 6 when you are not logged in. An exit code of the remote command can therefore look like one of these (3 to 9 are
 `tnctl`'s own on the other commands); use `-o json` of the other commands, not `exec`, for machine decisions
 about the platform.
 

@@ -21,7 +21,7 @@ import (
 
 // call is one request a fleetStub saw.
 type call struct {
-	Method, Path, Query, Body, UA string
+	Method, Path, Query, Body, UA, ContentType string
 }
 
 // fleetStub is a fleet API: routes are "METHOD /path" below /api/device/fleet; each answers
@@ -39,7 +39,7 @@ func newFleetStub(t *testing.T) (*fleetStub, *Fleet) {
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		path := strings.TrimPrefix(r.URL.EscapedPath(), "/api/device/fleet")
-		c := call{r.Method, path, r.URL.RawQuery, string(b), r.Header.Get("User-Agent")}
+		c := call{r.Method, path, r.URL.RawQuery, string(b), r.Header.Get("User-Agent"), r.Header.Get("Content-Type")}
 		s.mu.Lock()
 		s.calls = append(s.calls, c)
 		h := s.routes[r.Method+" "+path]

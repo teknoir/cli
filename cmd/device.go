@@ -9,7 +9,7 @@ import (
 
 // newDeviceCmd is `tnctl device`.
 func newDeviceCmd(e *cliEnv) *cobra.Command {
-	return &cobra.Command{
+	c := &cobra.Command{
 		Use:     "device [device]",
 		Aliases: []string{"dev"},
 		Short:   "Print device status",
@@ -37,6 +37,9 @@ func newDeviceCmd(e *cliEnv) *cobra.Command {
 			return nil
 		},
 	}
+	// A device named disable, enable or remove is shadowed by these.
+	c.AddCommand(newDeviceDisableCmd(e), newDeviceEnableCmd(e), newDeviceRemoveCmd(e))
+	return c
 }
 
 func init() {

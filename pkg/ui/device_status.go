@@ -26,6 +26,32 @@ func colorTunnel(d *api.FleetDevice) string {
 	return pterm.Yellow(label)
 }
 
+// tunnelCell is the Tunnel column: the disabled label in red while the device is disabled,
+// otherwise its tunnel label.
+func tunnelCell(d *api.FleetDevice) string {
+	if d.Disabled != nil {
+		return pterm.Red(d.Disabled.Label())
+	}
+	return colorTunnel(d)
+}
+
+// accessCell is the Access row: enabled, or the disabled label with who disabled it, when and why,
+// and device-controller's message when it reported an error.
+func accessCell(d *api.FleetDevice) string {
+	dis := d.Disabled
+	if dis == nil {
+		return "enabled"
+	}
+	s := dis.Label()
+	if dis.State == api.DisabledStateDisabled || dis.State == api.DisabledStateDisabling {
+		s += dis.Detail()
+	}
+	if dis.Error && dis.Message != "" {
+		s += " (" + dis.Message + ")"
+	}
+	return s
+}
+
 func PrintDeviceStatus(device *api.FleetDevice) {
 	state := device.StateOrZero()
 
@@ -34,14 +60,20 @@ func PrintDeviceStatus(device *api.FleetDevice) {
 	// Top level info
 	pterm.DefaultSection.Println("Top Level Info")
 
-	tunnelStr := colorTunnel(device)
+	tunnelStr := tunnelCell(device)
 
 	infoTable := pterm.TableData{
 		{"Namespace", device.Namespace},
 		{"Tunnel", tunnelStr},
-		{"Config Hash", device.ConfigHash()},
-		{"Last Config Change", device.LastConfigChange()},
 	}
+	// An enabled device has no Access row: its Tunnel row already says it is reachable.
+	if device.Disabled != nil {
+		infoTable = append(infoTable, []string{"Access", accessCell(device)})
+	}
+	infoTable = append(infoTable,
+		[]string{"Config Hash", device.ConfigHash()},
+		[]string{"Last Config Change", device.LastConfigChange()},
+	)
 	pterm.DefaultTable.WithData(infoTable).Render()
 
 	// Device Resources
@@ -122,7 +154,7 @@ func PrintDevicesSummary(devices []api.FleetDevice) {
 		d := &devices[i]
 		state := d.StateOrZero()
 
-		tunnelStr := colorTunnel(d)
+		tunnelStr := tunnelCell(d)
 
 		alertsCount := state.AlertTotal()
 		alertsStr := fmt.Sprintf("%d", alertsCount)

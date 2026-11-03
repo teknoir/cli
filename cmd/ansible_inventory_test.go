@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -187,6 +188,57 @@ func TestBuildInventoryTransports(t *testing.T) {
 				t.Errorf("sanitised label group present = %v, want %v", ok, wg1)
 			}
 		})
+	}
+}
+
+// A disabled device is left out of the inventory and no login is asked for it, even while its
+// tunnel still looks active (the state is disabling, not disabled yet).
+func TestInventoryLeavesOutDisabledDevices(t *testing.T) {
+	on := mk("wg-a", "teknoir-demo", nil, "u", "", "KEY-A", true, "")
+	off := mk("wg-off", "teknoir-demo", nil, "u", "", "KEY-B", true, "")
+	off.d.Disabled = &api.FleetDisabled{
+		State: api.DisabledStateDisabling, At: "2026-11-02T10:00:00Z",
+		By: "anna@example.com", Reason: "Lost or stolen",
+	}
+	devs, logins := fleetOf(on, off)
+
+	p := newFakePlatform(t)
+	p.on("POST", "/devices/credentials", 200, `{"devices":[],"missing":[]}`)
+	e, _ := testEnv(t, p, nil)
+	fl, _, _, err := e.fleet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inventoryLogins(context.Background(), fl, devs, "auto"); err != nil {
+		t.Fatal(err)
+	}
+	posts := p.seen("POST", "/devices/credentials")
+	if len(posts) != 1 {
+		t.Fatalf("credential requests %+v", posts)
+	}
+	if posts[0].Body != `{"names":["wg-a"]}` {
+		t.Errorf("asked for the login of the disabled device: %s", posts[0].Body)
+	}
+	if !inventoryNeedsLogin(&on.d, "auto") {
+		t.Error("the enabled device needs its login")
+	}
+	if inventoryNeedsLogin(&off.d, "auto") {
+		t.Error("the disabled device does not need a login")
+	}
+
+	var warned bytes.Buffer
+	inv, err := buildInventory(devs, logins, testOpts(t, "auto"), &warned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, in := hostvars(inv)["wg-a"]; !in {
+		t.Error("the enabled device is missing from the inventory")
+	}
+	if _, in := hostvars(inv)["wg-off"]; in {
+		t.Error("the disabled device is in the inventory")
+	}
+	if !strings.Contains(warned.String(), `tnctl: device "wg-off" is disabled; left out of the inventory`) {
+		t.Errorf("warnings:\n%s", warned.String())
 	}
 }
 

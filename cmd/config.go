@@ -68,7 +68,8 @@ Exit codes:
   3  not found: no such robot, device or resource
   4  timeout: --wait ran out of time (the change itself is written)
   5  rejected: the platform refused it (invalid values or manifest, unknown revision, no such target,
-     not overridable), or device-controller refused an off and the item stays on the robot
+     not overridable), or device-controller refused an off and the item stays on the robot, or the
+     device is disabled (-o json code device_disabled)
   6  not logged in, token rejected, or not allowed (run tnctl login)
   7  applied but unhealthy: the helm Job failed or pods crash or cannot pull the image
   8  conflict: someone else changed the same thing (run the command again), or the item exists already,
