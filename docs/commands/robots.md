@@ -41,10 +41,61 @@ tnctl robot vision-station-01
 tnctl robot vision-station-01 -o json | jq .phase
 ```
 
+## Disable, enable or remove a robot
+
+```bash
+tnctl robot disable <robot> [--reason TEXT] [--wait] [--timeout DUR]
+tnctl robot enable  <robot> [--wait] [--timeout DUR]
+tnctl robot remove  <robot> --yes
+```
+
+A robot reaches the platform through its device: its MQTT key and sessions, and Tunneling. Disabling a robot
+withdraws all three, so `ssh`, `exec`, `port-forward` and `socks-proxy` can no longer reach it. k3s and the
+apps keep running on the hardware. Enabling it registers the MQTT key again and turns Tunneling back on; the
+robot reconnects by itself within a few minutes.
+
+Only a **teamspace admin** can disable, enable or remove robots. Everyone else gets `403` and exit code 6.
+
+- `--reason TEXT` is optional. It must be one line of at most 200 characters; a longer reason, or one with a
+  line break, is refused on the client with exit 2 and nothing is sent. The reason is stored with the
+  disable: to change it, enable and disable again.
+- `--wait` follows device-controller until it confirms the change (default `--timeout 3m`; exit 4 when it
+  runs out — the change is made and continues). Exit 7 means device-controller reports it could not finish,
+  for example because Tunneling could not be turned off. Enabling that fails reports exit 7 as well. An error the device still carries from before the disable (a failed enable) is not taken as
+  final until it has lasted 15 seconds; an error device-controller reports for this disable ends the wait at once. Exit 8
+  means another admin enabled the robot while a disable was being followed, or disabled it while an enable
+  was.
+- Disabling a robot that is already disabled, and enabling one that is already enabled, change nothing and
+  exit 0; `-o json` reports `"result":"noop"`.
+- `remove` removes the robot and, when the device is its own, the device with its keys, MQTT access and
+  tunnels. Without `--yes` it prints what would be removed to stderr and exits 2; nothing is removed. k3s
+  and the apps keep running on the hardware until you uninstall them.
+
+When the robot runs on a device that belongs to another robot (the platform returns `deviceOwner`), disable,
+enable and the device's removal are that robot's. `robot disable` and `robot enable` refuse with exit 5 and
+name the owner robot; `robot remove` removes only the robot and keeps the device. `tnctl robot <robot>` shows
+a `Device owner` row in that case.
+
+!!! note
+    A robot literally named `disable`, `enable` or `remove` cannot be reached as `tnctl robot <name>`: the
+    subcommand is found first. Reach it with `tnctl robot -- <name>`.
+
+```bash
+tnctl robot disable vision-station-01 --reason "Lost or stolen"
+tnctl robot disable vision-station-01 --wait
+tnctl robot enable vision-station-01 --wait
+tnctl robot remove vision-station-01 --yes
+```
+
+With `-o json`, disable and enable print one object of tnctl's own:
+`{"robot":"<r>","device":"<d>","result":"ok"|"noop","disabled":{...}}` (`disabled` is absent once the
+device is enabled). Remove prints `{"robot":"<r>","device":"<d>","deviceDeleted":true,"result":"ok"}`.
+
 ## Output and exit codes
 
 `-o json` and `-o yaml` print the platform's answer unchanged (also fields this version of tnctl does not
-know). Data goes to stdout, everything else to stderr. With `-o json`, errors are
+know), except `disable`, `enable` and `remove`, which print the object described above. Data goes to stdout,
+everything else to stderr. With `-o json`, errors are
 `{"error":{"code":"not_found","message":"..."}}` on stderr.
 
 | Exit | Meaning |
@@ -53,7 +104,11 @@ know). Data goes to stdout, everything else to stderr. With `-o json`, errors ar
 | 1 | error |
 | 2 | usage |
 | 3 | not found (`tnctl robot`: no such robot) |
-| 6 | not logged in, token rejected or not allowed: run `tnctl login` |
+| 4 | timeout: `--wait` ran out of time (the change is made and continues) |
+| 5 | rejected: the robot's device belongs to another robot, or the platform refused the change |
+| 6 | not logged in or token rejected (run `tnctl login`), or not allowed: disable, enable and remove need a teamspace admin, and logging in again does not help |
+| 7 | device-controller reports it could not finish the disable or the enable (`--wait`) |
+| 8 | conflict: another admin enabled the robot while `--wait` followed a disable, or disabled it while `--wait` followed an enable |
 
 A missing or rejected login comes back from the platform as a redirect to the login page; `tnctl` does not
 follow it and tells you to run `tnctl login` (exit 6).

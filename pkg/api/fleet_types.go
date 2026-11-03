@@ -99,6 +99,12 @@ type RobotSummary struct {
 	OldestOverrideAt string              `json:"oldestOverrideAt,omitempty"`
 	Fleets           []string            `json:"fleets"`
 	CreatedAt        string              `json:"createdAt,omitempty"`
+	// Disabled is set only while the robot's device is disabled or on its way in or out of it.
+	// It stays absent when DeviceOwner is set: disable, enable and removal are the owner's.
+	Disabled *FleetDisabled `json:"disabled,omitempty"`
+	// DeviceOwner is the other robot whose device this robot runs on; empty when it is its own.
+	// When set, disable, enable and the device's removal are that robot's.
+	DeviceOwner string `json:"deviceOwner,omitempty"`
 }
 
 // RobotDetail is GET robots/:name.

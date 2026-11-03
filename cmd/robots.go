@@ -121,7 +121,11 @@ func printRobotTable(w io.Writer, robots []api.RobotSummary, now time.Time) {
 		if len(r.Fleets) > 0 {
 			fleets = strings.Join(r.Fleets, ",")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Name, r.Type, r.Phase, readyNodes(r.Nodes), ov, fleets)
+		phase := r.Phase
+		if r.Disabled != nil {
+			phase = disabledLabel(r.Disabled)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Name, r.Type, phase, readyNodes(r.Nodes), ov, fleets)
 	}
 	_ = tw.Flush()
 }
@@ -145,7 +149,7 @@ func overrideAge(ts string, now time.Time) string {
 }
 
 func newRobotCmd(e *cliEnv) *cobra.Command {
-	return &cobra.Command{
+	c := &cobra.Command{
 		SilenceUsage: true,
 		Use:          "robot <name>",
 		Aliases:      []string{"rb"},
@@ -182,6 +186,9 @@ overrides. The effective configuration and the overrides are under 'tnctl config
 			return nil
 		},
 	}
+	// A robot named disable, enable or remove is shadowed by these.
+	c.AddCommand(newRobotDisableCmd(e), newRobotEnableCmd(e), newRobotRemoveCmd(e))
+	return c
 }
 
 func printRobot(w io.Writer, r *api.RobotDetail, now time.Time) {
@@ -195,11 +202,21 @@ func printRobot(w io.Writer, r *api.RobotDetail, now time.Time) {
 	}
 	row("Type", typ)
 	phase := r.Phase
-	if r.PhaseMessage != "" {
+	if r.Disabled != nil {
+		// The server's phase message is already the whole sentence ("Disabled by ... on ...: reason").
+		if r.PhaseMessage != "" {
+			phase = r.PhaseMessage
+		} else {
+			phase = disabledLabel(r.Disabled)
+		}
+	} else if r.PhaseMessage != "" {
 		phase += ": " + r.PhaseMessage
 	}
 	row("Phase", phase)
 	row("Device", r.Device)
+	if r.DeviceOwner != "" {
+		row("Device owner", fmt.Sprintf("%s belongs to robot %s; disable, enable and remove its device there", r.Device, r.DeviceOwner))
+	}
 	if len(r.Labels) > 0 {
 		keys := make([]string, 0, len(r.Labels))
 		for k := range r.Labels {

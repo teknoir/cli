@@ -85,7 +85,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "", "Target namespace")
 	rootCmd.PersistentFlags().StringVar(&device, "device", "", "Target device ID")
 	rootCmd.PersistentFlags().BoolVar(&config.Debug, "debug", false, "Enable debug output")
-	rootCmd.PersistentFlags().StringVarP(&outputFlag, "output", "o", "", "Output format of robots, robot and config: table, json or yaml (default table). Data goes to stdout, progress to stderr")
+	rootCmd.PersistentFlags().StringVarP(&outputFlag, "output", "o", "", "Output format of robots, robot, config and robot/device disable, enable, remove: table, json or yaml (default table). Data goes to stdout, progress to stderr")
 	rootCmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageErr("%v", err) })
 
 	// Bind flags to viper

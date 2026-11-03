@@ -44,6 +44,9 @@ var codeNames = map[int]string{
 // codeSessionExpiredName is the JSON error code of an expired login (exit code codeAuth).
 const codeSessionExpiredName = "session_expired"
 
+// codeDeviceDisabledName is the JSON error code of a device that a teamspace admin disabled.
+const codeDeviceDisabledName = "device_disabled"
+
 // cliError is an error with an exit code.
 type cliError struct {
 	code int
@@ -71,6 +74,11 @@ func classify(err error) error {
 	var ee *exitError
 	if errors.As(err, &ee) {
 		return err
+	}
+	var de *deviceDisabledError
+	if errors.As(err, &de) {
+		// the device is not reachable until an admin enables it: a refusal, not a transport failure
+		return &cliError{code: codeRejected, err: err}
 	}
 	if errors.Is(err, auth.ErrSessionExpired) {
 		// the refresh token is dead: same exit code as "not logged in", the action is the same
@@ -149,6 +157,11 @@ func writeError(w io.Writer, err error, format string) {
 		if expired {
 			// same exit code as "auth", its own name: agents can tell "log in again" from "not allowed"
 			name = codeSessionExpiredName
+		}
+		var de *deviceDisabledError
+		if errors.As(err, &de) {
+			// same exit code as "rejected", its own name: the device can be enabled again
+			name = codeDeviceDisabledName
 		}
 		body := map[string]any{"code": name, "message": err.Error()}
 		var ae *api.Error

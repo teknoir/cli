@@ -83,6 +83,28 @@ func (p *fakePlatform) onFunc(method, path string, f func(rec) (int, string)) {
 	p.routes[method+" "+path] = f
 }
 
+// seqAnswer is one answer of onSeq.
+type seqAnswer struct {
+	status int
+	body   string
+}
+
+// onSeq answers the first requests with the given answers, in order, and repeats the last one.
+func (p *fakePlatform) onSeq(method, path string, answers ...seqAnswer) {
+	if len(answers) == 0 {
+		p.t.Fatal("onSeq needs at least one answer")
+	}
+	var mu sync.Mutex
+	i := 0
+	p.onFunc(method, path, func(rec) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		a := answers[min(i, len(answers)-1)]
+		i++
+		return a.status, a.body
+	})
+}
+
 // seen returns the requests with this method and path, in order.
 func (p *fakePlatform) seen(method, path string) []rec {
 	p.mu.Lock()

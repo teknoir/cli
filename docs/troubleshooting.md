@@ -88,6 +88,11 @@ including resolved URLs and the exact `ssh` invocation used.
     the device has connected, then retry `ssh`/`port-forward`/`socks-proxy`. `tnctl devices` shows the state in
     the `Tunnel` column.
 
+??? failure "`device <d> is disabled ...` (exit 5, `-o json` code `device_disabled`)"
+    A teamspace admin disabled the device: its MQTT key and sessions are withdrawn and Tunneling is off, so
+    `ssh`, `exec`, `port-forward` and `socks-proxy` cannot reach it. Its apps keep running. A teamspace admin
+    enables it again with `tnctl device enable <d>`, and it reconnects within a few minutes.
+
 ??? failure "`tnctl: <name> has no active WireGuard tunnel; using the legacy SSH tunnel`"
     Not an error: the device only has the deprecated legacy SSH tunnel, which is used as a fallback.
 

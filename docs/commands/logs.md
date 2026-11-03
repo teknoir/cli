@@ -28,7 +28,7 @@ tnctl logs vision-station-01 notebook-77f875b6c-45s8v -c notebook --previous
 | `--all-containers` | All containers of the pod. |
 
 The exit status is kubectl's (ssh's 255, "cannot reach the robot", is exit 1). A name that is neither a resource nor a pod is exit 3; an ambiguous name is
-exit 2. Needs the robot's WireGuard tunnel, like [`exec`](exec.md).
+exit 2; a disabled device is exit 5 (`-o json` code `device_disabled`). Needs the robot's WireGuard tunnel, like [`exec`](exec.md).
 
 ## See also
 

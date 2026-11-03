@@ -7,6 +7,36 @@ import (
 	"github.com/teknoir/cli/pkg/api"
 )
 
+// deviceDisabledError is returned instead of a transport when the device is disabled: no tunnel
+// can reach it until a teamspace admin enables it again.
+type deviceDisabledError struct {
+	device   string
+	sentence string // " by <by> on <date>: <reason>", empty when the platform sent none
+}
+
+func (e *deviceDisabledError) Error() string {
+	return endSentence("device "+e.device+" is disabled"+e.sentence) +
+		" It cannot be reached until a teamspace admin enables it: tnctl device enable " + e.device
+}
+
+// errDeviceDisabled is the error to return for a device that is disabled or being disabled, nil when
+// it is enabled (also while it is being enabled again: that only needs a minute).
+func errDeviceDisabled(d *api.FleetDevice, deviceName string) error {
+	if d == nil || d.Disabled == nil {
+		return nil
+	}
+	switch d.Disabled.State {
+	case api.DisabledStateDisabled, api.DisabledStateDisabling:
+		return &deviceDisabledError{device: deviceName, sentence: d.Disabled.Detail()}
+	}
+	return nil
+}
+
+// errDeviceEnabling is returned when a device is being enabled again and has no tunnel yet.
+func errDeviceEnabling(deviceName string) error {
+	return fmt.Errorf("device %s is being enabled again; Tunneling comes back within a few minutes. See: tnctl device %s", deviceName, deviceName)
+}
+
 // tunnelKind is the transport a device is reached through.
 type tunnelKind int
 
@@ -35,6 +65,10 @@ func legacyFallbackNotice(deviceName string) string {
 // forceWG (the hidden --wireguard flag) never falls back. notice is a line for
 // stderr, empty when there is nothing to say.
 func chooseTunnel(d *api.FleetDevice, deviceName string, forceWG bool) (kind tunnelKind, notice string, err error) {
+	if err := errDeviceDisabled(d, deviceName); err != nil {
+		return 0, "", err
+	}
+	enabling := d.Disabled != nil && d.Disabled.State == api.DisabledStateEnabling
 	if deviceWireGuardActive(d) {
 		return tunnelWireGuard, "", nil
 	}
@@ -43,6 +77,9 @@ func chooseTunnel(d *api.FleetDevice, deviceName string, forceWG bool) (kind tun
 	}
 	if d.LegacyTunnelActive() {
 		return tunnelLegacy, legacyFallbackNotice(deviceName), nil
+	}
+	if enabling {
+		return 0, "", errDeviceEnabling(deviceName)
 	}
 	return 0, "", errTunnelingOff(deviceName)
 }

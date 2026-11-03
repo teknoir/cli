@@ -477,7 +477,7 @@ are on stderr. Errors with `-o json` are `{"error":{"code":"timeout","message":"
 | 2 | usage: bad arguments or flags, ambiguous resource name |
 | 3 | not found: no such robot, device or resource |
 | 4 | timeout: `--wait` ran out of time (the change itself is written) |
-| 5 | rejected: the platform refused it (invalid values or manifest, unknown revision, no such target, not overridable), or device-controller refused an off and the item stays on the robot |
+| 5 | rejected: the platform refused it (invalid values or manifest, unknown revision, no such target, not overridable), or device-controller refused an off and the item stays on the robot, or the device is disabled (`-o json` code `device_disabled`) |
 | 6 | not logged in, login expired (`-o json` code `session_expired`), token rejected, or not allowed: run `tnctl login` |
 | 7 | applied but unhealthy: the helm Job failed or pods crash or cannot pull the image |
 | 8 | conflict: someone else changed the same robot's overrides at the same time; run the command again. For `add`: the local item exists already (use `--replace`) or the identity is not yours to replace. For `remove`, `edit` and `get --manifest`: the item is not local, the message says where to remove it. For `off`/`on`: the platform refuses the change (a platform item, a local item, a CRD, a Namespace with items that stay on, a TOE too old) or the confirmation changed in between |
