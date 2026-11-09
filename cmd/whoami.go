@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 
@@ -38,29 +41,53 @@ what the bot may do: without a login and without reading the user's config.
 			if err != nil {
 				return err
 			}
-			if on, apiBase, ns, keyFile, err := botMode(); err != nil {
+			raw, bot, user, err := whoamiJSON(cmd.Context())
+			if err != nil {
 				return err
-			} else if on {
-				if err := checkBotNamespace(ns); err != nil {
-					return err
-				}
-				return runBotWhoami(cmd, format, botFleet(apiBase, ns, keyFile))
 			}
-			return runUserWhoami(cmd, format)
+			out := cmd.OutOrStdout()
+			if format != "table" {
+				return writeStructured(out, format, raw)
+			}
+			if bot != nil {
+				printBotWhoami(out, bot)
+				return nil
+			}
+			printUserWhoami(out, user)
+			return nil
 		},
 	}
 }
 
-// runBotWhoami asks the bot API who this bot is.
-func runBotWhoami(cmd *cobra.Command, format string, fl *api.Fleet) error {
-	who, raw, err := fl.BotWhoami(cmd.Context())
+// whoamiJSON is what `tnctl whoami -o json` prints, with the typed value the table is made from:
+// bot is set in bot mode, user otherwise.
+func whoamiJSON(ctx context.Context) (raw json.RawMessage, bot *api.BotWhoami, user *whoamiUserJSON, err error) {
+	if on, apiBase, ns, keyFile, err := botMode(); err != nil {
+		return nil, nil, nil, err
+	} else if on {
+		if err := checkBotNamespace(ns); err != nil {
+			return nil, nil, nil, err
+		}
+		who, raw, err := botFleet(apiBase, ns, keyFile).BotWhoami(ctx)
+		if err != nil {
+			return nil, nil, nil, classify(err)
+		}
+		return raw, who, nil, nil
+	}
+	cfg, err := config.Load()
 	if err != nil {
-		return classify(err)
+		return nil, nil, nil, err
 	}
-	out := cmd.OutOrStdout()
-	if format != "table" {
-		return writeStructured(out, format, raw)
+	id, err := tnauth.StoredIdentity(cfg.Domain)
+	if err != nil {
+		return nil, nil, nil, classify(err)
 	}
+	u := &whoamiUserJSON{Mode: "user", Email: id.Email, Domain: id.Domain, Namespace: cfg.GetNamespace()}
+	return marshalRaw(*u), nil, u, nil
+}
+
+// printBotWhoami prints who the bot is, for whom and what it may do.
+func printBotWhoami(out io.Writer, who *api.BotWhoami) {
 	unit := "—"
 	if who.Bot.Unit != nil && *who.Bot.Unit != "" {
 		unit = *who.Bot.Unit
@@ -85,31 +112,14 @@ func runBotWhoami(cmd *cobra.Command, format string, fl *api.Fleet) error {
 	default:
 		access += fmt.Sprintf(" (set to %s)", c)
 	}
-	fmt.Fprintf(out, "bot %s/%s for %s, access %s, unit %s\n", who.Bot.Namespace, who.Bot.Name, creator, access, unit)
-	return nil
+	_, _ = fmt.Fprintf(out, "bot %s/%s for %s, access %s, unit %s\n", who.Bot.Namespace, who.Bot.Name, creator, access, unit)
 }
 
-// runUserWhoami prints the account of the stored login and the teamspace tnctl targets.
-func runUserWhoami(cmd *cobra.Command, format string) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
+// printUserWhoami prints the account of the stored login and the teamspace tnctl targets.
+func printUserWhoami(out io.Writer, who *whoamiUserJSON) {
+	email := who.Email
+	if email == "" {
+		email = "an unknown user"
 	}
-	id, err := tnauth.StoredIdentity(cfg.Domain)
-	if err != nil {
-		return classify(err)
-	}
-	ns := cfg.GetNamespace()
-	out := cmd.OutOrStdout()
-	if format != "table" {
-		return writeStructured(out, format, marshalRaw(whoamiUserJSON{
-			Mode: "user", Email: id.Email, Domain: id.Domain, Namespace: ns,
-		}))
-	}
-	who := id.Email
-	if who == "" {
-		who = "an unknown user"
-	}
-	fmt.Fprintf(out, "user %s on %s, teamspace %s\n", who, id.Domain, ns)
-	return nil
+	_, _ = fmt.Fprintf(out, "user %s on %s, teamspace %s\n", email, who.Domain, who.Namespace)
 }

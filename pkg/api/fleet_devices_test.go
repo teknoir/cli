@@ -101,6 +101,40 @@ func TestTeamspacesRootFromBase(t *testing.T) {
 	}
 }
 
+func TestFleetWithNamespace(t *testing.T) {
+	f := NewFleet("teknoir.cloud", "teknoir-demo")
+	c := f.WithNamespace("other")
+	if c.Root != "https://teknoir.cloud/api/device/fleet" || c.Base != "https://teknoir.cloud/api/device/fleet/other" {
+		t.Errorf("copy %+v", c)
+	}
+	if f.Root != "https://teknoir.cloud/api/device/fleet" || f.Base != "https://teknoir.cloud/api/device/fleet/teknoir-demo" {
+		t.Errorf("the receiver changed: %+v", f)
+	}
+
+	// Root comes from Base when the client was built without one, and the name is escaped.
+	base := &Fleet{Base: "https://teknoir.cloud/api/device/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }}
+	c2 := base.WithNamespace("my ns")
+	if c2.Root != "https://teknoir.cloud/api/device/fleet" || c2.Base != "https://teknoir.cloud/api/device/fleet/my%20ns" {
+		t.Errorf("copy %+v", c2)
+	}
+	if base.Root != "" || base.Base != "https://teknoir.cloud/api/device/fleet/teknoir-demo" {
+		t.Errorf("the receiver changed: %+v", base)
+	}
+	if tok, err := c2.Token(context.Background()); err != nil || tok != "tok" {
+		t.Errorf("token %q %v: the copy must share the receiver's", tok, err)
+	}
+	if tok, err := f.WithNamespace("other").Token(context.Background()); err == nil && tok != "" {
+		// NewFleet's token is the login's: with no login it answers an error, never a token.
+		t.Errorf("token %q", tok)
+	}
+
+	// A bot's copy keeps the bot's refusals.
+	bot := NewBotFleet("https://bot.example/api/device/bot/v1", "teknoir-demo", "/nonexistent/key").WithNamespace("other")
+	if _, err := bot.Credentials(context.Background(), "d"); !errors.Is(err, ErrBotNoDeviceLogin) {
+		t.Errorf("bot copy answered %v", err)
+	}
+}
+
 func TestTeamspaces404MeansUnsupportedPlatform(t *testing.T) {
 	_, f := newFleetStub(t)
 	Version = "v1.2.3"
@@ -399,5 +433,77 @@ func TestFleetDeviceCredentials_RegistryIsOptional(t *testing.T) {
 	b, _ := json.Marshal(FleetDeviceCredentials{Name: "d"})
 	if strings.Contains(string(b), "registry") {
 		t.Fatalf("empty registry encoded: %s", b)
+	}
+}
+
+func TestTeamspacesRawKeepsUnknownFields(t *testing.T) {
+	s, f := newFleetStub(t)
+	s.on("GET /teamspaces", 200, `[{"name":"teknoir-demo","access":"write","bot":"b1"}]`)
+	raw, err := f.TeamspacesRaw(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"bot":"b1"`)) {
+		t.Errorf("raw lost a field the struct does not have: %s", raw)
+	}
+	got, err := f.Teamspaces(context.Background())
+	if err != nil || len(got) != 1 || got[0].Name != "teknoir-demo" {
+		t.Errorf("%+v %v", got, err)
+	}
+}
+
+func TestTeamspacesRaw404MeansUnsupportedPlatform(t *testing.T) {
+	_, f := newFleetStub(t)
+	_, err := f.TeamspacesRaw(context.Background())
+	var up *UnsupportedPlatformError
+	if !errors.As(err, &up) {
+		t.Fatalf("want *UnsupportedPlatformError, got %T %v", err, err)
+	}
+}
+
+func TestDevicesRawKeepsUnknownFields(t *testing.T) {
+	s, f := newFleetStub(t)
+	s.on("GET /teknoir-demo/devices", 200, `[{"name":"d1","bot":"b1"}]`)
+	raw, err := f.DevicesRaw(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"bot":"b1"`)) {
+		t.Errorf("raw lost a field the struct does not have: %s", raw)
+	}
+	got, err := f.Devices(context.Background(), nil)
+	if err != nil || len(got) != 1 || got[0].Name != "d1" {
+		t.Errorf("%+v %v", got, err)
+	}
+}
+
+func TestDevicesRawRefusesTooManyLabelsWithoutARequest(t *testing.T) {
+	s, f := newFleetStub(t)
+	many := map[string]string{}
+	for i := 0; i < MaxLabelFilters+1; i++ {
+		many[fmt.Sprintf("k%d", i)] = "v"
+	}
+	_, err := f.DevicesRaw(context.Background(), many)
+	if err == nil || !strings.Contains(err.Error(), "at most 20 label filters") {
+		t.Fatalf("too many labels accepted: %v", err)
+	}
+	if calls := s.seen(); len(calls) != 0 {
+		t.Errorf("a refused filter list sent %d request(s)", len(calls))
+	}
+}
+
+func TestDeviceRawKeepsUnknownFields(t *testing.T) {
+	s, f := newFleetStub(t)
+	s.on("GET /teknoir-demo/devices/d1", 200, `{"name":"d1","bot":"b1"}`)
+	raw, err := f.DeviceRaw(context.Background(), "d1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"bot":"b1"`)) {
+		t.Errorf("raw lost a field the struct does not have: %s", raw)
+	}
+	got, err := f.Device(context.Background(), "d1")
+	if err != nil || got.Name != "d1" {
+		t.Errorf("%+v %v", got, err)
 	}
 }

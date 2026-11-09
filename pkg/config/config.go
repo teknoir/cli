@@ -6,9 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/spf13/viper"
 )
+
+// viperMu guards the global viper between Save, which writes its maps, and Load and GetNamespace,
+// which read them; tool calls of `tnctl mcp` run concurrently.
+var viperMu sync.RWMutex
 
 // AuthConfig defines the authentication credentials for a domain.
 type AuthConfig struct {
@@ -42,6 +47,8 @@ func DefaultConfig() *Config {
 // GetNamespace returns the active namespace.
 // Precedence: Flags/Env > Domain-specific Config > Top-level Config > Default ("default").
 func (c *Config) GetNamespace() string {
+	viperMu.RLock()
+	defer viperMu.RUnlock()
 	if ns := viper.GetString("flag_namespace"); ns != "" {
 		return ns
 	}
@@ -59,7 +66,10 @@ func (c *Config) GetNamespace() string {
 // Load reads the configuration from Viper.
 func Load() (*Config, error) {
 	var cfg Config
-	if err := viper.Unmarshal(&cfg); err != nil {
+	viperMu.RLock()
+	err := viper.Unmarshal(&cfg)
+	viperMu.RUnlock()
+	if err != nil {
 		return nil, err
 	}
 	if cfg.Auths == nil {
@@ -70,6 +80,8 @@ func Load() (*Config, error) {
 
 // Save writes the configuration back to Viper and the config file.
 func (c *Config) Save() error {
+	viperMu.Lock()
+	defer viperMu.Unlock()
 	viper.Set("domain", c.Domain)
 	viper.Set("auths", c.Auths)
 	// Clear top-level namespace/debug to ensure they are only in Auths (or not at all for debug)

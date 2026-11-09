@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -52,4 +53,52 @@ func TestLoadFreshWithAMissingFileIsNotLoggedIn(t *testing.T) {
 	if len(cfg.Auths) != 0 {
 		t.Errorf("auths = %v, want none", cfg.Auths)
 	}
+}
+
+// Tool calls of `tnctl mcp` run concurrently: a token refresh in one saves the config while another
+// reads it. Without viperMu that is a concurrent map read and write, which kills the process.
+func TestConfigConcurrentLoadAndSave(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	path := filepath.Join(t.TempDir(), "tnctl.yaml")
+	content := "domain: teknoir.cloud\nauths:\n  teknoir_cloud:\n    access_token: tok\n    namespace: teknoir-demo\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	viper.SetConfigFile(path)
+	if err := viper.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			cfg, err := LoadFresh()
+			if err != nil {
+				t.Errorf("LoadFresh: %v", err)
+				return
+			}
+			if err := cfg.Save(); err != nil {
+				t.Errorf("Save: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			cfg, err := Load()
+			if err != nil {
+				t.Errorf("Load: %v", err)
+				return
+			}
+			if ns := cfg.GetNamespace(); ns != "teknoir-demo" {
+				t.Errorf("namespace %q", ns)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

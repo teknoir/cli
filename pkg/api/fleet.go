@@ -71,6 +71,15 @@ func NewBotFleet(apiBase, namespace, keyFile string) *Fleet {
 	return f
 }
 
+// WithNamespace returns a copy of f for another teamspace on the same fleet root: same token, and a
+// bot's client keeps its refusals. f is not changed.
+func (f *Fleet) WithNamespace(ns string) *Fleet {
+	c := *f
+	c.Root = f.rootURL()
+	c.Base = c.Root + "/" + url.PathEscape(ns)
+	return &c
+}
+
 // botAPIAllowed reports whether apiBase may carry the bot's key: https anywhere, http only on a
 // loopback address.
 func botAPIAllowed(apiBase string) bool {
