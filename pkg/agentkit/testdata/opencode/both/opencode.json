@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "theme": "tokyonight",
+  "mcp": {
+    "servers": {
+      "other": {
+        "type": "local",
+        "command": ["other-mcp", "serve"]
+      }
+    }
+  },
+  "permission": {"bash": {"git push": "ask"}}
+}

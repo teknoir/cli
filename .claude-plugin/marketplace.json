@@ -1,0 +1,13 @@
+{
+  "name": "teknoir-agent-kit",
+  "owner": {
+    "name": "Teknoir"
+  },
+  "plugins": [
+    {
+      "name": "teknoir",
+      "source": "./agentkit",
+      "description": "Operate Teknoir devices, robots and fleets: skills plus the read-only tnctl MCP server."
+    }
+  ]
+}

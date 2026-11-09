@@ -1,0 +1,34 @@
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    },
+    "teknoir": {
+      "type": "stdio",
+      "command": "tnctl",
+      "args": [
+        "mcp"
+      ]
+    }
+  },
+  "numStartups": 42,
+  "oauthAccount": {
+    "emailAddress": "anders@example.com",
+    "organizationName": null
+  },
+  "projects": {
+    "/home/anders/git/ai": {
+      "allowedTools": [
+        "Bash(go test:*)"
+      ],
+      "history": [
+        {
+          "display": "tnctl robots",
+          "pastedContents": {}
+        }
+      ]
+    }
+  }
+}
+

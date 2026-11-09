@@ -1,0 +1,9 @@
+{
+  // OpenCode's own config, with the comments a JSONC reader accepts.
+  "$schema": "https://opencode.ai/config.json",
+  "theme": "tokyonight",
+  /* Servers: nothing yet. */
+  "mcp": {
+    "servers": {},
+  },
+}

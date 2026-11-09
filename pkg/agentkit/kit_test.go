@@ -1,0 +1,164 @@
+package agentkit
+
+import (
+	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+
+	kit "github.com/teknoir/cli/agentkit"
+)
+
+// The embedded kit holds what an install needs, and its manifests are well formed.
+func TestEmbeddedKit(t *testing.T) {
+	for _, name := range []string{
+		"skills/teknoir-platform/SKILL.md",
+		"hooks/teknoir-guard",
+		".claude-plugin/plugin.json",
+		".mcp.json",
+		"AGENTS.snippet.md",
+	} {
+		if _, err := fs.Stat(kit.FS, name); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// README.md documents the kit and is not installed.
+	if _, err := fs.Stat(kit.FS, "README.md"); err == nil {
+		t.Error("README.md is embedded")
+	}
+
+	var plugin map[string]any
+	if err := json.Unmarshal(kitFile(t, ".claude-plugin/plugin.json"), &plugin); err != nil {
+		t.Fatalf("plugin.json: %v", err)
+	}
+	if plugin["name"] != "teknoir" || plugin["version"] != kit.Version || plugin["license"] != "Apache-2.0" {
+		t.Errorf("plugin.json: %v", plugin)
+	}
+	if _, ok := plugin["hooks"]; ok {
+		t.Error("plugin.json has a hooks key: an executable hook must be installed explicitly")
+	}
+	if _, err := fs.Stat(kit.FS, ".claude-plugin/hooks/hooks.json"); err == nil {
+		t.Error("the plugin carries hooks/hooks.json")
+	}
+
+	var mcp struct {
+		MCPServers map[string]struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(kitFile(t, ".mcp.json"), &mcp); err != nil {
+		t.Fatalf(".mcp.json: %v", err)
+	}
+	if s := mcp.MCPServers["teknoir"]; s.Command != "tnctl" || len(s.Args) != 1 || s.Args[0] != "mcp" {
+		t.Errorf(".mcp.json: %+v", mcp)
+	}
+
+	// The guard is a script that drains its input and allows.
+	guard := string(kitFile(t, "hooks/teknoir-guard"))
+	if !strings.HasPrefix(guard, "#!/bin/sh\n") || !strings.Contains(guard, "cat >/dev/null") || !strings.HasSuffix(guard, "exit 0\n") {
+		t.Errorf("the guard:\n%s", guard)
+	}
+}
+
+// The SKILL.md frontmatter has exactly the keys the kit promises, and names the kit version.
+func TestSkillFrontmatter(t *testing.T) {
+	body := string(kitFile(t, "skills/teknoir-platform/SKILL.md"))
+	if !strings.HasPrefix(body, "---\n") {
+		t.Fatal("no frontmatter")
+	}
+	end := strings.Index(body[4:], "\n---\n")
+	if end < 0 {
+		t.Fatal("no end of the frontmatter")
+	}
+	fm := body[4 : 4+end]
+	lines := strings.Split(fm, "\n")
+	want := []string{"name:", "description:", "license:", "metadata:", "  teknoir-kit-version:"}
+	var keys []string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "  ") {
+			keys = append(keys, l[:strings.Index(l, ":")+1])
+			continue
+		}
+		if i := strings.Index(l, ":"); i >= 0 {
+			keys = append(keys, l[:i+1])
+		}
+	}
+	if strings.Join(keys, "|") != strings.Join(want, "|") {
+		t.Errorf("frontmatter keys %v, want %v", keys, want)
+	}
+	if !strings.Contains(fm, "name: teknoir-platform") {
+		t.Errorf("the skill is not named after its directory:\n%s", fm)
+	}
+	if !strings.Contains(fm, `teknoir-kit-version: "`+kit.Version+`"`) {
+		t.Errorf("the kit version:\n%s", fm)
+	}
+	if !strings.Contains(fm, "license: Apache-2.0") {
+		t.Errorf("the license:\n%s", fm)
+	}
+	for _, must := range []string{"tnctl whoami", "credentials", "kit 0.2"} {
+		if !strings.Contains(body, must) {
+			t.Errorf("SKILL.md does not mention %q", must)
+		}
+	}
+	if n := strings.Count(body, "\n"); n > 40 || n < 10 {
+		t.Errorf("SKILL.md is %d lines; the placeholder is about 10 lines of body", n)
+	}
+}
+
+// The repository's marketplace file offers the kit as ./agentkit.
+func TestMarketplace(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", ".claude-plugin", "marketplace.json"))
+	if err != nil {
+		t.Skipf("no marketplace.json in the repository: %v", err)
+	}
+	var m struct {
+		Name  string `json:"name"`
+		Owner struct {
+			Name string `json:"name"`
+		} `json:"owner"`
+		Plugins []struct {
+			Name        string `json:"name"`
+			Source      string `json:"source"`
+			Description string `json:"description"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("marketplace.json: %v", err)
+	}
+	if m.Name != "teknoir-agent-kit" || m.Owner.Name != "Teknoir" {
+		t.Errorf("marketplace.json: %+v", m)
+	}
+	if len(m.Plugins) != 1 || m.Plugins[0].Name != "teknoir" || m.Plugins[0].Source != "./agentkit" {
+		t.Errorf("plugins: %+v", m.Plugins)
+	}
+	var plugin map[string]any
+	if err := json.Unmarshal(kitFile(t, ".claude-plugin/plugin.json"), &plugin); err != nil {
+		t.Fatal(err)
+	}
+	if m.Plugins[0].Description != plugin["description"] {
+		t.Errorf("the marketplace description differs from the plugin's")
+	}
+}
+
+// The skill directory is named after the skill, and no skill carries an unknown file.
+func TestSkillDirectories(t *testing.T) {
+	dirs, err := fs.ReadDir(kit.FS, "skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := regexp.MustCompile(`(?m)^name: (\S+)$`)
+	for _, d := range dirs {
+		if !d.IsDir() {
+			t.Errorf("skills/%s is not a directory", d.Name())
+			continue
+		}
+		body := string(kitFile(t, "skills/"+d.Name()+"/SKILL.md"))
+		if m := name.FindStringSubmatch(body); m == nil || m[1] != d.Name() {
+			t.Errorf("skills/%s/SKILL.md: name %v", d.Name(), m)
+		}
+	}
+}

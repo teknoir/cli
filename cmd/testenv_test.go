@@ -239,7 +239,7 @@ func runCLIWith(t *testing.T, e *cliEnv, extra []*cobra.Command, args ...string)
 	root.PersistentPreRunE = botPreRun
 	root.AddCommand(newConfigCmd(e), newRobotsCmd(e), newRobotCmd(e), newExecCmd(e), newLogsCmd(e),
 		newNsCmd(e), newDevicesCmd(e), newDeviceCmd(e), newWhoamiCmd(e), newAPICmd(e),
-		newInspectCmd(e), newMqttCmd(e))
+		newInspectCmd(e), newMqttCmd(e), newAgentCmd(e))
 	root.AddCommand(extra...)
 	var out, errb bytes.Buffer
 	root.SetOut(&out)

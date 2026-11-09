@@ -88,6 +88,7 @@ tnctl inspect release vision-station-01 default/notebook  # an installed Helm re
 tnctl mqtt stream /devices/+/state/# --count 10           # the devices' MQTT messages
 tnctl api GET teknoir-demo/robots                         # the fleet API, directly
 tnctl whoami                                              # which account, which teamspace
+tnctl agent install --agent claude --mcp                  # the Teknoir agent kit, for a coding agent
 ```
 
 Overrides win over every git layer, need no commit and are published to the robot by the platform;
@@ -97,6 +98,21 @@ See [`docs/concepts/robot-configuration.md`](docs/concepts/robot-configuration.m
 `inspect` ([docs](docs/commands/inspect.md)), `mqtt stream` ([docs](docs/commands/mqtt.md)), `api`
 ([docs](docs/commands/api.md)) and `whoami` ([docs](docs/commands/whoami.md)) work for a person and inside a
 TeknoirBot ([bot mode](docs/bot-mode.md)).
+
+### Agents
+
+`tnctl` carries the **Teknoir agent kit**: Agent Skills, the guard hook and the registration of the
+read-only `teknoir` MCP server, everything a coding agent (Claude Code, Codex, OpenCode) needs to operate
+devices and robots. It installs offline, from the binary itself, with your own `tnctl` rights:
+
+```bash
+tnctl agent install --agent claude --mcp     # Claude Code: skills and the MCP server
+tnctl agent install --agent codex --mcp      # Codex (opencode likewise)
+tnctl agent install --project --mcp --hooks  # into this repository, with the guard hook
+tnctl agent list --check                     # does the install match this tnctl?
+```
+
+See [`docs/commands/agent.md`](docs/commands/agent.md) and [`agentkit/README.md`](agentkit/README.md).
 
 ### 3. Tunneling
 

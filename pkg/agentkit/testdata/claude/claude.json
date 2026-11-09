@@ -1,0 +1,16 @@
+{
+  "numStartups": 42,
+  "projects": {
+    "/home/anders/git/ai": {
+      "allowedTools": ["Bash(go test:*)"],
+      "history": [{"display": "tnctl robots", "pastedContents": {}}]
+    }
+  },
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    }
+  },
+  "oauthAccount": {"emailAddress": "anders@example.com", "organizationName": null}
+}

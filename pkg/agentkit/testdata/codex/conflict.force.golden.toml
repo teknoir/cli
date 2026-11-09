@@ -1,0 +1,13 @@
+# A codex config that already names another teknoir server.
+model = "gpt-5-codex"
+
+[mcp_servers.teknoir]
+command = "tnctl"
+args = ["mcp"]
+
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+
+[profiles.fast]
+model = "gpt-5-codex-mini"

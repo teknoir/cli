@@ -25,6 +25,7 @@ nav:
       - devices: commands/devices.md
       - robots: commands/robots.md
       - whoami: commands/whoami.md
+      - agent: commands/agent.md
       - api: commands/api.md
       - inspect: commands/inspect.md
       - mqtt: commands/mqtt.md

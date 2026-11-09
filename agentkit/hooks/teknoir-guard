@@ -1,0 +1,5 @@
+#!/bin/sh
+# Teknoir guard hook; the rules come with the skills (kit 0.2).
+# Until then the hook only drains its input: it allows every command that reaches it.
+cat >/dev/null
+exit 0

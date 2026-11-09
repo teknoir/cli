@@ -21,6 +21,7 @@ usage, or follow the links below for full documentation.
 | [`mqtt`](mqtt.md) | | Follow the MQTT messages of the teamspace's devices. |
 | [`api`](api.md) | | Call the fleet API directly. |
 | [`whoami`](whoami.md) | | Show who this `tnctl` works as: a person, or a TeknoirBot. |
+| [`agent`](agent.md) | | Install the Teknoir agent kit (skills, MCP server, guard hook) for Claude Code, Codex and OpenCode. |
 | [`ssh`](ssh.md) | | Open an interactive SSH session on a device through its tunnel. |
 | [`port-forward`](port-forward.md) | | Forward a local port to a service on a device (`port-forward <device>` lists its services). |
 | [`wg status`](wg.md) | | Show whether and how a device is reachable through its WireGuard tunnel, and which services it publishes. |
