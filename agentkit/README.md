@@ -94,7 +94,8 @@ Also in the kit:
 
 - `hooks/teknoir-guard` — the guard hook. In this version it allows every call; the refusal rules come
   with `tnctl agent guard`.
-- `.mcp.json` and `.claude-plugin/plugin.json` — the `teknoir` MCP server and the Claude Code plugin.
+- `.mcp.json` and `.claude-plugin/plugin.json` — the `teknoir` MCP server, which is
+  [`tnctl mcp`](../docs/commands/mcp.md), and the Claude Code plugin.
 - `AGENTS.snippet.md` — the section `--agents-md` puts between markers in `./AGENTS.md`.
 
 `agentkit/test/` holds the tests of the skills' scripts (`bash agentkit/test/scripts-b.sh`, `scripts-c.sh`);

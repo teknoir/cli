@@ -96,8 +96,8 @@ Overrides win over every git layer, need no commit and are published to the robo
 See [`docs/concepts/robot-configuration.md`](docs/concepts/robot-configuration.md) for the model, [`docs/commands/config.md`](docs/commands/config.md), [`robots`](docs/commands/robots.md),
 [`exec`](docs/commands/exec.md) and [`logs`](docs/commands/logs.md).
 `inspect` ([docs](docs/commands/inspect.md)), `mqtt stream` ([docs](docs/commands/mqtt.md)), `api`
-([docs](docs/commands/api.md)) and `whoami` ([docs](docs/commands/whoami.md)) work for a person and inside a
-TeknoirBot ([bot mode](docs/bot-mode.md)).
+([docs](docs/commands/api.md)), `whoami` ([docs](docs/commands/whoami.md)) and `mcp`
+([docs](docs/commands/mcp.md)) work for a person and inside a TeknoirBot ([bot mode](docs/bot-mode.md)).
 
 ### Agents
 
@@ -111,6 +111,8 @@ tnctl agent install --agent codex --mcp      # Codex (opencode likewise)
 tnctl agent install --project --mcp --hooks  # into this repository, with the guard hook
 tnctl agent list --check                     # does the install match this tnctl?
 ```
+
+`tnctl mcp` is the server these registrations start ([docs](docs/commands/mcp.md)).
 
 See [`docs/commands/agent.md`](docs/commands/agent.md) and [`agentkit/README.md`](agentkit/README.md).
 

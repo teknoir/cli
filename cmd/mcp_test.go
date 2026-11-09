@@ -3,10 +3,13 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"sort"
@@ -36,6 +39,7 @@ var mcpToolNames = []string{
 	"get_config",
 	"list_kinds",
 	"prom_query",
+	"mqtt_sample",
 	"inspect_pod",
 	"inspect_logs",
 	"inspect_release",
@@ -259,6 +263,7 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 		"get_overview": {}, "get_problems": {},
 		"get_config": {"target"}, "list_kinds": {},
 		"prom_query":      {"query"},
+		"mqtt_sample":     {"topics"},
 		"inspect_pod":     {"pod", "pod_namespace", "robot"},
 		"inspect_logs":    {"pod", "pod_namespace", "robot"},
 		"inspect_release": {"release", "release_namespace", "robot"},
@@ -296,7 +301,7 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"inspect_logs", "inspect_pod", "inspect_release", "get_problems", "prom_query"} {
+	for _, name := range []string{"inspect_logs", "inspect_pod", "inspect_release", "get_problems", "prom_query", "mqtt_sample"} {
 		for _, tool := range tools.Tools {
 			if tool.Name == name && !strings.HasSuffix(tool.Description, mcpUntrustedNote) {
 				t.Errorf("%s: description does not end with the untrusted note: %q", name, tool.Description)
@@ -333,7 +338,7 @@ func TestMCPServerStartsWithoutAFleet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 16 {
+	if len(tools.Tools) != 17 {
 		t.Fatalf("%d tools", len(tools.Tools))
 	}
 	if fleetCalls != 0 || domainCalls != 0 {
@@ -1115,6 +1120,7 @@ func TestMCPWritesNothingToStdout(t *testing.T) {
 		mcpRegister(p, c)
 	}
 	p.on("GET", mcpAcmePath("/overview"), 500, `{"error":{"message":"boom"}}`)
+	p.on("GET", "/mqtt/stream", 200, "event: message\ndata: {\"topic\":\"/devices/d1/state/x\",\"payload\":\"hi\",\"retain\":false,\"ts\":\"2026-11-08T10:00:00Z\"}\n\n")
 	e, _ := testEnv(t, p, nil)
 
 	ptermBuf := capturePterm(t)
@@ -1127,6 +1133,9 @@ func TestMCPWritesNothingToStdout(t *testing.T) {
 			if c.tool == name && args == nil {
 				args = c.args
 			}
+		}
+		if args == nil && name == "mqtt_sample" {
+			args = map[string]any{"topics": []string{"/devices/+/state/#"}}
 		}
 		if res := mcpCall(t, cs, name, args); res == nil || res.IsError {
 			t.Errorf("%s did not succeed: %+v", name, res)
@@ -1142,4 +1151,535 @@ func TestMCPWritesNothingToStdout(t *testing.T) {
 	if got := ptermBuf.String(); got != "" {
 		t.Errorf("tnctl mcp wrote %q through pterm", got)
 	}
+}
+
+// ---------- (p) mqtt_sample ----------
+
+// mcpSampleFast makes "seconds" of mqtt_sample 100 ms for the test.
+func mcpSampleFast(t *testing.T) {
+	t.Helper()
+	old := mcpSampleUnit
+	mcpSampleUnit = 100 * time.Millisecond
+	t.Cleanup(func() { mcpSampleUnit = old })
+}
+
+// mcpSSE serves the MQTT stream of the teamspace: write sends what arrives, and with hold the
+// request stays open until the client ends it. ended receives one value per request that ended; the
+// headers are flushed before write, so a test can cancel the call once the server holds it.
+func mcpSSE(t *testing.T, write func(w http.ResponseWriter), hold bool) (*httptest.Server, chan struct{}) {
+	t.Helper()
+	ended := make(chan struct{}, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/fleet/teknoir-demo/mqtt/stream" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if write != nil {
+			write(w)
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if hold {
+			<-r.Context().Done()
+		}
+		ended <- struct{}{}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, ended
+}
+
+// mcpSampleEnv points the fleet's teamspace at srv.
+func mcpSampleEnv(t *testing.T, srv *httptest.Server) *cliEnv {
+	t.Helper()
+	noBotMode(t)
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo",
+			Token: func(context.Context) (string, error) { return "tok", nil }}, "teknoir.cloud", "teknoir-demo", nil
+	}
+	return e
+}
+
+// mcpSSEEvent is one server-sent event, its data the JSON of v.
+func mcpSSEEvent(name string, v any) string {
+	b, _ := json.Marshal(v)
+	return "event: " + name + "\ndata: " + string(b) + "\n\n"
+}
+
+// mcpSSEMsg is a message event of the stream with a text payload.
+func mcpSSEMsg(topic, payload string) string {
+	return mcpSSEEvent("message", map[string]any{
+		"topic": topic, "payload": payload, "retain": false, "ts": "2026-11-08T10:00:00Z"})
+}
+
+// mcpSampleOut is a decoded mqtt_sample result.
+type mcpSampleOut struct {
+	Messages  []json.RawMessage `json:"messages"`
+	Dropped   int               `json:"dropped"`
+	StoppedBy string            `json:"stoppedBy"`
+}
+
+// mcpSampleOf decodes a successful mqtt_sample result, with its text.
+func mcpSampleOf(t *testing.T, res *mcp.CallToolResult) (mcpSampleOut, string) {
+	t.Helper()
+	if res.IsError {
+		t.Fatalf("error result: %s", mcpText(t, res))
+	}
+	text := mcpText(t, res)
+	var out mcpSampleOut
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("result %q: %v", text, err)
+	}
+	return out, text
+}
+
+// mcpSampleFields is one message of a sample, as its keys.
+func mcpSampleFields(t *testing.T, raw json.RawMessage) map[string]json.RawMessage {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("message %q: %v", raw, err)
+	}
+	return fields
+}
+
+// mcpWaitEnded waits at most 2 s for the server's request to end.
+func mcpWaitEnded(t *testing.T, ended <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ended:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the stream's request did not end")
+	}
+}
+
+// sampleArgs is the arguments of the calls below.
+func sampleArgs(extra map[string]any) map[string]any {
+	args := map[string]any{"topics": []string{"/devices/+/state/#"}}
+	for k, v := range extra {
+		args[k] = v
+	}
+	return args
+}
+
+func TestMCPMqttSampleStopsAtMax(t *testing.T) {
+	mcpSampleFast(t)
+	srv, ended := mcpSSE(t, func(w http.ResponseWriter) {
+		for i := 0; i < 5; i++ {
+			_, _ = io.WriteString(w, mcpSSEMsg(fmt.Sprintf("/devices/d1/state/x%d", i), "m"))
+		}
+	}, true)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"max": 2})))
+	if len(got.Messages) != 2 || got.StoppedBy != "max" {
+		t.Errorf("%d messages, stopped by %q, want 2 and max", len(got.Messages), got.StoppedBy)
+	}
+	mcpWaitEnded(t, ended)
+}
+
+func TestMCPMqttSampleStopsAtSeconds(t *testing.T) {
+	mcpSampleFast(t)
+	srv, ended := mcpSSE(t, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, mcpSSEMsg("/devices/d1/state/x", "one"))
+	}, true)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	start := time.Now()
+	got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"seconds": 1})))
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("the sample took %s", d)
+	}
+	if len(got.Messages) != 1 || got.StoppedBy != "seconds" {
+		t.Errorf("%d messages, stopped by %q, want 1 and seconds", len(got.Messages), got.StoppedBy)
+	}
+	mcpWaitEnded(t, ended)
+}
+
+func TestMCPMqttSampleSilenceEndsAtSeconds(t *testing.T) {
+	mcpSampleFast(t)
+	srv, ended := mcpSSE(t, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, ": keepalive\n\n")
+	}, true)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	got, text := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"seconds": 1})))
+	if !strings.Contains(text, `"messages": []`) {
+		t.Errorf("messages are %q, want []", text)
+	}
+	if got.StoppedBy != "seconds" {
+		t.Errorf("stopped by %q, want seconds", got.StoppedBy)
+	}
+	mcpWaitEnded(t, ended)
+}
+
+func TestMCPMqttSampleEndsWithTheStream(t *testing.T) {
+	srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, mcpSSEMsg("/devices/d1/state/x", "one"))
+	}, false)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)))
+	if len(got.Messages) != 1 || got.StoppedBy != "end" {
+		t.Errorf("%d messages, stopped by %q, want 1 and end", len(got.Messages), got.StoppedBy)
+	}
+}
+
+func TestMCPMqttSampleCountsDropped(t *testing.T) {
+	srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, mcpSSEEvent("dropped", map[string]any{"count": 2, "reason": "rate"}))
+		_, _ = io.WriteString(w, mcpSSEEvent("dropped", map[string]any{"count": 3, "reason": "slow"}))
+		_, _ = io.WriteString(w, mcpSSEEvent("other", map[string]any{"count": 100}))
+	}, false)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)))
+	if got.Dropped != 5 {
+		t.Errorf("dropped %d, want 5", got.Dropped)
+	}
+}
+
+func TestMCPMqttSampleStreamErrorIsAnErrorResult(t *testing.T) {
+	t.Run("the platform's error", func(t *testing.T) {
+		const msg = "The MQTT broker closed the connection."
+		srv, ended := mcpSSE(t, func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, mcpSSEEvent("error", map[string]any{"code": "broker_closed", "message": msg}))
+		}, true)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+		res := mcpCall(t, cs, "mqtt_sample", sampleArgs(nil))
+		if !res.IsError || !strings.Contains(mcpText(t, res), msg) {
+			t.Errorf("%+v %q", res, mcpText(t, res))
+		}
+		mcpWaitEnded(t, ended)
+	})
+
+	t.Run("data that is not JSON", func(t *testing.T) {
+		srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, "event: error\ndata: not-json\n\n")
+		}, false)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+		if res := mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)); !res.IsError {
+			t.Errorf("a damaged error event was a success: %q", mcpText(t, res))
+		}
+	})
+}
+
+func TestMCPMqttSampleKeepsTheServersFields(t *testing.T) {
+	srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, mcpSSEEvent("message", map[string]any{
+			"topic": "/devices/d1/state/x", "payload": "hi", "retain": false,
+			"ts": "2026-11-08T10:00:00Z", "extra": 1}))
+		_, _ = io.WriteString(w, mcpSSEEvent("message", map[string]any{
+			"topic": "/devices/d1/state/y", "payloadBase64": "AAEC", "retain": false, "ts": "t"}))
+	}, false)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)))
+	if len(got.Messages) != 2 {
+		t.Fatalf("%d messages", len(got.Messages))
+	}
+	text := mcpSampleFields(t, got.Messages[0])
+	if string(text["extra"]) != "1" {
+		t.Errorf("extra %q: a field tnctl does not know was dropped", text["extra"])
+	}
+	if _, ok := text["payloadBase64"]; ok {
+		t.Error("payloadBase64 was added to a text message")
+	}
+	if string(text["payload"]) != `"hi"` {
+		t.Errorf("payload %q", text["payload"])
+	}
+	bin := mcpSampleFields(t, got.Messages[1])
+	if _, ok := bin["payload"]; ok {
+		t.Error("payload was added to a base64 message")
+	}
+	if string(bin["payloadBase64"]) != `"AAEC"` {
+		t.Errorf("payloadBase64 %q", bin["payloadBase64"])
+	}
+}
+
+func TestMCPMqttSampleCutsALongPayload(t *testing.T) {
+	t.Run("text", func(t *testing.T) {
+		long := strings.Repeat("ü", (100<<10)/2) // 102400 bytes
+		srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, mcpSSEMsg("/devices/d1/state/x", long))
+		}, false)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+		got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)))
+		if len(got.Messages) != 1 {
+			t.Fatalf("%d messages", len(got.Messages))
+		}
+		fields := mcpSampleFields(t, got.Messages[0])
+		var payload string
+		if err := json.Unmarshal(fields["payload"], &payload); err != nil {
+			t.Fatalf("payload %q: %v", fields["payload"], err)
+		}
+		if len(payload) > 4096 || !utf8.ValidString(payload) {
+			t.Errorf("payload is %d bytes (valid %v), want at most 4096 at a rune boundary",
+				len(payload), utf8.ValidString(payload))
+		}
+		if got, want := string(fields["payloadBytes"]), "102400"; got != want {
+			t.Errorf("payloadBytes %s, want %s", got, want)
+		}
+		if got := string(fields["payloadTruncated"]); got != "true" {
+			t.Errorf("payloadTruncated %s, want true", got)
+		}
+	})
+
+	t.Run("base64", func(t *testing.T) {
+		enc := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), 100<<10))
+		srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, mcpSSEEvent("message", map[string]any{"topic": "/devices/d1/state/x", "payloadBase64": enc}))
+		}, false)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+		got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)))
+		if len(got.Messages) != 1 {
+			t.Fatalf("%d messages", len(got.Messages))
+		}
+		fields := mcpSampleFields(t, got.Messages[0])
+		var cut string
+		if err := json.Unmarshal(fields["payloadBase64"], &cut); err != nil {
+			t.Fatalf("payloadBase64 %q: %v", fields["payloadBase64"], err)
+		}
+		if len(cut) != 4096 {
+			t.Errorf("%d base64 characters, want 4096", len(cut))
+		}
+		if _, err := base64.StdEncoding.DecodeString(cut); err != nil {
+			t.Errorf("the cut base64 does not decode: %v", err)
+		}
+		if got, want := string(fields["payloadBytes"]), "102400"; got != want {
+			t.Errorf("payloadBytes %s, want %s", got, want)
+		}
+	})
+}
+
+func TestMCPMqttSampleStopsAtTheSizeCap(t *testing.T) {
+	t.Run("4 KiB messages", func(t *testing.T) {
+		payload := strings.Repeat("m", 4096)
+		srv, ended := mcpSSE(t, func(w http.ResponseWriter) {
+			for i := 0; i < 100; i++ {
+				_, _ = io.WriteString(w, mcpSSEMsg(fmt.Sprintf("/devices/d1/state/x%d", i), payload))
+			}
+		}, true)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+		got, text := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"max": 200})))
+		if got.StoppedBy != "size" {
+			t.Errorf("stopped by %q, want size", got.StoppedBy)
+		}
+		var v any
+		if err := json.Unmarshal([]byte(text), &v); err != nil {
+			t.Errorf("the result is not valid JSON: %v", err)
+		}
+		if strings.Contains(text, "truncated") {
+			t.Errorf("the result was truncated by mcpResult: %d bytes", len(text))
+		}
+		mcpWaitEnded(t, ended)
+	})
+
+	t.Run("800 byte messages", func(t *testing.T) {
+		payload := strings.Repeat("m", 800)
+		srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
+			for i := 0; i < 200; i++ {
+				_, _ = io.WriteString(w, mcpSSEMsg(fmt.Sprintf("/devices/d1/state/x%d", i), payload))
+			}
+		}, false)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+		got, text := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"max": 200})))
+		if got.StoppedBy != "max" && got.StoppedBy != "size" {
+			t.Errorf("stopped by %q, want max or size", got.StoppedBy)
+		}
+		if strings.Contains(text, "truncated") {
+			t.Errorf("the result was truncated by mcpResult: %d bytes", len(text))
+		}
+	})
+}
+
+func TestMCPMqttSampleEndsWhenTheClientCancelsTheCall(t *testing.T) {
+	mcpSampleFast(t)
+	started := make(chan struct{}, 1)
+	srv, ended := mcpSSE(t, func(http.ResponseWriter) { started <- struct{}{} }, true)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "mqtt_sample", Arguments: sampleArgs(map[string]any{"seconds": 30})})
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the sample did not start")
+	}
+	cancel()
+	mcpWaitEnded(t, ended)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the call did not return")
+	}
+}
+
+func TestMCPMqttSampleRunsOneAtATime(t *testing.T) {
+	mcpSampleFast(t)
+	var mu sync.Mutex
+	requests := 0
+	started := make(chan struct{}, 1)
+	srv, _ := mcpSSE(t, func(http.ResponseWriter) {
+		mu.Lock()
+		requests++
+		first := requests == 1
+		mu.Unlock()
+		if first {
+			started <- struct{}{}
+		}
+	}, true)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	first := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "mqtt_sample",
+			Arguments: sampleArgs(map[string]any{"seconds": 30})})
+		if err != nil {
+			t.Errorf("the first sample: %v", err)
+		}
+		first <- res
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first sample did not start")
+	}
+	res := mcpCall(t, cs, "mqtt_sample", sampleArgs(nil))
+	if want := "another mqtt_sample is running; try again when it ends"; !res.IsError || mcpText(t, res) != want {
+		t.Errorf("%+v %q, want %q", res, mcpText(t, res), want)
+	}
+	select {
+	case res := <-first:
+		if got, _ := mcpSampleOf(t, res); got.StoppedBy != "seconds" {
+			t.Errorf("the first sample stopped by %q", got.StoppedBy)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first sample did not end")
+	}
+	if got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"seconds": 1}))); got.StoppedBy != "seconds" {
+		t.Errorf("after the first sample: stopped by %q", got.StoppedBy)
+	}
+	mu.Lock()
+	n := requests
+	mu.Unlock()
+	if n != 2 {
+		t.Errorf("%d requests, want 2: a refused sample sent one", n)
+	}
+}
+
+func TestMCPMqttSampleRefusesBadInput(t *testing.T) {
+	noBotMode(t)
+	p := newFakePlatform(t)
+	e, _ := testEnv(t, p, nil)
+	cs := mcpClient(t, newMCPServer(e))
+
+	nine := make([]string, 9)
+	for i := range nine {
+		nine[i] = fmt.Sprintf("/devices/d%d/state/#", i)
+	}
+	const topicErr = `"/other/x" is not a topic a stream can follow: use /devices/<device|+>/state/#, ` +
+		`/devices/<device|+>/events/#, or a concrete topic below /devices/<device|+>/state/ or /devices/<device|+>/events/`
+	for _, c := range []struct {
+		args map[string]any
+		want string
+	}{
+		{map[string]any{"topics": []string{}}, "a stream follows 1 to 8 topics, got 0"},
+		{map[string]any{"topics": nine}, "a stream follows 1 to 8 topics, got 9"},
+		{map[string]any{"topics": []string{"/other/x"}}, topicErr},
+		{sampleArgs(map[string]any{"seconds": 31}), "seconds must be from 1 to 30"},
+		{sampleArgs(map[string]any{"seconds": -1}), "seconds must be from 1 to 30"},
+		{sampleArgs(map[string]any{"max": 201}), "max must be from 1 to 200"},
+		{sampleArgs(map[string]any{"max": -1}), "max must be from 1 to 200"},
+	} {
+		res := mcpCall(t, cs, "mqtt_sample", c.args)
+		if !res.IsError || mcpText(t, res) != c.want {
+			t.Errorf("%v: %+v %q, want %q", c.args, res, mcpText(t, res), c.want)
+		}
+	}
+	if n := p.countAll(); n != 0 {
+		t.Errorf("a refused input sent %d request(s)", n)
+	}
+}
+
+func TestMCPMqttSampleInBotMode(t *testing.T) {
+	p, conns := sseBotAPI(t, func(int) string { return msgEvent("/devices/d1/state/x", "one") })
+	cs := mcpClient(t, newMCPServer(botEnv(t, p)))
+	got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)))
+	if got.StoppedBy != "end" || len(got.Messages) != 1 {
+		t.Errorf("%d messages, stopped by %q, want 1 and end", len(got.Messages), got.StoppedBy)
+	}
+	p.mu.Lock()
+	n := *conns
+	p.mu.Unlock()
+	if n != 1 {
+		t.Errorf("%d requests, want 1", n)
+	}
+
+	p2, conns2 := sseBotAPI(t, func(int) string { return msgEvent("/devices/d1/state/x", "one") })
+	cs = mcpClient(t, newMCPServer(botEnv(t, p2)))
+	res := mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"namespace": "other"}))
+	if want := "a TeknoirBot works only in its own teamspace (teknoir-demo)"; !res.IsError || mcpText(t, res) != want {
+		t.Errorf("%+v %q, want %q", res, mcpText(t, res), want)
+	}
+	p2.mu.Lock()
+	n = *conns2
+	p2.mu.Unlock()
+	if n != 0 {
+		t.Errorf("%d requests for another teamspace", n)
+	}
+}
+
+func TestMCPMqttSampleEndsWhenTheServerStops(t *testing.T) {
+	mcpSampleFast(t)
+	started := make(chan struct{}, 1)
+	srv, ended := mcpSSE(t, func(http.ResponseWriter) { started <- struct{}{} }, true)
+	e := mcpSampleEnv(t, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	st, ct := mcp.NewInMemoryTransports()
+	done := make(chan error, 1)
+	go func() { done <- runMCP(ctx, e, st) }()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(context.Background(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	go func() {
+		_, _ = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "mqtt_sample",
+			Arguments: sampleArgs(map[string]any{"seconds": 30})})
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the sample did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("runMCP: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMCP did not return")
+	}
+	mcpWaitEnded(t, ended)
 }

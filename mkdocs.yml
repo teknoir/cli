@@ -29,6 +29,7 @@ nav:
       - api: commands/api.md
       - inspect: commands/inspect.md
       - mqtt: commands/mqtt.md
+      - mcp: commands/mcp.md
       - config: commands/config.md
       - exec: commands/exec.md
       - logs: commands/logs.md

@@ -48,8 +48,8 @@ tnctl agent install --project --agent claude --mcp --agents-md   # in this repos
 
 With no `--agent` every agent is installed for, in the user scope.
 
-- `--mcp` registers the read-only `teknoir` MCP server (`tnctl mcp`) in the agent's config file, merging
-  into what is there: every other server and key survives. A `teknoir` entry that differs is kept and
+- `--mcp` registers the read-only `teknoir` MCP server ([`tnctl mcp`](mcp.md)) in the agent's config
+  file, merging into what is there: every other server and key survives. A `teknoir` entry that differs is kept and
   warned about unless `--force` replaces it.
 - `--hooks` installs the guard hook for Claude Code and adds a `PreToolUse` entry for `Bash` and the
   `teknoir` MCP tools (`mcp__teknoir__*`, or `mcp__plugin_teknoir_teknoir__*` when the server comes from
