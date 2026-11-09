@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# teknoirbot-build — build an image on a TeknoirBot's own computer and push it to its registry.
+#
+# The build runs on the bot's builder (buildkitd in the guest namespace teknoir-build), which the
+# agent reaches with buildctl and BUILDKIT_HOST; the image is pushed to the bot's own registry,
+# where the bot's k3s pulls it back as localhost:5000/<app>:<tag>.
+set -euo pipefail
+
+BUILDCTL="${BUILDCTL:-buildctl}"
+
+usage() {
+  cat <<'EOF'
+Build an image on the TeknoirBot's computer and push it to the bot's registry.
+
+Usage:
+  teknoirbot-build <context-dir> <app> [--tag T] [--file Dockerfile]
+
+Arguments:
+  <context-dir>   the build context; everything in it is sent to the builder
+  <app>           the image name: a DNS label (lowercase letters, digits and '-')
+  --tag T         the tag (default: the UTC time, YYYYmmdd-HHMMSS); use a new one for
+                  every build, since the Deployment pulls with imagePullPolicy IfNotPresent
+  --file PATH     the Dockerfile (default: <context-dir>/Dockerfile)
+
+Options:
+  -h, --help      print this help
+
+The image is pushed to registry.teknoir-build.svc.cluster.local:5000/<app>:<tag> and printed as
+localhost:5000/<app>:<tag>, the name a Deployment in `apps` uses.
+EOF
+}
+
+die() {
+  echo "teknoirbot-build: $*" >&2
+  exit 2
+}
+
+context=""
+app=""
+tag=""
+dockerfile=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --tag)
+      [ $# -ge 2 ] || die "--tag needs a value"
+      tag="$2"
+      shift 2
+      ;;
+    --tag=*)
+      tag="${1#*=}"
+      shift
+      ;;
+    --file)
+      [ $# -ge 2 ] || die "--file needs a value"
+      dockerfile="$2"
+      shift 2
+      ;;
+    --file=*)
+      dockerfile="${1#*=}"
+      shift
+      ;;
+    -*)
+      die "unknown option $1 (see --help)"
+      ;;
+    *)
+      if [ -z "$context" ]; then
+        context="$1"
+      elif [ -z "$app" ]; then
+        app="$1"
+      else
+        die "too many arguments: $1 (see --help)"
+      fi
+      shift
+      ;;
+  esac
+done
+
+[ -n "$context" ] || die "name the context directory (see --help)"
+[ -n "$app" ] || die "name the app (see --help)"
+[ -d "$context" ] || die "$context is not a directory"
+
+if [ -n "$dockerfile" ]; then
+  [ -f "$dockerfile" ] || die "$dockerfile is not a file"
+else
+  dockerfile="$context/Dockerfile"
+  [ -f "$dockerfile" ] || die "no Dockerfile in $context: add one or pass --file"
+fi
+
+case "$app" in
+  ''|*[!a-z0-9-]*) die "$app is not a DNS label: use lowercase letters, digits and '-' only" ;;
+esac
+case "$app" in
+  -*|*-) die "$app is not a DNS label: it must start and end with a letter or a digit" ;;
+esac
+[ "${#app}" -le 63 ] || die "$app is longer than 63 characters"
+
+if [ -z "$tag" ]; then
+  tag="$(date -u +%Y%m%d-%H%M%S)"
+fi
+case "$tag" in
+  ''|*[!A-Za-z0-9_.-]*) die "$tag is not a valid tag: use letters, digits, '.', '_' and '-'" ;;
+esac
+case "$tag" in [-.]*) die "$tag must start with a letter, a digit or '_'" ;; esac
+[ "${#tag}" -le 128 ] || die "$tag is longer than 128 characters"
+
+if [ -z "${BUILDKIT_HOST:-}" ]; then
+  die "BUILDKIT_HOST is not set: this is not a TeknoirBot's computer. On a laptop, build with docker, nerdctl or buildx and push to a registry the device can pull from"
+fi
+
+# buildctl writes $HOME/.docker before it dials the builder; a read-only or missing HOME (a pod
+# with HOME=/) would abort the build at once.
+if [ -z "${HOME:-}" ] || [ ! -w "$HOME" ]; then
+  DOCKER_CONFIG="$(mktemp -d)"
+  export DOCKER_CONFIG
+  trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+fi
+
+context="$(cd "$context" && pwd)"
+dockerfile="$(cd "$(dirname "$dockerfile")" && pwd)/$(basename "$dockerfile")"
+
+"$BUILDCTL" --addr "$BUILDKIT_HOST" build \
+  --frontend dockerfile.v0 \
+  --progress plain \
+  --local "context=$context" \
+  --local "dockerfile=$(dirname "$dockerfile")" \
+  --opt "filename=$(basename "$dockerfile")" \
+  --output "type=image,name=registry.teknoir-build.svc.cluster.local:5000/$app:$tag,push=true,registry.insecure=true"
+
+echo "image: localhost:5000/$app:$tag"
