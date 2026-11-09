@@ -47,7 +47,12 @@ func (p *op) uninstallHooks() error {
 // mergeSettings adds (or, with remove, drops) the guard's PreToolUse entry in a Claude Code
 // settings.json, keeping every other key, hook and permission as it is.
 func (p *op) mergeSettings(path, guard string, remove bool) error {
-	data, err := os.ReadFile(path)
+	target, why := p.foreignTarget(path)
+	if why != "" {
+		p.refuse(path, string(AgentClaude), why+" "+settingsSnippet(guard), why+" "+settingsSnippet(guard))
+		return nil
+	}
+	data, err := os.ReadFile(target)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -103,7 +108,7 @@ func (p *op) mergeSettings(path, guard string, remove bool) error {
 	} else if err := setJSONValue(&top, "hooks", hooks); err != nil {
 		return err
 	}
-	return p.writeJSON(path, top, 0o644)
+	return p.writeJSON(target, top, 0o644)
 }
 
 // entryUsesGuard reports whether a PreToolUse entry runs the guard at guard, or any teknoir-guard.

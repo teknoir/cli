@@ -46,6 +46,17 @@ func (f *agentFlags) options() (*agentkit.Options, error) {
 	if home, err := os.UserHomeDir(); err == nil {
 		o.Home = home
 	}
+	// The user-scope config directories the agents themselves read: an empty variable is unset.
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		o.ClaudeConfigDir = dir
+		o.ClaudeConfigFile = filepath.Join(dir, ".claude.json")
+	}
+	if dir := os.Getenv("CODEX_HOME"); dir != "" {
+		o.CodexHome = dir
+	}
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		o.OpencodeConfigDir = filepath.Join(dir, "opencode")
+	}
 	if wd, err := os.Getwd(); err == nil {
 		o.ProjectDir = wd
 	}
@@ -264,6 +275,10 @@ func printAgentList(w io.Writer, res *agentkit.ListResult) {
 		fmt.Fprintln(w, "no agent kit install found: run tnctl agent install")
 	}
 	for _, r := range res.Roots {
+		if r.Problem != "" {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", r.Root, r.Agent, r.Problem)
+			continue
+		}
 		state := "ok"
 		if !r.InSync() {
 			var why []string

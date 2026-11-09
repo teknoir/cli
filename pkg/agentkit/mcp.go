@@ -71,15 +71,15 @@ func (p *op) claudeMCPFile() (string, os.FileMode) {
 	if p.o.Scope == ScopeProject {
 		return filepath.Join(p.o.ProjectDir, ".mcp.json"), 0o644
 	}
-	// ~/.claude.json holds the whole Claude Code state: a new one is private.
-	return filepath.Join(p.o.Home, ".claude.json"), 0o600
+	// The .claude.json of user scope holds the whole Claude Code state: a new one is private.
+	return p.o.ClaudeConfigFile, 0o600
 }
 
 func (p *op) codexMCPFile() string {
 	if p.o.Scope == ScopeProject {
 		return filepath.Join(p.o.ProjectDir, ".codex", "config.toml")
 	}
-	return filepath.Join(p.o.Home, ".codex", "config.toml")
+	return filepath.Join(p.o.CodexHome, "config.toml")
 }
 
 // opencodeMCPFile is the OpenCode config: the .jsonc when there is one, the .json when there is not,
@@ -88,7 +88,7 @@ func (p *op) codexMCPFile() string {
 func (p *op) opencodeMCPFile() (string, bool) {
 	dir := p.o.ProjectDir
 	if p.o.Scope == ScopeUser {
-		dir = filepath.Join(p.o.Home, ".config", "opencode")
+		dir = p.o.OpencodeConfigDir
 	}
 	jsonc := filepath.Join(dir, "opencode.jsonc")
 	if _, err := os.Stat(jsonc); err == nil {
@@ -112,7 +112,12 @@ func (p *op) registerOpencodeMCP() error {
 // registerJSONEntry merges the MCP entry into a JSON (or, with jsonc, possibly JSONC) config file.
 // entryAt is the readable name of the entry's place, for messages.
 func (p *op) registerJSONEntry(path string, def os.FileMode, jsonc bool, container []string, entryAt, agent string, entry json.RawMessage) error {
-	top, err := p.readJSONConfig(path, jsonc, agent, opencodeSnippet)
+	target, why := p.foreignTarget(path)
+	if why != "" {
+		p.refuse(path, agent, why+" "+opencodeSnippet, why+" "+opencodeSnippet)
+		return nil
+	}
+	top, err := p.readJSONConfig(target, jsonc, agent, opencodeSnippet)
 	if top == nil {
 		return err
 	}
@@ -139,12 +144,18 @@ func (p *op) registerJSONEntry(path string, def os.FileMode, jsonc bool, contain
 		p.r.warn("%s already has a different %s.%s; kept it (use --force to replace it)", path, entryAt, mcpServerName)
 		return nil
 	}
-	return p.writeJSON(path, top, def)
+	return p.writeJSON(target, top, def)
 }
 
 // removeJSONEntry drops the MCP entry from a JSON config file, when it is ours.
 func (p *op) removeJSONEntry(path string, def os.FileMode, jsonc bool, container []string, entry json.RawMessage, agent string) error {
-	top, err := p.readJSONConfig(path, jsonc, agent, "remove "+opencodeSnippet)
+	target, why := p.foreignTarget(path)
+	if why != "" {
+		snippet := "remove " + opencodeSnippet
+		p.refuse(path, agent, why+" "+snippet, why+" "+snippet)
+		return nil
+	}
+	top, err := p.readJSONConfig(target, jsonc, agent, "remove "+opencodeSnippet)
 	if top == nil {
 		return err
 	}
@@ -165,7 +176,7 @@ func (p *op) removeJSONEntry(path string, def os.FileMode, jsonc bool, container
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	p.r.act(ActionDelete, path, agent, "teknoir MCP entry")
-	return p.writeJSON(path, top, def)
+	return p.writeJSON(target, top, def)
 }
 
 // readJSONConfig reads a JSON config file, returning nil (and an error) when it cannot be edited. A
@@ -186,7 +197,7 @@ func (p *op) readJSONConfig(path string, jsonc bool, agent, snippet string) (map
 			p.r.act(ActionRefuse, path, agent, note)
 			p.r.warn("%s has comments, so tnctl does not edit it. %s", path, note)
 			p.refused = append(p.refused, path)
-			p.reason = fmt.Sprintf("%s has comments: edit it by hand and run the command again", path)
+			p.reasons = append(p.reasons, fmt.Sprintf("%s has comments: edit it by hand and run the command again", path))
 			return nil, nil
 		}
 	}
@@ -284,105 +295,186 @@ func jsonEqual(a, b []byte) bool {
 // tomlEntryBlock is the codex config entry of the MCP server.
 const tomlEntryBlock = "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"
 
+// tomlSnippet is what the user adds or removes by hand.
+func tomlSnippet(remove bool) string {
+	if remove {
+		return "remove " + strings.TrimRight(tomlEntryBlock, "\n")
+	}
+	return tomlEntryBlock
+}
+
+// refuseCodex refuses an edit of the Codex config, naming the snippet to add or remove by hand.
+func (p *op) refuseCodex(path, why string, remove bool) {
+	snippet := tomlSnippet(remove)
+	p.refuse(path, string(AgentCodex), why+" "+snippet, why+" "+snippet)
+}
+
 func (p *op) registerCodexMCP() error {
 	path := p.codexMCPFile()
-	data, err := os.ReadFile(path)
-	existed := err == nil
+	agent := string(AgentCodex)
+	target, why := p.foreignTarget(path)
+	if why != "" {
+		p.refuseCodex(path, why, false)
+		return nil
+	}
+	data, err := os.ReadFile(target)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	text := string(data)
-	var parsed map[string]any
-	if strings.TrimSpace(text) != "" {
-		if err := toml.Unmarshal(data, &parsed); err != nil {
-			return fmt.Errorf("%s is not valid TOML: %w", path, err)
-		}
+	parsed, err := tomlParse(text)
+	if err != nil {
+		return fmt.Errorf("%s is not valid TOML: %w", path, err)
 	}
-	existing, found := tomlServer(parsed)
-	note := "mcp_servers.teknoir"
+	note := "mcp_servers." + mcpServerName
+	existing, isTable := tomlServer(parsed)
+	_, present := tomlServerValue(parsed)
 	switch {
-	case found && tomlServerIsOurs(existing):
-		p.r.act(ActionAlreadyRegister, path, string(AgentCodex), note)
+	case !present:
+		text = appendTOML(text, tomlEntryBlock)
+	case tomlServerIsOurs(existing):
+		p.r.act(ActionAlreadyRegister, path, agent, note)
 		return nil
-	case found && !p.o.Force:
-		p.r.act(ActionSkip, path, string(AgentCodex), note+" differs: kept it (use --force to replace it)")
+	case !p.o.Force:
+		p.r.act(ActionSkip, path, agent, note+" differs: kept it (use --force to replace it)")
 		p.r.warn("%s already has a different [mcp_servers.%s]; kept it (use --force to replace it)", path, mcpServerName)
 		return nil
-	case found:
+	case !isTable:
+		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: replace it by hand",
+			path, mcpServerName, mcpServerName), false)
+		return nil
+	default:
 		start, end, ok := tomlTableRange(text, "mcp_servers."+mcpServerName)
 		if !ok {
-			return fmt.Errorf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: replace it by hand", path, mcpServerName, mcpServerName)
+			p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: replace it by hand",
+				path, mcpServerName, mcpServerName), false)
+			return nil
 		}
-		text = text[:start] + tomlReplacement(tomlEntryBlock, text[end:]) + text[end:]
+		text = text[:start] + tomlEntryBlock + tomlJoin(text[end:])
 		note += ": replaced a differing one (--force)"
-	default:
-		text = appendTOML(text, tomlEntryBlock)
 	}
-	p.r.act(ActionRegister, path, string(AgentCodex), note)
+	// The new text is checked before anything is written, a dry run included: tnctl never promises a
+	// register that would break the file.
+	entry, err := tomlKitEntry()
+	if err != nil {
+		return err
+	}
+	if !p.codexEditOK(path, string(data), text, entry, false) {
+		return nil
+	}
+	p.r.act(ActionRegister, path, agent, note)
 	if p.o.DryRun {
 		return nil
 	}
-	if err := p.overwriteFile(path, []byte(text), 0o644); err != nil {
-		return err
-	}
-	// A write that breaks the file would be worse than no entry at all: put the original back.
-	if err := toml.Unmarshal([]byte(text), &parsed); err != nil {
-		if existed {
-			_ = p.overwriteFile(path, data, 0o644)
-		} else {
-			_ = os.Remove(path)
-		}
-		return fmt.Errorf("%s would no longer parse as TOML; it is unchanged: %w", path, err)
-	}
-	return nil
+	return p.overwriteFile(target, []byte(text), 0o644)
 }
 
 func (p *op) removeCodexMCP() error {
 	path := p.codexMCPFile()
-	data, err := os.ReadFile(path)
+	agent := string(AgentCodex)
+	target, why := p.foreignTarget(path)
+	if why != "" {
+		p.refuseCodex(path, why, true)
+		return nil
+	}
+	data, err := os.ReadFile(target)
 	if errors.Is(err, fs.ErrNotExist) {
-		p.r.act(ActionSkip, path, string(AgentCodex), "no config file")
+		p.r.act(ActionSkip, path, agent, "no config file")
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	var parsed map[string]any
-	if err := toml.Unmarshal(data, &parsed); err != nil {
+	text := string(data)
+	parsed, err := tomlParse(text)
+	if err != nil {
 		return fmt.Errorf("%s is not valid TOML: %w", path, err)
 	}
-	existing, found := tomlServer(parsed)
+	existing, isTable := tomlServer(parsed)
+	_, present := tomlServerValue(parsed)
 	switch {
-	case !found:
-		p.r.act(ActionSkip, path, string(AgentCodex), "no mcp_servers."+mcpServerName)
+	case !present:
+		p.r.act(ActionSkip, path, agent, "no mcp_servers."+mcpServerName)
 		return nil
-	case !tomlServerIsOurs(existing):
-		p.r.act(ActionSkip, path, string(AgentCodex), "a different mcp_servers."+mcpServerName+": kept it")
+	case !isTable || !tomlServerIsOurs(existing):
+		p.r.act(ActionSkip, path, agent, "a different mcp_servers."+mcpServerName+": kept it")
 		p.r.warn("%s has a [mcp_servers.%s] that is not the kit's; kept it", path, mcpServerName)
 		return nil
 	}
-	text := string(data)
 	start, end, ok := tomlTableRange(text, "mcp_servers."+mcpServerName)
 	if !ok {
-		return fmt.Errorf("%s defines mcp_servers.%s without a table header: remove it by hand", path, mcpServerName)
+		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a table header: remove it by hand",
+			path, mcpServerName), true)
+		return nil
 	}
-	text = text[:start] + text[end:]
-	// Drop the blank line the entry was separated by.
-	text = strings.Replace(text, "\n\n\n", "\n\n", 1)
-	p.r.act(ActionDelete, path, string(AgentCodex), "mcp_servers."+mcpServerName)
+	// Only the seam is trimmed: the blank line the entry was separated by. Nothing else in the file is
+	// rewritten, so a multi-line string keeps every line it has.
+	before, after := text[:start], text[end:]
+	switch {
+	case after == "":
+		before = strings.TrimRight(before, "\n")
+		if before != "" {
+			before += "\n"
+		}
+	case strings.HasSuffix(before, "\n\n") && strings.HasPrefix(after, "\n"):
+		after = strings.TrimLeft(after, "\n")
+	}
+	next := before + after
+	if !p.codexEditOK(path, string(data), next, nil, true) {
+		return nil
+	}
+	p.r.act(ActionDelete, path, agent, "mcp_servers."+mcpServerName)
 	if p.o.DryRun {
 		return nil
 	}
-	return p.overwriteFile(path, []byte(text), 0o644)
+	return p.overwriteFile(target, []byte(next), 0o644)
 }
 
-// tomlServer returns parsed["mcp_servers"]["teknoir"].
-func tomlServer(parsed map[string]any) (map[string]any, bool) {
+// codexEditOK checks, before any write, that next is orig with exactly the mcp_servers.teknoir entry
+// removed (put nil) or replaced by put. A text that does not parse, or an edit that would touch anything
+// else, is refused and false comes back; the file is left as it is.
+func (p *op) codexEditOK(path, orig, next string, put map[string]any, remove bool) bool {
+	if _, err := tomlParse(next); err != nil {
+		p.refuseCodex(path, fmt.Sprintf("%s: the edit would not parse (%v); unchanged: add it by hand", path, err), remove)
+		return false
+	}
+	if err := tomlSameExcept(orig, next, put); err != nil {
+		p.refuseCodex(path, fmt.Sprintf("%s: tnctl cannot edit [mcp_servers.%s] safely here; edit it by hand",
+			path, mcpServerName), remove)
+		return false
+	}
+	return true
+}
+
+// tomlParse parses a config into a map. Empty text is an empty map: go-toml leaves a nil one.
+func tomlParse(text string) (map[string]any, error) {
+	m := map[string]any{}
+	if strings.TrimSpace(text) == "" {
+		return m, nil
+	}
+	if err := toml.Unmarshal([]byte(text), &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// tomlServerValue returns parsed["mcp_servers"]["teknoir"] as it is there: a table, a string, anything.
+func tomlServerValue(parsed map[string]any) (any, bool) {
 	servers, ok := parsed["mcp_servers"].(map[string]any)
 	if !ok {
 		return nil, false
 	}
-	srv, ok := servers[mcpServerName].(map[string]any)
+	v, ok := servers[mcpServerName]
+	return v, ok
+}
+
+// tomlServer returns parsed["mcp_servers"]["teknoir"] when it is a table.
+func tomlServer(parsed map[string]any) (map[string]any, bool) {
+	v, ok := tomlServerValue(parsed)
+	if !ok {
+		return nil, false
+	}
+	srv, ok := v.(map[string]any)
 	return srv, ok
 }
 
@@ -402,12 +494,61 @@ func tomlServerIsOurs(srv map[string]any) bool {
 	return ok && a == "mcp"
 }
 
-// tomlReplacement is the new table when other tables follow it: a blank line keeps them apart.
-func tomlReplacement(block, rest string) string {
-	if strings.TrimSpace(rest) == "" {
-		return block
+// tomlKitEntry is the kit's own table, parsed, for the edit invariant.
+func tomlKitEntry() (map[string]any, error) {
+	m, err := tomlParse(tomlEntryBlock)
+	if err != nil {
+		return nil, err
 	}
-	return block + "\n"
+	srv, ok := tomlServer(m)
+	if !ok {
+		return nil, errors.New("the kit's own [mcp_servers.teknoir] does not parse")
+	}
+	return srv, nil
+}
+
+// tomlSameExcept requires next to be orig with only mcp_servers.teknoir changed: removed when put is nil,
+// set to put otherwise. Both texts must parse; the caller checks next first.
+func tomlSameExcept(orig, next string, put map[string]any) error {
+	want, err := tomlParse(orig)
+	if err != nil {
+		return err
+	}
+	servers, _ := want["mcp_servers"].(map[string]any)
+	if servers == nil && put != nil {
+		servers = map[string]any{}
+		want["mcp_servers"] = servers
+	}
+	if servers != nil {
+		if put == nil {
+			delete(servers, mcpServerName)
+		} else {
+			servers[mcpServerName] = put
+		}
+		if len(servers) == 0 {
+			delete(want, "mcp_servers")
+		}
+	}
+	got, err := tomlParse(next)
+	if err != nil {
+		return err
+	}
+	if servers, ok := got["mcp_servers"].(map[string]any); ok && len(servers) == 0 {
+		delete(got, "mcp_servers")
+	}
+	if !reflect.DeepEqual(want, got) {
+		return errors.New("the edit changes more than [mcp_servers.teknoir]")
+	}
+	return nil
+}
+
+// tomlJoin is the text that follows a replaced table: it keeps its own leading newline, and gets one when
+// it has none, so it stays apart from the new table.
+func tomlJoin(rest string) string {
+	if rest == "" || strings.HasPrefix(rest, "\n") {
+		return rest
+	}
+	return "\n" + rest
 }
 
 // appendTOML appends the entry as a table of its own, after a blank line.
@@ -421,37 +562,99 @@ func appendTOML(text, block string) string {
 	return text + "\n" + block
 }
 
-var tomlHeaderRE = regexp.MustCompile(`^[ \t]*\[([^\[\]]*)\][ \t]*(#.*)?$`)
+// tomlHeaderRE matches a table header, [x] or [[x]], which ends the table above it.
+var tomlHeaderRE = regexp.MustCompile(`^[ \t]*(\[\[[^\]]*\]\]|\[[^\[\]]*\])[ \t]*(#.*)?$`)
 
-// tomlCanonicalName strips spaces and quotes from the parts of a dotted name:
-// `mcp_servers."teknoir"` is mcp_servers.teknoir.
+// tomlHeaderParts splits a header match into its key, without the brackets, and whether it is an array
+// table ([[x]]), which can only end a table, never start one.
+func tomlHeaderParts(header string) (key string, array bool) {
+	if strings.HasPrefix(header, "[[") {
+		return strings.TrimSuffix(strings.TrimPrefix(header, "[["), "]]"), true
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(header, "["), "]"), false
+}
+
+// tomlCanonicalName is the name a header refers to: `mcp_servers."teknoir"` is mcp_servers.teknoir. A
+// quoted key that holds a dot is one key of its own (`["mcp_servers.teknoir"]`), and keeps its quotes so
+// it does not read as a dotted path.
 func tomlCanonicalName(s string) string {
-	parts := strings.Split(s, ".")
+	parts := tomlSplitKey(s)
 	for i, p := range parts {
-		parts[i] = strings.Trim(strings.TrimSpace(p), `"'`)
+		p = strings.TrimSpace(p)
+		if len(p) >= 2 && (p[0] == '"' || p[0] == '\'') && p[len(p)-1] == p[0] {
+			if inner := p[1 : len(p)-1]; !strings.Contains(inner, ".") {
+				p = inner
+			}
+		}
+		parts[i] = p
 	}
 	return strings.Join(parts, ".")
 }
 
-// tomlTableRange returns the byte range of the [name] table: its header line to the next table header
-// (or the end of the text).
-func tomlTableRange(text, name string) (int, int, bool) {
-	start := -1
-	off := 0
-	for _, line := range strings.SplitAfter(text, "\n") {
-		if m := tomlHeaderRE.FindStringSubmatch(strings.TrimRight(line, "\r\n")); m != nil {
-			if start < 0 {
-				if tomlCanonicalName(m[1]) == name {
-					start = off
-				}
-			} else {
-				return start, off, true
+// tomlSplitKey splits a header key on the dots outside quotes, so ["a.b"] stays one key.
+func tomlSplitKey(s string) []string {
+	var out []string
+	start := 0
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case quote != 0:
+			if c == '\\' && quote == '"' {
+				i++
+				continue
 			}
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '.':
+			out = append(out, s[start:i])
+			start = i + 1
 		}
+	}
+	return append(out, s[start:])
+}
+
+// tomlTableRange returns the byte range of the [name] table: its header line through the last line of
+// its own, so the blank and comment lines that separate it from the next table stay with that table. Any
+// header, [x] or [[x]], ends the table; when none follows, the range runs to the end of the text.
+func tomlTableRange(text, name string) (int, int, bool) {
+	lines := strings.SplitAfter(text, "\n")
+	offs := make([]int, len(lines))
+	off := 0
+	for i, line := range lines {
+		offs[i] = off
 		off += len(line)
 	}
-	if start < 0 {
+	startLine := -1
+	for i, line := range lines {
+		m := tomlHeaderRE.FindStringSubmatch(strings.TrimRight(line, "\r\n"))
+		if m == nil {
+			continue
+		}
+		key, array := tomlHeaderParts(m[1])
+		if startLine < 0 {
+			if !array && tomlCanonicalName(key) == name {
+				startLine = i
+			}
+			continue
+		}
+		end := i
+		for end > startLine+1 && separatorLine(lines[end-1]) {
+			end--
+		}
+		return offs[startLine], offs[end], true
+	}
+	if startLine < 0 {
 		return 0, 0, false
 	}
-	return start, len(text), true
+	return offs[startLine], len(text), true
+}
+
+// separatorLine reports whether a line is blank or holds only a comment: it belongs to the table below
+// it, not to the one above.
+func separatorLine(line string) bool {
+	t := strings.TrimSpace(line)
+	return t == "" || strings.HasPrefix(t, "#")
 }

@@ -8,6 +8,11 @@ func Uninstall(o *Options) (*Result, error) {
 	if err := p.validate(); err != nil {
 		return p.r, err
 	}
+	// A project that commits .claude, .agents or .codex as a symlink is not uninstalled from at all:
+	// the link, and what it points at, are left as they are.
+	if p.refuseProjectSymlinks() {
+		return p.finish()
+	}
 	if p.o.AgentsMD {
 		if err := p.uninstallAgentsMD(); err != nil {
 			return p.r, err

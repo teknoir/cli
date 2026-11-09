@@ -52,6 +52,11 @@ func (p *op) validate() error {
 }
 
 func (p *op) install() error {
+	// A project that commits .claude, .agents or .codex as a symlink is not installed into at all:
+	// the link, and what it points at, are left as they are.
+	if p.refuseProjectSymlinks() {
+		return nil
+	}
 	files, err := p.kitFiles(kindSkills)
 	if err != nil {
 		return fmt.Errorf("read the kit: %w", err)

@@ -1,0 +1,10 @@
+model = "gpt-5"
+
+[mcp_servers.teknoir]
+command = "tnctl"
+args = ["mcp"]
+
+# Context7: docs lookup, added by hand.
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]

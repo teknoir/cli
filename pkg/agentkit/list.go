@@ -5,10 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
-
-	"github.com/pelletier/go-toml/v2"
 )
 
 // RootStatus is one root that holds an install of the kit.
@@ -23,11 +20,15 @@ type RootStatus struct {
 	Changed         []string `json:"changed,omitempty"`
 	Outdated        []string `json:"outdated,omitempty"`
 	Extra           []string `json:"extra,omitempty"`
+	// Problem says why the root was not read at all: a manifest with an entry that is not a path
+	// inside the root, or a project root that is a symlink.
+	Problem string `json:"problem,omitempty"`
 }
 
 // InSync reports whether the root holds exactly the embedded kit.
 func (r *RootStatus) InSync() bool {
-	return !r.VersionOutdated && len(r.Missing) == 0 && len(r.Changed) == 0 && len(r.Outdated) == 0 && len(r.Extra) == 0
+	return r.Problem == "" && !r.VersionOutdated && len(r.Missing) == 0 && len(r.Changed) == 0 &&
+		len(r.Outdated) == 0 && len(r.Extra) == 0
 }
 
 // MCPStatus is one agent config file, and whether it registers the teknoir MCP server.
@@ -62,7 +63,20 @@ func List(o *Options) (*ListResult, error) {
 		return nil, err
 	}
 	res := &ListResult{Roots: []RootStatus{}, MCP: []MCPStatus{}}
+	// A project root that is a symlink is reported, and nothing below it is read.
+	links := p.projectSymlinks()
+	for _, r := range projectRootPaths(p.o.ProjectDir) {
+		if why, ok := links[r.Dir]; ok {
+			res.Roots = append(res.Roots, RootStatus{
+				Root: r.Dir, Agent: agentLabel(r.Agents), Kind: rootKind(r.Dir),
+				EmbeddedVersion: p.o.KitVersion, Problem: why,
+			})
+		}
+	}
 	for _, r := range p.allRoots(p.has(AgentClaude)) {
+		if belowAny(r.Dir, links) {
+			continue
+		}
 		st, ok, err := p.rootStatus(r)
 		if err != nil {
 			return nil, err
@@ -80,28 +94,44 @@ func List(o *Options) (*ListResult, error) {
 }
 
 // rootStatus compares one root with the embedded kit. A root without a manifest was never installed and
-// is not reported.
+// is not reported. Every file is read through the root, so nothing below it leads out of it, and a file
+// that is not a regular file (a symlink, a directory) is reported as changed without being read.
 func (p *op) rootStatus(r root) (*RootStatus, bool, error) {
 	mfPath := manifestPath(r.Dir)
-	m, err := readManifest(mfPath)
+	rr, err := openRoot(r.Dir)
+	if err != nil || rr == nil {
+		// A root that does not exist holds nothing.
+		return nil, false, err
+	}
+	defer rr.Close()
+	_, exists, err := statRel(rr, manifestName)
 	if err != nil {
 		return nil, false, err
 	}
-	if _, err := os.Stat(mfPath); errors.Is(err, fs.ErrNotExist) {
+	if !exists {
 		return nil, false, nil
 	}
 	kind := rootKind(r.Dir)
-	kit, err := p.kitFiles(kind)
-	if err != nil {
-		return nil, false, fmt.Errorf("read the kit: %w", err)
-	}
 	st := &RootStatus{
 		Root:            r.Dir,
 		Agent:           agentLabel(r.Agents),
 		Kind:            kind,
-		KitVersion:      m.KitVersion,
 		EmbeddedVersion: p.o.KitVersion,
-		VersionOutdated: m.KitVersion != p.o.KitVersion,
+	}
+	m, err := readManifestAt(rr, mfPath)
+	if err != nil {
+		var ke *manifestKeyError
+		if errors.As(err, &ke) {
+			st.Problem = ke.Error()
+			return st, true, nil
+		}
+		return nil, false, err
+	}
+	st.KitVersion = m.KitVersion
+	st.VersionOutdated = m.KitVersion != p.o.KitVersion
+	kit, err := p.kitFiles(kind)
+	if err != nil {
+		return nil, false, fmt.Errorf("read the kit: %w", err)
 	}
 	for _, rel := range sortedKeys(m.Files) {
 		want, inKit := kit[rel]
@@ -112,11 +142,19 @@ func (p *op) rootStatus(r root) (*RootStatus, bool, error) {
 		if m.Files[rel] != hashBytes(want) {
 			st.Outdated = append(st.Outdated, rel)
 		}
-		cur, err := os.ReadFile(joinRel(r.Dir, rel))
-		if errors.Is(err, fs.ErrNotExist) {
+		fi, exists, err := statRel(rr, rel)
+		if err != nil {
+			return nil, false, err
+		}
+		if !exists {
 			st.Missing = append(st.Missing, rel)
 			continue
 		}
+		if !regular(fi) {
+			st.Changed = append(st.Changed, rel)
+			continue
+		}
+		cur, err := rr.ReadFile(rel)
 		if err != nil {
 			return nil, false, err
 		}
@@ -129,13 +167,27 @@ func (p *op) rootStatus(r root) (*RootStatus, bool, error) {
 			continue
 		}
 		// A kit file the manifest does not know was never installed.
-		if _, err := os.Stat(joinRel(r.Dir, rel)); errors.Is(err, fs.ErrNotExist) {
+		_, exists, err := statRel(rr, rel)
+		if err != nil {
+			return nil, false, err
+		}
+		if !exists {
 			st.Missing = append(st.Missing, rel)
 		} else {
 			st.Changed = append(st.Changed, rel)
 		}
 	}
 	return st, true, nil
+}
+
+// belowAny reports whether path is at or below one of the links.
+func belowAny(path string, links map[string]string) bool {
+	for dir := range links {
+		if atOrBelow(path, dir) {
+			return true
+		}
+	}
+	return false
 }
 
 // mcpStatus reports whether an agent's config file registers the teknoir MCP server.
@@ -158,8 +210,8 @@ func (p *op) mcpStatus(a Agent) MCPStatus {
 	}
 	switch a {
 	case AgentCodex:
-		var parsed map[string]any
-		if err := toml.Unmarshal(data, &parsed); err != nil {
+		parsed, err := tomlParse(string(data))
+		if err != nil {
 			st.Note = "not valid TOML"
 			return st
 		}

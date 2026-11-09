@@ -1,0 +1,11 @@
+model = "gpt-5"
+
+[mcp_servers.teknoir]
+command = "tnctl"
+args = ["mcp"]
+
+[[skills.config]]
+path = "/a"
+
+[[skills.config]]
+path = "/b"

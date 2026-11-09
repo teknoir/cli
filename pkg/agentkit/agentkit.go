@@ -115,6 +115,16 @@ type Options struct {
 	TnctlVersion string
 	// Home is the home directory of user scope (os.UserHomeDir in tnctl).
 	Home string
+	// ClaudeConfigDir is the .claude directory of user scope ($CLAUDE_CONFIG_DIR, else Home/.claude).
+	ClaudeConfigDir string
+	// ClaudeConfigFile is the Claude Code state file of user scope: $CLAUDE_CONFIG_DIR/.claude.json
+	// when that variable is set, else Home/.claude.json.
+	ClaudeConfigFile string
+	// CodexHome is the Codex directory of user scope ($CODEX_HOME, else Home/.codex).
+	CodexHome string
+	// OpencodeConfigDir is the OpenCode directory of user scope ($XDG_CONFIG_HOME/opencode, else
+	// Home/.config/opencode).
+	OpencodeConfigDir string
 	// ProjectDir is the directory of project scope (the current directory in tnctl).
 	ProjectDir string
 	// ManagedDir is the --managed directory; set when Scope is ScopeManaged.
@@ -169,9 +179,12 @@ func Refused(err error) (*RefusedError, bool) {
 type op struct {
 	o *Options
 	r *Result
-	// refused are the paths the user changed, and the files that could not be edited.
+	// refused are the paths of the files that were refused, and the files that could not be edited.
 	refused []string
-	reason  string
+	// reasons says why each of them was refused; it becomes the RefusedError's Reason.
+	reasons []string
+	// changed are the kit files that were refused because the user changed them: --force replaces them.
+	changed []string
 }
 
 func newOp(o *Options) *op {
@@ -184,15 +197,52 @@ func newOp(o *Options) *op {
 	if len(o.Agents) == 0 {
 		o.Agents = []Agent{AgentClaude, AgentCodex, AgentOpencode}
 	}
+	// The package reads no environment: a caller that sets only Home gets the default directories,
+	// exactly as before the variables were honoured.
+	if o.Home != "" {
+		if o.ClaudeConfigDir == "" {
+			o.ClaudeConfigDir = filepath.Join(o.Home, ".claude")
+		}
+		if o.ClaudeConfigFile == "" {
+			o.ClaudeConfigFile = filepath.Join(o.Home, ".claude.json")
+		}
+		if o.CodexHome == "" {
+			o.CodexHome = filepath.Join(o.Home, ".codex")
+		}
+		if o.OpencodeConfigDir == "" {
+			o.OpencodeConfigDir = filepath.Join(o.Home, ".config", "opencode")
+		}
+	}
 	return &op{o: o, r: &Result{Actions: []Action{}}}
 }
 
 // finish returns the result, and a RefusedError when something was refused.
 func (p *op) finish() (*Result, error) {
 	if len(p.refused) > 0 {
-		return p.r, &RefusedError{Paths: p.refused, Reason: p.reason}
+		var all []string
+		if n := len(p.changed); n > 0 {
+			all = append(all, fmt.Sprintf("%d file(s) changed since they were installed: use --force to overwrite", n))
+		}
+		all = append(all, p.reasons...)
+		return p.r, &RefusedError{Paths: p.refused, Reason: strings.Join(all, "; ")}
 	}
 	return p.r, nil
+}
+
+// refuse records that path was refused, with the note that goes on its action (the snippet to add or
+// remove by hand, when there is one) and the reason the run reports. A refusal never stops the run: the
+// caller returns nil and the next file, root and agent go on.
+func (p *op) refuse(path, agent, note, reason string) {
+	p.r.act(ActionRefuse, path, agent, note)
+	p.refused = append(p.refused, path)
+	p.reasons = append(p.reasons, reason)
+}
+
+// refuseChanged refuses a kit file the user changed since it was installed. --force replaces it.
+func (p *op) refuseChanged(path, agent string) {
+	note := "changed since it was installed: use --force to overwrite"
+	p.refuse(path, agent, note, path+": "+note)
+	p.changed = append(p.changed, path)
 }
 
 func (p *op) has(a Agent) bool {
@@ -227,7 +277,7 @@ func (p *op) claudeDir() string {
 	case ScopeManaged:
 		return p.o.ManagedDir
 	}
-	return filepath.Join(p.o.Home, ".claude")
+	return p.o.ClaudeConfigDir
 }
 
 // skillRoots are the destinations of the skills, one copy per root: Claude Code reads
@@ -254,7 +304,7 @@ func (p *op) skillRoots() []root {
 	}
 	var out []root
 	if p.has(AgentClaude) {
-		out = append(out, root{Dir: filepath.Join(p.o.Home, ".claude", "skills"), Agents: []Agent{AgentClaude}})
+		out = append(out, root{Dir: filepath.Join(p.o.ClaudeConfigDir, "skills"), Agents: []Agent{AgentClaude}})
 	}
 	if p.has(AgentCodex) || p.has(AgentOpencode) {
 		var agents []Agent
@@ -266,6 +316,56 @@ func (p *op) skillRoots() []root {
 		out = append(out, root{Dir: filepath.Join(p.o.Home, ".agents", "skills"), Agents: agents})
 	}
 	return out
+}
+
+// projectRootPaths are the directories a project-scope install writes below, with the agents they serve.
+// A project that commits one of them as a symlink is not written through.
+func projectRootPaths(project string) []root {
+	claude := []Agent{AgentClaude}
+	shared := []Agent{AgentCodex, AgentOpencode}
+	return []root{
+		{Dir: filepath.Join(project, ".claude"), Agents: claude},
+		{Dir: filepath.Join(project, ".claude", "skills"), Agents: claude},
+		{Dir: filepath.Join(project, ".claude", "hooks"), Agents: claude},
+		{Dir: filepath.Join(project, ".agents"), Agents: shared},
+		{Dir: filepath.Join(project, ".agents", "skills"), Agents: shared},
+		{Dir: filepath.Join(project, ".codex"), Agents: []Agent{AgentCodex}},
+	}
+}
+
+// projectSymlinks returns the project roots that are symlinks, each with the reason it is refused: tnctl
+// never installs a project's kit through a link into (or out of) the repository.
+func (p *op) projectSymlinks() map[string]string {
+	if p.o.Scope != ScopeProject {
+		return nil
+	}
+	out := map[string]string{}
+	for _, r := range projectRootPaths(p.o.ProjectDir) {
+		if fi, err := os.Lstat(r.Dir); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+			out[r.Dir] = r.Dir + " is a symlink: tnctl does not install through it"
+		}
+	}
+	return out
+}
+
+// atOrBelow reports whether path is dir or below it.
+func atOrBelow(path, dir string) bool {
+	return filepath.Clean(path) == filepath.Clean(dir) || isBelow(path, dir)
+}
+
+// refuseProjectSymlinks refuses every project root that is a symlink. It reports whether it refused any:
+// a project with a symlinked root is not installed into or uninstalled from at all.
+func (p *op) refuseProjectSymlinks() bool {
+	links := p.projectSymlinks()
+	if len(links) == 0 {
+		return false
+	}
+	for _, r := range projectRootPaths(p.o.ProjectDir) {
+		if why, ok := links[r.Dir]; ok {
+			p.refuse(r.Dir, "", why, why)
+		}
+	}
+	return true
 }
 
 // allRoots are the roots `tnctl agent list` and `uninstall` visit: the skills of every agent, and the

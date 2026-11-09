@@ -22,6 +22,12 @@ targets, and no more.
 | Claude Code | `~/.claude/skills/` | `.claude/skills/` |
 | Codex, OpenCode | `~/.agents/skills/` | `.agents/skills/` |
 
+User scope follows the variables the agents themselves read, so the kit lands where the agent looks:
+`CLAUDE_CONFIG_DIR` replaces `~/.claude` (and puts `.claude.json` in it), `CODEX_HOME` replaces
+`~/.codex` (only `config.toml`, not the skills: those stay in `~/.agents/skills`), and `XDG_CONFIG_HOME`
+moves the OpenCode directory to `$XDG_CONFIG_HOME/opencode` instead of `~/.config/opencode`. A variable
+set to the empty string counts as unset.
+
 Codex and OpenCode read the same root, so `--agent codex,opencode` writes one copy. Each root gets a
 `.tnctl-agent-kit.json` manifest: the kit version, the `tnctl` that installed it, and the hash of every
 file it wrote. The manifest is how an upgrade, `agent list --check` and `agent uninstall` tell a file the
@@ -60,7 +66,9 @@ With no `--agent` every agent is installed for, in the user scope.
 A file that exists, differs from the kit's and is not the one the kit wrote (you changed it), or was never
 recorded, is **refused**: it is listed, the rest of the install still runs, and the exit code is 8. The
 same goes for an OpenCode `.jsonc` with comments, which `tnctl` does not edit: it prints the exact snippet
-to add and the file's path.
+to add and the file's path. A kit file that is not a regular file (a symlink, a directory) is refused too,
+and `--force` does not replace it. `AGENTS.md` with damaged `teknoir-agent-kit` markers is refused: fix the
+markers by hand. So is a manifest whose entries are not paths inside its root.
 
 Files the kit wrote and you did not change are upgraded in place; a file the kit no longer has is deleted
 if it is unchanged, and kept (and reported) if you changed it.
@@ -75,7 +83,11 @@ if it is unchanged, and kept (and reported) if you changed it.
 
 JSON files keep every foreign key and value as JSON; `tnctl` writes them with 2-space indent, so an
 existing file's **key order changes** (the data does not). Codex's TOML is edited line by line, so its
-comments stay, and is parsed again after the write: if it no longer parses, the original is restored.
+comments stay; the result is parsed and compared with the original **before** anything is written, and an
+edit that would break the file, or touch anything beside `[mcp_servers.teknoir]`, is refused with the
+lines to edit by hand. A config file that is a symlink (dotfiles, stow, home-manager) keeps its link: the
+change goes to the file it points at. In project scope such a file is left alone, and so is a project
+whose `.claude`, `.agents` or `.codex` is a symlink.
 
 ## List and check
 

@@ -15,6 +15,11 @@ func agentHome(t *testing.T) (home, project string) {
 	home, project = t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	// The user-scope config directories: a test never installs into (or deletes from) the real one of
+	// the developer running it.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -279,5 +284,233 @@ func TestAgentAllowedInBotMode(t *testing.T) {
 	agentHome(t)
 	if _, _, err := runCLI(t, nil, "agent", "list", "--user"); err != nil {
 		t.Fatalf("agent list in bot mode: %v", err)
+	}
+}
+
+// ---------- where user scope writes: CLAUDE_CONFIG_DIR, CODEX_HOME and XDG_CONFIG_HOME ----------
+
+// One run for each of the three variables: the kit goes where the agent reads it, and nothing goes to
+// the default directory.
+func TestAgentInstallConfigDirs(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, agents string
+		want              func(cfg, home string) string
+	}{
+		{"CLAUDE_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "claude|--mcp|--hooks",
+			func(cfg, _ string) string { return filepath.Join(cfg, "skills", "teknoir-platform", "SKILL.md") }},
+		{"CODEX_HOME", "CODEX_HOME", "codex|--mcp",
+			func(cfg, _ string) string { return filepath.Join(cfg, "config.toml") }},
+		{"XDG_CONFIG_HOME", "XDG_CONFIG_HOME", "opencode|--mcp",
+			func(cfg, _ string) string { return filepath.Join(cfg, "opencode", "opencode.json") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, _ := agentHome(t)
+			cfg := t.TempDir()
+			t.Setenv(tc.env, cfg)
+			args := []string{"agent", "install", "--agent", strings.Split(tc.agents, "|")[0]}
+			args = append(args, strings.Split(tc.agents, "|")[1:]...)
+			if _, _, err := runCLI(t, nil, args...); err != nil {
+				t.Fatalf("%v", err)
+			}
+			got := tc.want(cfg, home)
+			if _, err := os.Stat(got); err != nil {
+				t.Errorf("%s: %v", got, err)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".claude", "skills")); !os.IsNotExist(err) && tc.env == "CLAUDE_CONFIG_DIR" {
+				t.Errorf("the kit went to ~/.claude as well: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) && tc.env == "CLAUDE_CONFIG_DIR" {
+				t.Errorf(".claude.json went to ~: %v", err)
+			}
+			// list sees it there, and an uninstall removes it from there.
+			out, _, err := runCLI(t, nil, "agent", "list", "--user")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out, cfg) {
+				t.Errorf("list does not name %s:\n%s", cfg, out)
+			}
+			if _, _, err := runCLI(t, nil, "agent", "uninstall", "--user", "--agent", strings.Split(tc.agents, "|")[0], "--mcp"); err != nil {
+				t.Fatalf("uninstall: %v", err)
+			}
+			if tc.env == "CLAUDE_CONFIG_DIR" {
+				// The skills are the kit's files: they go.
+				if _, err := os.Stat(got); !os.IsNotExist(err) {
+					t.Errorf("%s survived the uninstall: %v", got, err)
+				}
+			} else {
+				// The config file is the user's: the entry goes, the file stays.
+				if b, err := os.ReadFile(got); err != nil || strings.Contains(string(b), "teknoir") {
+					t.Errorf("%s still names teknoir: %s %v", got, b, err)
+				}
+			}
+		})
+	}
+}
+
+// An empty variable is unset: the default paths are used.
+func TestAgentInstallEmptyConfigDirs(t *testing.T) {
+	home, _ := agentHome(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	unsetEnv(t, "CODEX_HOME")
+	unsetEnv(t, "XDG_CONFIG_HOME")
+	if _, _, err := runCLI(t, nil, "agent", "install", "--agent", "claude,codex,opencode", "--mcp"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		filepath.Join(home, ".claude", "skills", "teknoir-platform", "SKILL.md"),
+		filepath.Join(home, ".claude.json"),
+		filepath.Join(home, ".codex", "config.toml"),
+		filepath.Join(home, ".config", "opencode", "opencode.json"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+}
+
+// unsetEnv makes a variable unset for the test.
+func unsetEnv(t *testing.T, name string) {
+	t.Helper()
+	t.Setenv(name, "")
+	os.Unsetenv(name)
+}
+
+// A project that commits .claude as a symlink: install and uninstall exit 8 and change nothing.
+func TestAgentProjectSymlinkExit(t *testing.T) {
+	for _, op := range []string{"install", "uninstall"} {
+		t.Run(op, func(t *testing.T) {
+			agentHome(t)
+			project, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			outside := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(project, ".agents"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(project, ".claude")); err != nil {
+				t.Fatal(err)
+			}
+			out, _, err := runCLI(t, nil, "agent", op, "--project")
+			if err == nil || exitCodeOf(err) != codeConflict {
+				t.Fatalf("%s: exit %v, want %d: %v\n%s", op, err, codeConflict, err, out)
+			}
+			if !strings.Contains(err.Error(), filepath.Join(project, ".claude")+" is a symlink") {
+				t.Errorf("the error does not name the link: %v", err)
+			}
+			if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+				t.Errorf("the link's target was written to: %v %v", entries, err)
+			}
+			if fi, err := os.Lstat(filepath.Join(project, ".claude")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("the link is gone: %v %v", fi, err)
+			}
+		})
+	}
+}
+
+// agent list reports a symlinked project root as its state, and exits 0 without --check.
+func TestAgentListProjectSymlink(t *testing.T) {
+	agentHome(t)
+	project, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(project, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runCLI(t, nil, "agent", "list", "--project")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "is a symlink") {
+		t.Errorf("list:\n%s", out)
+	}
+	if _, _, err := runCLI(t, nil, "agent", "list", "--project", "--check"); err == nil || exitCodeOf(err) != codeRejected {
+		t.Errorf("--check: %v, want exit %d", err, codeRejected)
+	}
+}
+
+// agent list reports a manifest with a key outside its root as the root's state, and does not fail.
+func TestAgentListManifestProblem(t *testing.T) {
+	home, _ := agentHome(t)
+	if _, _, err := runCLI(t, nil, "agent", "install", "--agent", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".claude", "skills")
+	mf := filepath.Join(root, ".tnctl-agent-kit.json")
+	body := `{"kitVersion":"0.1.0","tnctl":"test","files":{"../x":"sha256:00"}}`
+	if err := os.WriteFile(mf, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runCLI(t, nil, "agent", "list", "--user")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, `is not a path inside its root`) {
+		t.Errorf("list:\n%s", out)
+	}
+	if _, _, err := runCLI(t, nil, "agent", "list", "--user", "--check"); err == nil || exitCodeOf(err) != codeRejected {
+		t.Errorf("--check: %v, want exit %d", err, codeRejected)
+	}
+}
+
+// A changed kit file and a commented .jsonc are both refused in one run: the error names both, the
+// other agents' files are still written, and the exit code is 8.
+func TestAgentInstallTwoRefusals(t *testing.T) {
+	_, project := agentHome(t)
+	if _, _, err := runCLI(t, nil, "agent", "install", "--project", "--agent", "claude,opencode", "--mcp"); err != nil {
+		t.Fatal(err)
+	}
+	skill := filepath.Join(project, ".claude", "skills", "teknoir-platform", "SKILL.md")
+	if err := os.WriteFile(skill, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jsonc := filepath.Join(project, "opencode.jsonc")
+	if err := os.WriteFile(jsonc, []byte("{\n  // my comment\n  \"model\": \"x\"\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runCLI(t, nil, "agent", "install", "--project", "--agent", "claude,opencode", "--mcp")
+	if err == nil || exitCodeOf(err) != codeConflict {
+		t.Fatalf("exit %v, want %d:\n%s", err, codeConflict, out)
+	}
+	msg := err.Error()
+	for _, want := range []string{skill, jsonc} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the error does not name %s: %v", want, msg)
+		}
+	}
+	if got, _ := os.ReadFile(skill); string(got) != "mine\n" {
+		t.Errorf("the changed kit file was written: %q", got)
+	}
+	if got, _ := os.ReadFile(jsonc); !strings.Contains(string(got), "// my comment") || strings.Contains(string(got), "teknoir") {
+		t.Errorf("the commented .jsonc was edited:\n%s", got)
+	}
+	// Another agent's file of the same run is still written.
+	if _, err := os.Stat(filepath.Join(project, ".agents", "skills", "teknoir-platform", "SKILL.md")); err != nil {
+		t.Errorf("the rest of the run did not write: %v", err)
+	}
+}
+
+// A dry run over the same two refusals says "would refuse" and writes nothing.
+func TestAgentInstallRefusalsDryRun(t *testing.T) {
+	_, project := agentHome(t)
+	if _, _, err := runCLI(t, nil, "agent", "install", "--project", "--agent", "claude,opencode", "--mcp"); err != nil {
+		t.Fatal(err)
+	}
+	skill := filepath.Join(project, ".claude", "skills", "teknoir-platform", "SKILL.md")
+	if err := os.WriteFile(skill, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jsonc := filepath.Join(project, "opencode.jsonc")
+	if err := os.WriteFile(jsonc, []byte("{\n  // my comment\n  \"model\": \"x\"\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runCLI(t, nil, "agent", "install", "--project", "--agent", "claude,opencode", "--mcp", "--dry-run")
+	if err == nil || exitCodeOf(err) != codeConflict {
+		t.Fatalf("exit %v, want %d:\n%s", err, codeConflict, out)
+	}
+	if strings.Count(out, "would refuse") < 2 {
+		t.Errorf("the dry run does not report both refusals:\n%s", out)
 	}
 }
