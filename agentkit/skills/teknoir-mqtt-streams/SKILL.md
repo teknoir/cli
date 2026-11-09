@@ -81,13 +81,15 @@ tnctl mqtt stream /devices/+/state/# /devices/+/events/alerts --seconds 60 --rec
   `502`, `503` or `504` while the portal is being replaced (1 s doubling to 30 s; after a
   connection that delivered messages the wait starts at 1 s again), and waits out a `503` that
   carries `Retry-After` (the platform cannot reach the broker, or is restarting) for that long, at
-  most 60 s, instead of the backoff. It does **not** reconnect after a refused request (a bad
-  topic, no access, a device that is not there: `400`, `403`, `404`), a `429` (too many streams),
-  `live MQTT is not configured`, a missing key, or an error the platform reported on the stream
-  (`access_lost`, `broker_closed`). Run a long stream under a supervisor (Kubernetes, or a shell
-  loop) so that an error ends and restarts the whole pipeline. The platform ends every stream
-  cleanly after 60 minutes and when the portal restarts, so a long-running reader always uses
-  `--reconnect` or the relay.
+  most 60 s, instead of the backoff; a `429` that carries `Retry-After` because the bot made more
+  than 120 requests in a minute is waited out the same way. It does **not** reconnect after a
+  refused request (a bad topic, no access, a device that is not there: `400`, `403`, `404`), a
+  `429` that says too many live streams are open, `live MQTT is not configured`, a missing key, or
+  an error the platform reported on the stream (`access_lost`, `broker_closed`). If no stream
+  opened before `--seconds` ends, it exits with the last answer's code. Run a long stream under a
+  supervisor (Kubernetes, or a shell loop) so that an error ends and restarts the whole pipeline.
+  The platform ends every stream cleanly after 60 minutes and when the portal restarts, so a
+  long-running reader always uses `--reconnect` or the relay.
 - Four streams at once per caller (per bot for a bot). `ts` is when the platform received the
   message; a payload's own timestamp is when the device produced it, and the two differ after a
   device comes back online (see above).
@@ -307,14 +309,15 @@ env:
   - {name: OUTPUT_STREAM, value: "cpu-summary"}
 ```
 
-The relay keeps reconnecting by itself, except after the platform ends the stream with an error
-(`access_lost`, `broker_closed`); Kubernetes then restarts the pod, which is what you want — access
-may come back. So an EMQX restart (`broker_closed`) restarts the relay pod once: while the broker
-is down, the new pod keeps running and logs `cannot be reached right now` with `connecting again in
-10.0s` until the broker is back. The relay also stops at once when the portal has no live MQTT
+The relay keeps reconnecting by itself, also through a portal restart (the gateway's `502`, `503`
+or `504`), except after the platform ends the stream with an error (`access_lost`,
+`broker_closed`); Kubernetes then restarts the pod, which is what you want — access may come back.
+So an EMQX restart (`broker_closed`) restarts the relay pod once: while the broker is down, the
+new pod keeps running and logs `cannot be reached right now` with `connecting again in 10.0s`
+until the broker is back. The relay also stops at once when the portal has no live MQTT
 (`live MQTT is not configured`); ask an admin, restarting does not help. A relay in
-CrashLoopBackOff is never a broker restart: read its log (a refused key or topics, a 404,
-`live MQTT is not configured`, `access_lost` each time).
+CrashLoopBackOff is never a broker or portal restart: read its log (a refused key or topics, a
+404, `the stream route answered HTTP 500`, `live MQTT is not configured`, `access_lost` each time).
 
 The copy in `apps` is as sensitive as the key itself and stays inside the bot's own computer.
 Never `kubectl get` or `kubectl describe` that Secret with `-o yaml`, `-o json` or `-o jsonpath`;

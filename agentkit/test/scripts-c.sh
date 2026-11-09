@@ -350,6 +350,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if mode in ("gateway502", "gateway504"):
+            body = b"upstream connect error"
+            self.send_response(502 if mode == "gateway502" else 504)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if mode in ("nostream", "noroute"):
             body = (b'{"error":{"name":"NotFoundError","message":"device x not found"}}'
                     if mode == "nostream" else
@@ -709,6 +717,20 @@ PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
 stop_server
 check_eq "relay --sse: a multi-line 503 body stays on one stderr line per retry" 0 \
   "$(grep -vc '^relay: ' "$err")"
+check_contains "relay --sse: a multi-line 503 body is printed flattened" "$err" \
+  "(HTTP 503): <html> <head><title>503 Service Temporarily Unavailable</title></head>"
+
+for mode in gateway502 gateway504; do
+  start_server "$mode"
+  err="$work/sse-$mode.err"
+  PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+    "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+    --topic '/devices/+/state/#' > /dev/null 2> "$err"
+  rc=$?
+  stop_server
+  check_eq "relay --sse: a $mode keeps the relay running" 124 "$rc"
+  check_contains "relay --sse: a $mode names the gateway" "$err" "the gateway answered HTTP"
+done
 
 start_server longbusy
 err="$work/sse-longbusy.err"

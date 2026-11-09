@@ -295,6 +295,10 @@ def sse_open(api, namespace, topics, key_file, idle_timeout):
         if not re.fullmatch(r"device \S+ not found", message):
             message += " (this platform has no stream route yet, or --api is not its bot API)"
         raise Fatal(1, f"HTTP 404 from the stream route: {message}")
+    if status in (502, 504):
+        message = response_message(response)
+        connection.close()
+        raise Retry(None, f"the gateway answered HTTP {status} (the portal may be restarting): {message}")
     if status in (429, 503):
         seconds = retry_after_seconds(response.getheader("Retry-After"))
         message = response_message(response)
