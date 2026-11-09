@@ -76,6 +76,9 @@ func runPortForwardWireGuard(cmd *cobra.Command, fl *api.Fleet, domain, ns, dev,
 var wgCmd = &cobra.Command{
 	Use:   "wg",
 	Short: "Inspect the WireGuard tunnel to devices",
+	// Runnable, printing its help: a command that only has subcommands is not (cobra answers with
+	// its help and runs no PersistentPreRunE), and bot mode must refuse "tnctl wg" itself.
+	RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 }
 
 var wgStatusCmd = &cobra.Command{

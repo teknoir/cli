@@ -28,8 +28,16 @@ const (
 // parseWaitLevel reads the value of --wait. A bare --wait is "ready".
 func parseWaitLevel(s string) (waitLevel, error) {
 	switch waitLevel(strings.ToLower(s)) {
-	case waitNone, waitPublished, waitApplied, waitReady:
+	case waitNone, waitPublished:
 		return waitLevel(strings.ToLower(s)), nil
+	case waitApplied, waitReady:
+		l := waitLevel(strings.ToLower(s))
+		// A TeknoirBot may not open a device shell. Refused here, before the command has read anything
+		// or written anything: a wait that cannot work must not leave a change behind.
+		if on, _, _, _ := botEnabled(); on {
+			return l, botNoDeviceShell(l)
+		}
+		return l, nil
 	}
 	return waitNone, usageErr("--wait must be published, applied or ready, not %q (write --wait=applied; a bare --wait means ready)", s)
 }
@@ -176,6 +184,11 @@ func (w *waiter) progress(key, msg string) {
 func (w *waiter) shell(ctx context.Context) (deviceExec, error) {
 	if w.ex != nil {
 		return w.ex, nil
+	}
+	// Before the device is looked up: a bot may not reach a device shell, and the refusal must send
+	// no request at all.
+	if on, _, _, _ := botEnabled(); on {
+		return nil, botNoDeviceShell(w.level)
 	}
 	if w.device == "" {
 		v, _, err := w.fl.ConfigTarget(ctx, w.target)

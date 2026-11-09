@@ -87,6 +87,11 @@ func classify(err error) error {
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		return &cliError{code: codeAuth, err: errors.New("not logged in: run tnctl login")}
 	}
+	if errors.Is(err, api.ErrBotKey) || errors.Is(err, api.ErrBotAPIInsecure) {
+		// A bot's key problem is an auth problem: the same action as a dead login, the bot is re-created
+		// or its API address fixed.
+		return &cliError{code: codeAuth, err: err}
+	}
 	var up *api.UnsupportedPlatformError
 	if errors.As(err, &up) {
 		// not a mistake in the arguments, but the exit code scripts expect for "this cannot work as asked"

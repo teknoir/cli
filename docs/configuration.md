@@ -56,6 +56,9 @@ export TNCTL_NAMESPACE=my-namespace
 export TNCTL_DEVICE=my-device
 ```
 
+Inside a TeknoirBot's computer, `TEKNOIRBOT_API`, `TNCTL_BOT_KEY_FILE`, `TEKNOIRBOT_NAMESPACE` and
+`TEKNOIR_DOMAIN` turn on [bot mode](bot-mode.md), where the config file and the login above are not read at all.
+
 ## Precedence
 
 Settings are resolved in the following order (highest wins):

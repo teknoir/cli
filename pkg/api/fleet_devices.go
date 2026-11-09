@@ -424,8 +424,12 @@ func (f *Fleet) DeviceNames(ctx context.Context) ([]string, error) {
 }
 
 // Credentials returns the login of one device. It needs the developer role in the teamspace and
-// permission to open a terminal; a viewer gets a 403 whose code is no_write or no_exec.
+// permission to open a terminal; a viewer gets a 403 whose code is no_write or no_exec. A TeknoirBot
+// never gets one: bot mode answers ErrBotNoDeviceLogin without asking the platform.
 func (f *Fleet) Credentials(ctx context.Context, name string) (*FleetDeviceCredentials, error) {
+	if f.bot {
+		return nil, ErrBotNoDeviceLogin
+	}
 	c, _, err := decode[FleetDeviceCredentials](f.Do(ctx, "POST", "devices/"+url.PathEscape(name)+"/credentials", nil, map[string]any{}))
 	if err != nil {
 		return nil, f.platformErr(ctx, err)
@@ -434,8 +438,12 @@ func (f *Fleet) Credentials(ctx context.Context, name string) (*FleetDeviceCrede
 }
 
 // CredentialsBulk returns the logins of many devices, in calls of at most MaxBulkCredentials names.
-// Names the caller may not see, or that do not exist, come back in Missing.
+// Names the caller may not see, or that do not exist, come back in Missing. A TeknoirBot gets
+// ErrBotNoDeviceLogin without asking the platform.
 func (f *Fleet) CredentialsBulk(ctx context.Context, names []string) (*FleetDeviceCredentialsBulk, error) {
+	if f.bot {
+		return nil, ErrBotNoDeviceLogin
+	}
 	out := &FleetDeviceCredentialsBulk{}
 	seen := map[string]bool{}
 	var uniq []string

@@ -28,6 +28,9 @@ Teknoir's cloud platform and edge devices. It handles authentication,
 device management, and namespace-scoped operations.`,
 	// Errors are printed by Execute, which also picks the exit code.
 	SilenceErrors: true,
+	// botPreRun refuses, in bot mode, the commands a TeknoirBot may not run. No subcommand sets
+	// its own PersistentPreRun(E); if one ever does, cobra runs only that one and this is skipped.
+	PersistentPreRunE: botPreRun,
 	Run: func(cmd *cobra.Command, args []string) {
 		cmd.Help()
 	},
