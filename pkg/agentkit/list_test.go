@@ -106,6 +106,75 @@ func TestListNothingInstalled(t *testing.T) {
 	}
 }
 
+// A managed install is checked as a whole: on an empty directory every root is reported, with every kit
+// file missing, so --check fails when nothing was installed.
+func TestListManagedEmpty(t *testing.T) {
+	o, _, _ := testOpts(t)
+	o.Scope, o.ManagedDir = ScopeManaged, t.TempDir()
+	res, err := List(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Roots) != 2 {
+		t.Fatalf("%d roots, want the skills and the hooks root: %+v", len(res.Roots), res.Roots)
+	}
+	want := map[string]int{
+		filepath.Join(o.ManagedDir, "skills"): len(mustKitFiles(t, o, kindSkills)),
+		filepath.Join(o.ManagedDir, "hooks"):  len(mustKitFiles(t, o, kindHooks)),
+	}
+	for _, r := range res.Roots {
+		n, ok := want[r.Root]
+		if !ok {
+			t.Errorf("unexpected root %+v", r)
+			continue
+		}
+		if len(r.Missing) != n || len(r.Changed) != 0 || len(r.Extra) != 0 || len(r.Outdated) != 0 {
+			t.Errorf("%s: missing %v changed %v extra %v outdated %v, want %d missing", r.Root, r.Missing, r.Changed, r.Extra, r.Outdated, n)
+		}
+		if r.KitVersion != "" || r.VersionOutdated {
+			t.Errorf("%s: kit %q outdated %v, want none", r.Root, r.KitVersion, r.VersionOutdated)
+		}
+		if r.InSync() {
+			t.Errorf("%s reports in sync", r.Root)
+		}
+	}
+	if res.InSync() {
+		t.Error("an empty managed directory reports in sync")
+	}
+	// A managed install with the guard removed: the hooks root misses it, and it is not in sync.
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	guard := filepath.Join(o.ManagedDir, "hooks", guardName)
+	if err := os.Remove(guard); err != nil {
+		t.Fatal(err)
+	}
+	res, err = List(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hooks *RootStatus
+	for i := range res.Roots {
+		if res.Roots[i].Root == filepath.Join(o.ManagedDir, "hooks") {
+			hooks = &res.Roots[i]
+		}
+	}
+	if hooks == nil || len(hooks.Missing) != 1 || hooks.Missing[0] != guardName || res.InSync() {
+		t.Errorf("the missing guard: %+v", res.Roots)
+	}
+}
+
+// mustKitFiles is the kit's files of a root kind, for counting.
+func mustKitFiles(t *testing.T, o *Options, kind string) map[string][]byte {
+	t.Helper()
+	p := newOp(o)
+	files, err := p.kitFiles(kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
 // The manifest of a root that is not the embedded kit's: a file it no longer has, and one that was
 // never installed.
 func TestListOutdatedAndExtra(t *testing.T) {

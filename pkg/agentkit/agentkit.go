@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Agent is a coding agent the kit installs for.
@@ -138,6 +139,10 @@ type Options struct {
 	AgentsMD bool // add the AGENTS.md snippet (project scope only)
 	DryRun   bool // print the plan, write nothing
 	Force    bool // overwrite files the user changed, replace a differing MCP entry
+
+	// lockTimeout is how long an edit of the user-scope Claude config waits for Claude Code's lock;
+	// zero is the default. Tests shorten it.
+	lockTimeout time.Duration
 }
 
 // Result is what an install, a list or an uninstall did.
@@ -236,6 +241,16 @@ func (p *op) refuse(path, agent, note, reason string) {
 	p.r.act(ActionRefuse, path, agent, note)
 	p.refused = append(p.refused, path)
 	p.reasons = append(p.reasons, reason)
+}
+
+// wasRefused reports whether path was refused in this run.
+func (p *op) wasRefused(path string) bool {
+	for _, r := range p.refused {
+		if filepath.Clean(r) == filepath.Clean(path) {
+			return true
+		}
+	}
+	return false
 }
 
 // refuseChanged refuses a kit file the user changed since it was installed. --force replaces it.
@@ -369,10 +384,11 @@ func (p *op) refuseProjectSymlinks() bool {
 }
 
 // allRoots are the roots `tnctl agent list` and `uninstall` visit: the skills of every agent, and the
-// guard's hooks directory of Claude Code.
+// guard's hooks directory of Claude Code. A managed install always holds the guard, so its hooks root is
+// always visited, --hooks or not.
 func (p *op) allRoots(withHooks bool) []root {
 	out := p.skillRoots()
-	if withHooks && p.has(AgentClaude) {
+	if p.o.Scope == ScopeManaged || (withHooks && p.has(AgentClaude)) {
 		out = append(out, root{Dir: filepath.Join(p.claudeDir(), "hooks"), Agents: []Agent{AgentClaude}})
 	}
 	return out

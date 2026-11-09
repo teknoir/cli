@@ -39,20 +39,23 @@ With no `--agent` the kit is installed for all three. Skills go to `~/.claude/sk
 
 ### Project scope
 
-`--project` installs into the current directory instead of your home: `.claude/skills` and `.claude/settings.json`,
-or `.agents/skills` and `.codex/config.toml` / `opencode.json`. Commit them to share the kit with everyone who
-works in the repository. `--agents-md` adds a short section to `./AGENTS.md` as well.
+`--project` installs into the current directory instead of your home: `.claude/skills`, plus `.mcp.json` with
+`--mcp` and `.claude/settings.json` with `--hooks`; `.agents/skills`, plus `.codex/config.toml` /
+`opencode.json(c)` with `--mcp`. Commit them to share the kit with everyone who works in the repository.
+`--agents-md` adds a short section to `./AGENTS.md` as well.
 
 ### The guard hook
 
 `--hooks` installs `hooks/teknoir-guard` and registers it in Claude Code's `settings.json` as a `PreToolUse`
-hook for `Bash` and `mcp__teknoir__*` calls, so it can refuse a command before it runs. Hooks work with
-Claude Code only; the other agents get the skills and the MCP server.
+hook for `Bash` and `mcp__teknoir__*` calls (`mcp__plugin_teknoir_teknoir__*` when the server comes from
+the kit's plugin), so it can refuse a command before it runs. Hooks work with Claude Code only; the other
+agents get the skills and the MCP server.
 
 ### Managed directory (images)
 
-`--managed DIR` installs the skills to `DIR/skills` and the guard to `DIR/hooks/teknoir-guard`, and touches
-nothing else — no MCP entry and no settings file. This is how the TeknoirBot image installs the kit.
+`--managed DIR` always installs the skills to `DIR/skills` and the guard to `DIR/hooks/teknoir-guard`, and
+touches nothing else — no MCP entry and no settings file. `--hooks` only adds the settings entry to copy
+into Claude Code's managed settings. This is how the TeknoirBot image installs the kit.
 
 ## Where it goes
 
@@ -70,8 +73,8 @@ file is never overwritten without `--force`.
 ```bash
 tnctl agent install [--agent claude|codex|opencode|all] [--user|--project|--managed DIR]
                     [--mcp] [--hooks] [--agents-md] [--dry-run] [--force]
-tnctl agent list [--check]
-tnctl agent uninstall [--agent ...] [--user|--project|--managed DIR] [--mcp] [--hooks]
+tnctl agent list [--check] [--user|--project|--managed DIR]
+tnctl agent uninstall [--agent ...] [--user|--project|--managed DIR] [--mcp] [--hooks] [--agents-md]
 ```
 
 See [`docs/commands/agent.md`](../docs/commands/agent.md).

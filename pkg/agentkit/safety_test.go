@@ -1,6 +1,8 @@
 package agentkit
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -8,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
+
+	kit "github.com/teknoir/cli/agentkit"
 )
 
 // ---------- helpers ----------
@@ -88,12 +93,33 @@ func tamperManifest(t *testing.T, root string, extra map[string]string) {
 	}
 }
 
-// managedOpts is a managed install of the embedded kit: the skills below DIR/skills and nothing else.
+// managedOpts is a managed install of the embedded kit: the skills below DIR/skills and the guard below
+// DIR/hooks, and nothing else.
 func managedOpts(t *testing.T) (o *Options, root string) {
 	t.Helper()
 	o, _, _ = testOpts(t)
 	o.Scope, o.ManagedDir, o.Agents = ScopeManaged, t.TempDir(), []Agent{AgentClaude}
 	return o, filepath.Join(o.ManagedDir, "skills")
+}
+
+// managedKit is the embedded kit's skills plus its guard: a managed install always writes the guard.
+func managedKit(t *testing.T) fstest.MapFS {
+	t.Helper()
+	b, err := fs.ReadFile(kit.FS, "hooks/"+guardName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fstest.MapFS{"hooks/" + guardName: &fstest.MapFile{Data: b}}
+}
+
+// managedKitWith is managedKit plus the skills of m.
+func managedKitWith(t *testing.T, m fstest.MapFS) fstest.MapFS {
+	t.Helper()
+	out := managedKit(t)
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // refusalOf runs f and requires a RefusedError naming why.
@@ -129,7 +155,8 @@ func TestManifestBadKeysRefused(t *testing.T) {
 				victim := filepath.Join(o.ManagedDir, "victim.txt")
 				writeAt(t, victim, "victim\n", 0o644)
 				tamperManifest(t, root, map[string]string{tc.key(o.ManagedDir): hashOf("victim\n")})
-				beforeRoot := snapshotTree(t, o.ManagedDir)
+				// The tampered skills root; the managed hooks root is a root of its own.
+				beforeRoot := snapshotTree(t, root)
 				refused := func() (*Result, error) {
 					if op == "install" {
 						return Install(o)
@@ -143,7 +170,7 @@ func TestManifestBadKeysRefused(t *testing.T) {
 				if got := readFile(t, victim); got != "victim\n" {
 					t.Errorf("the file outside the root was touched: %q", got)
 				}
-				if after := snapshotTree(t, o.ManagedDir); fmt.Sprint(after) != fmt.Sprint(beforeRoot) {
+				if after := snapshotTree(t, root); fmt.Sprint(after) != fmt.Sprint(beforeRoot) {
 					t.Errorf("the refused %s changed the root:\nbefore %v\nafter  %v", op, beforeRoot, after)
 				}
 			})
@@ -409,8 +436,14 @@ func TestListManifestBadKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list with a bad manifest key: %v", err)
 	}
-	if len(res.Roots) != 1 || !strings.Contains(res.Roots[0].Problem, "is not a path inside its root") {
-		t.Fatalf("roots %+v", res.Roots)
+	var bad *RootStatus
+	for i := range res.Roots {
+		if res.Roots[i].Root == root {
+			bad = &res.Roots[i]
+		}
+	}
+	if bad == nil || !strings.Contains(bad.Problem, "is not a path inside its root") {
+		t.Fatalf("the tampered root is not reported: %+v", res.Roots)
 	}
 	if res.InSync() {
 		t.Error("a refused manifest reports in sync")
@@ -1189,7 +1222,7 @@ func TestSymlinkedSettingsReadOnly(t *testing.T) {
 	link := filepath.Join(home, ".claude", "settings.json")
 	mustSymlink(t, filepath.Join(ro, "settings.json"), link)
 	re := refusalOf(t, "a read-only link target", func() (*Result, error) { return Install(o) })
-	if !strings.Contains(re.Reason, "cannot write") || !strings.Contains(re.Reason, settingsSnippet(filepath.Join(home, ".claude", "hooks", guardName))) {
+	if !strings.Contains(re.Reason, "cannot write") || !strings.Contains(re.Reason, settingsSnippet(shellQuote(filepath.Join(home, ".claude", "hooks", guardName)))) {
 		t.Errorf("the reason: %q", re.Reason)
 	}
 	if got := readFile(t, filepath.Join(ro, "settings.json")); got != "{\"model\":\"opus\"}\n" {
@@ -1361,7 +1394,7 @@ func TestUninstallKeepsRootsItNeverWrote(t *testing.T) {
 	for _, scope := range []Scope{ScopeUser, ScopeProject} {
 		t.Run(scope.String(), func(t *testing.T) {
 			o, home, project := testOpts(t)
-			o.Scope, o.Agents, o.Hooks = scope, []Agent{AgentClaude, AgentCodex}, true
+			o.Scope, o.Agents, o.Hooks = scope, []Agent{AgentClaude, AgentCodex, AgentOpencode}, true
 			base := home
 			if scope == ScopeProject {
 				base = project
@@ -1431,11 +1464,11 @@ func TestInstallRefusalRepeats(t *testing.T) {
 // every file keeps its bytes, its mode and its mtime.
 func TestInstallDryRunOverExistingInstall(t *testing.T) {
 	o, _ := managedOpts(t)
-	o.FS = fstest.MapFS{
+	o.FS = managedKitWith(t, fstest.MapFS{
 		"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("a\n")},
 		"skills/b/SKILL.md": &fstest.MapFile{Data: []byte("b\n")},
 		"skills/c/SKILL.md": &fstest.MapFile{Data: []byte("c\n")},
-	}
+	})
 	if _, err := Install(o); err != nil {
 		t.Fatal(err)
 	}
@@ -1448,10 +1481,10 @@ func TestInstallDryRunOverExistingInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeAt(t, filepath.Join(root, "c", "SKILL.md"), "mine\n", 0o644)
-	o.FS = fstest.MapFS{
+	o.FS = managedKitWith(t, fstest.MapFS{
 		"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("a-new\n")},
 		"skills/c/SKILL.md": &fstest.MapFile{Data: []byte("c\n")},
-	}
+	})
 	o.DryRun = true
 	before := snapshotTree(t, o.ManagedDir)
 	res, err := Install(o)
@@ -1475,17 +1508,17 @@ func TestInstallDryRunOverExistingInstall(t *testing.T) {
 // A changed orphan stays in the manifest after the run, and a later uninstall keeps it.
 func TestChangedOrphanStaysInManifest(t *testing.T) {
 	o, _ := managedOpts(t)
-	o.FS = fstest.MapFS{
+	o.FS = managedKitWith(t, fstest.MapFS{
 		"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("a\n")},
 		"skills/b/SKILL.md": &fstest.MapFile{Data: []byte("b\n")},
-	}
+	})
 	if _, err := Install(o); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(o.ManagedDir, "skills")
 	b := filepath.Join(root, "b", "SKILL.md")
 	writeAt(t, b, "mine\n", 0o644)
-	o.FS = fstest.MapFS{"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("a\n")}}
+	o.FS = managedKitWith(t, fstest.MapFS{"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("a\n")}})
 	res, err := Install(o)
 	if err != nil {
 		t.Fatal(err)
@@ -1600,5 +1633,199 @@ func TestProjectSkillRootSymlinkTargetUntouched(t *testing.T) {
 				t.Errorf("the link's target changed:\nbefore %v\nafter  %v", before, after)
 			}
 		})
+	}
+}
+
+// ---------- U12, U13, U15, U22, U25 ----------
+
+// An install followed by an uninstall gives the user's files back byte for byte: the same content, with
+// one newline at the end and the foreign values unescaped.
+func TestConfigFilesRoundTripBytes(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.MCP, o.Hooks = []Agent{AgentClaude}, true, true
+	// The bytes tnctl itself writes for the same content: sorted keys, 2-space indent, one newline.
+	canonical := func(v any) string {
+		raw, err := marshalNoEscape(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := json.Indent(&out, raw, "", "  "); err != nil {
+			t.Fatal(err)
+		}
+		return out.String() + "\n"
+	}
+	claudeJSON := canonical(map[string]any{
+		"numStartups": 42,
+		"projects":    map[string]any{"/x": map[string]any{"allowedTools": []string{"Bash(a && b < c > d)"}}},
+		"mcpServers":  map[string]any{"github": map[string]any{"url": "https://x/y?a=1&b=2"}},
+	})
+	settings := canonical(map[string]any{
+		"model":       "opus",
+		"permissions": map[string]any{"deny": []string{"Bash(rm -rf:* && echo x > y)"}},
+		"hooks":       map[string]any{"PreToolUse": []any{map[string]any{"matcher": "Write", "hooks": []any{map[string]any{"type": "command", "command": "/usr/local/bin/check & lint < x"}}}}},
+	})
+	claudePath := filepath.Join(home, ".claude.json")
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	writeAt(t, claudePath, claudeJSON, 0o600)
+	writeAt(t, settingsPath, settings, 0o644)
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	// The install keeps every foreign value as it was, unescaped.
+	for p, want := range map[string]string{
+		claudePath:   "Bash(a && b < c > d)",
+		settingsPath: "Bash(rm -rf:* && echo x > y)",
+	} {
+		got := readFile(t, p)
+		if !strings.Contains(got, want) {
+			t.Errorf("%s: %q was escaped:\n%s", p, want, got)
+		}
+		if strings.HasSuffix(got, "\n\n") {
+			t.Errorf("%s ends in two newlines:\n%q", p, got)
+		}
+	}
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]string{claudePath: claudeJSON, settingsPath: settings} {
+		if got := readFile(t, p); got != want {
+			t.Errorf("%s after install and uninstall:\n got %q\nwant %q", p, got, want)
+		}
+	}
+}
+
+// A config file the kit empties comes back as the same empty object: one newline, never two.
+func TestConfigFilesRoundTripExact(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.Hooks = []Agent{AgentClaude}, true
+	path := filepath.Join(home, ".claude", "settings.json")
+	// What the kit writes is sorted and indented; the same file, written by tnctl once, comes back.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	installed := readFile(t, path)
+	if !strings.HasSuffix(installed, "}\n") || strings.HasSuffix(installed, "}\n\n") {
+		t.Errorf("settings.json ends with %q", installed[len(installed)-5:])
+	}
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != "{}\n" {
+		t.Errorf("settings.json after install and uninstall: %q, want %q", got, "{}\n")
+	}
+}
+
+// Codex and OpenCode read the same skills root: an uninstall of one of them keeps it, and the other
+// agent's MCP entry stays too.
+func TestUninstallKeepsSharedSkills(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.MCP = []Agent{AgentCodex, AgentOpencode}, true
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(home, ".agents", "skills")
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	opencodeConfig := filepath.Join(home, ".config", "opencode", "opencode.json")
+	o.Agents = []Agent{AgentCodex}
+	res, err := Uninstall(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, filepath.FromSlash(skillRel))); err != nil {
+		t.Errorf("the shared skills went with one agent: %v", err)
+	}
+	if !hasAction(res, ActionKeep, shared) {
+		t.Errorf("actions %v", actionsOf(res))
+	}
+	if joined := strings.Join(res.Warnings, "\n"); !strings.Contains(joined, "shared by Codex and OpenCode") {
+		t.Errorf("no warning about the shared root: %v", res.Warnings)
+	}
+	if got := readFile(t, codexConfig); strings.Contains(got, mcpServerName) {
+		t.Errorf("Codex's MCP entry survived: %s", got)
+	}
+	if got := readFile(t, opencodeConfig); !strings.Contains(got, mcpServerName) {
+		t.Errorf("OpenCode's MCP entry went with Codex's uninstall: %s", got)
+	}
+	// With both named, the shared root goes.
+	o.Agents = []Agent{AgentCodex, AgentOpencode}
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(shared); !os.IsNotExist(err) {
+		t.Errorf("the shared skills survived the uninstall of both: %v", err)
+	}
+	_ = home
+}
+
+// A dangling opencode.jsonc link is seen: the MCP entry is refused for it, and no opencode.json is
+// created beside it.
+func TestOpencodeDanglingJSONC(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.MCP = []Agent{AgentOpencode}, true
+	dir := filepath.Join(home, ".config", "opencode")
+	mustSymlink(t, filepath.Join(dir, "missing.jsonc"), filepath.Join(dir, "opencode.jsonc"))
+	re := refusalOf(t, "a dangling opencode.jsonc", func() (*Result, error) { return Install(o) })
+	if !strings.Contains(re.Reason, "dangling") || !strings.Contains(re.Reason, "opencode.jsonc") {
+		t.Errorf("the reason: %q", re.Reason)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "opencode.json")); !os.IsNotExist(err) {
+		t.Errorf("an opencode.json was created next to the link: %v", err)
+	}
+}
+
+// Claude Code's lock on its config file: a held lock makes the run wait and then fail; a stale one is
+// taken over; a dry run takes no lock at all.
+func TestClaudeConfigLock(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.MCP = []Agent{AgentClaude}, true
+	o.lockTimeout = 150 * time.Millisecond
+	path := filepath.Join(home, ".claude.json")
+	lock := path + ".lock"
+	if err := os.MkdirAll(lock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err := Install(o)
+	if err == nil || !strings.Contains(err.Error(), "Claude Code holds "+lock) {
+		t.Fatalf("err %v, want the lock error", err)
+	}
+	if d := time.Since(start); d < o.lockTimeout {
+		t.Errorf("the run did not wait for the lock: %v", d)
+	}
+	// The lock the test held is still there: tnctl never takes over a lock it just found fresh.
+	if _, err := os.Stat(lock); err != nil {
+		t.Errorf("tnctl removed the held lock: %v", err)
+	}
+	// A stale lock is taken over: the run goes through and its own lock is removed.
+	old := time.Now().Add(-20 * time.Second)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(o); err != nil {
+		t.Fatalf("a stale lock: %v", err)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Errorf("the lock was left behind: %v", err)
+	}
+	if got := readFile(t, path); !strings.Contains(got, mcpServerName) {
+		t.Errorf(".claude.json was not written: %s", got)
+	}
+	// A dry run takes no lock and creates none.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	o.DryRun = true
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Errorf("the dry run made a lock: %v", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	kit "github.com/teknoir/cli/agentkit"
 )
@@ -82,6 +83,53 @@ func TestAgentsMDCreateAndReplace(t *testing.T) {
 	}
 	if !strings.HasPrefix(after, agentsMDOthers+"\n") {
 		t.Errorf("the text outside the markers changed:\n%s", after)
+	}
+}
+
+// A second install over a section that is already the kit's writes nothing: the bytes and the mtime
+// stay, and the run records a keep.
+func TestAgentsMDSecondInstallKeeps(t *testing.T) {
+	o, _, project := testOpts(t)
+	o.Scope, o.Agents, o.AgentsMD = ScopeProject, []Agent{AgentClaude}, true
+	path := filepath.Join(project, "AGENTS.md")
+	if err := os.WriteFile(path, []byte(agentsMDOthers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	before := readFile(t, path)
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A mtime far enough in the past that any rewrite shows (the file systems round to a second).
+	past := st.ModTime().Add(-time.Hour)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Install(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != before {
+		t.Errorf("the second install changed AGENTS.md:\n%s", got)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(past) {
+		t.Errorf("the second install wrote AGENTS.md: mtime %v, want %v", after.ModTime(), past)
+	}
+	var keep *Action
+	for i := range res.Actions {
+		if res.Actions[i].Path == path {
+			keep = &res.Actions[i]
+		}
+	}
+	if keep == nil || keep.Action != ActionKeep || keep.Note != "the teknoir section is up to date" {
+		t.Errorf("actions %v, want one keep of AGENTS.md", actionsOf(res))
 	}
 }
 

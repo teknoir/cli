@@ -22,21 +22,24 @@ type agentFlags struct {
 	managed string
 }
 
-// addScopeFlags adds --agent and the three scopes (mutually exclusive) to a command.
-func (f *agentFlags) addScopeFlags(c *cobra.Command, withAgents bool) {
+// addScopeFlags adds --agent and the three scopes (mutually exclusive) to a command. userHelp is the
+// --user help text, which says what the default of that command visits.
+func (f *agentFlags) addScopeFlags(c *cobra.Command, withAgents bool, userHelp string) {
 	if withAgents {
 		c.Flags().StringSliceVar(&f.agents, "agent", []string{"all"},
 			"Agents: claude, codex, opencode or all (repeat or comma-separate)")
 	}
-	c.Flags().BoolVar(&f.user, "user", false, "User scope: ~/.claude and ~/.agents (the default)")
+	c.Flags().BoolVar(&f.user, "user", false, userHelp)
 	c.Flags().BoolVar(&f.project, "project", false,
 		"Project scope: ./.claude, ./.agents and the agent config files of this directory")
 	c.Flags().StringVar(&f.managed, "managed", "", "Managed scope: skills and hooks below DIR, and nothing else")
-	c.MarkFlagsMutuallyExclusive("user", "project", "managed")
 }
 
 // options builds the agentkit options of the scope the flags name.
 func (f *agentFlags) options() (*agentkit.Options, error) {
+	if n := len(f.scopes()); n > 1 {
+		return nil, usageErr("--user, --project and --managed are mutually exclusive")
+	}
 	agents, err := agentkit.ResolveAgents(f.agents)
 	if err != nil {
 		return nil, usageErr("%v", err)
@@ -73,6 +76,21 @@ func (f *agentFlags) options() (*agentkit.Options, error) {
 	return o, nil
 }
 
+// scopes names the scopes the flags set, at most one of which is allowed.
+func (f *agentFlags) scopes() []string {
+	var out []string
+	if f.user {
+		out = append(out, "--user")
+	}
+	if f.project {
+		out = append(out, "--project")
+	}
+	if f.managed != "" {
+		out = append(out, "--managed")
+	}
+	return out
+}
+
 // listOptions are the scopes `agent list` visits: both the user and the project scope unless a flag
 // names one.
 func (f *agentFlags) listOptions() ([]*agentkit.Options, error) {
@@ -80,7 +98,7 @@ func (f *agentFlags) listOptions() ([]*agentkit.Options, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f.user || f.project || f.managed != "" {
+	if len(f.scopes()) > 0 {
 		return []*agentkit.Options{o}, nil
 	}
 	user, project := *o, *o
@@ -117,7 +135,8 @@ files register the teknoir MCP server.
 Both scopes are visited unless --user, --project or --managed names one.
 
 --check exits non-zero when anything differs from the kit this tnctl carries (a missing or changed file,
-or another kit version): for CI and for the TeknoirBot image test.`,
+another kit version, or nothing installed at all); a managed install is checked as a whole. It is for CI
+and for the TeknoirBot image test.`,
 		Example: `  tnctl agent list
   tnctl agent list --check
   tnctl agent list --managed /etc/claude-code/.claude --check`,
@@ -153,14 +172,17 @@ or another kit version): for CI and for the TeknoirBot image test.`,
 			} else {
 				printAgentList(cmd.OutOrStdout(), res)
 			}
+			if check && len(res.Roots) == 0 {
+				return newErr(codeRejected, "no agent kit install found: run tnctl agent install")
+			}
 			if check && !res.InSync() {
 				return newErr(codeRejected, "an agent kit install differs from this tnctl's kit: run tnctl agent install")
 			}
 			return nil
 		},
 	}
-	f.addScopeFlags(c, false)
-	c.Flags().BoolVar(&check, "check", false, "Exit non-zero when an install differs from this tnctl's kit")
+	f.addScopeFlags(c, false, "Only the user scope (default: both scopes)")
+	c.Flags().BoolVar(&check, "check", false, "Exit non-zero when an install differs from this tnctl's kit, or nothing is installed")
 	return c
 }
 
@@ -169,7 +191,7 @@ func newAgentUninstallCmd(_ *cliEnv) *cobra.Command {
 	var mcp, hooks, agentsMD bool
 	c := &cobra.Command{
 		SilenceUsage: true,
-		Use:          "uninstall [--agent ...] [--user|--project|--managed DIR] [--mcp] [--hooks]",
+		Use:          "uninstall [--agent ...] [--user|--project|--managed DIR] [--mcp] [--hooks] [--agents-md]",
 		Short:        "Remove the agent kit from this computer",
 		Long: `Remove the agent kit from the scope given: exactly the files the kit's manifests record, while
 they still match, and the manifests. A file you changed is kept and reported.
@@ -197,7 +219,7 @@ PreToolUse entry, --agents-md the section from ./AGENTS.md.`,
 			o.AgentsMD = agentsMD
 			res, err := agentkit.Uninstall(o)
 			if res != nil && (err == nil || len(res.Actions) > 0) {
-				if perr := printAgentResult(cmd.OutOrStdout(), format, res, false); perr != nil {
+				if perr := printAgentResult(cmd.OutOrStdout(), cmd.ErrOrStderr(), format, res, false); perr != nil {
 					return perr
 				}
 			}
@@ -207,7 +229,7 @@ PreToolUse entry, --agents-md the section from ./AGENTS.md.`,
 			return nil
 		},
 	}
-	f.addScopeFlags(c, true)
+	f.addScopeFlags(c, true, "User scope: ~/.claude and ~/.agents (the default)")
 	c.Flags().BoolVar(&mcp, "mcp", false, "Also remove the teknoir MCP server from the agent config files")
 	c.Flags().BoolVar(&hooks, "hooks", false, "Also remove the guard hook and its PreToolUse entry")
 	c.Flags().BoolVar(&agentsMD, "agents-md", false, "Also remove the kit's section from ./AGENTS.md")
@@ -226,10 +248,17 @@ func classifyAgentErr(err error) error {
 	return classify(err)
 }
 
-// printAgentResult prints one line per action and a summary, or the actions as JSON with -o json.
-func printAgentResult(w io.Writer, format string, res *agentkit.Result, dryRun bool) error {
+// printAgentResult prints one line per action and a summary, or the actions as JSON with -o json. The
+// warnings always go to the error stream, so a structured result stays parseable.
+func printAgentResult(w, errW io.Writer, format string, res *agentkit.Result, dryRun bool) error {
 	if format != "table" {
-		return writeStructured(w, format, marshalRaw(res.Actions))
+		if err := writeStructured(w, format, marshalRaw(res.Actions)); err != nil {
+			return err
+		}
+		for _, warn := range res.Warnings {
+			fmt.Fprintf(errW, "warning: %s\n", warn)
+		}
+		return nil
 	}
 	prefix := ""
 	if dryRun {
@@ -280,7 +309,9 @@ func printAgentList(w io.Writer, res *agentkit.ListResult) {
 			continue
 		}
 		state := "ok"
-		if !r.InSync() {
+		if r.KitVersion == "" {
+			state = "not installed"
+		} else if !r.InSync() {
 			var why []string
 			if r.VersionOutdated {
 				why = append(why, "kit "+r.KitVersion+" installed, "+r.EmbeddedVersion+" embedded")

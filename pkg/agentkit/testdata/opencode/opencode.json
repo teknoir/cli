@@ -9,5 +9,5 @@
       }
     }
   },
-  "permission": {"bash": {"git push": "ask"}}
+  "permission": {"bash": {"git push": "ask", "echo a && echo b < in > out": "allow"}}
 }

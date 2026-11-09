@@ -20,7 +20,8 @@
   "projects": {
     "/home/anders/git/ai": {
       "allowedTools": [
-        "Bash(go test:*)"
+        "Bash(go test:*)",
+        "Bash(echo a && echo b < in > out)"
       ],
       "history": [
         {
@@ -31,4 +32,3 @@
     }
   }
 }
-

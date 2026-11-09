@@ -20,9 +20,9 @@
   },
   "permission": {
     "bash": {
-      "git push": "ask"
+      "git push": "ask",
+      "echo a && echo b < in > out": "allow"
     }
   },
   "theme": "tokyonight"
 }
-

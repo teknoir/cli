@@ -207,9 +207,28 @@ func TestInstallSharedAgentsRoot(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".claude")); err == nil {
 		t.Error("a claude directory was written for codex,opencode")
 	}
+	// One manifest, in the root both agents read.
+	var manifests []string
+	err := filepath.WalkDir(home, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && d.Name() == manifestName {
+			manifests = append(manifests, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(home, ".agents", "skills", manifestName)
+	if len(manifests) != 1 || manifests[0] != shared {
+		t.Errorf("the manifests %v, want only %s", manifests, shared)
+	}
 }
 
-// kitRootAgents reads the agent label each root's manifest records.
+// kitRootAgents reads the agent label of each root the options visit: the label comes from the options,
+// never from the manifest, which records no agent.
 func kitRootAgents(t *testing.T, o *Options) []string {
 	t.Helper()
 	res, err := List(o)
@@ -274,10 +293,10 @@ func TestInstallRefusesChangedFile(t *testing.T) {
 	o.ManagedDir = t.TempDir()
 	o.Agents = []Agent{AgentClaude}
 	// A kit of two skills, so one can be refused while the other is written.
-	o.FS = fstest.MapFS{
+	o.FS = managedKitWith(t, fstest.MapFS{
 		"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: a\n---\nx\n")},
 		"skills/b/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: b\n---\ny\n")},
-	}
+	})
 	if _, err := Install(o); err != nil {
 		t.Fatal(err)
 	}
@@ -286,11 +305,11 @@ func TestInstallRefusesChangedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The kit gains a skill while a is refused: the new one is still written.
-	o.FS = fstest.MapFS{
+	o.FS = managedKitWith(t, fstest.MapFS{
 		"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: a\n---\nx\n")},
 		"skills/b/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: b\n---\ny\n")},
 		"skills/c/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: c\n---\nz\n")},
-	}
+	})
 	res, err := Install(o)
 	re, ok := Refused(err)
 	if !ok {
@@ -334,16 +353,16 @@ func TestInstallRemovedKitFile(t *testing.T) {
 	o.Scope = ScopeManaged
 	o.ManagedDir = t.TempDir()
 	o.Agents = []Agent{AgentClaude}
-	o.FS = fstest.MapFS{
+	o.FS = managedKitWith(t, fstest.MapFS{
 		"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("a\n")},
 		"skills/b/SKILL.md": &fstest.MapFile{Data: []byte("b\n")},
 		"skills/c/SKILL.md": &fstest.MapFile{Data: []byte("c\n")},
-	}
+	})
 	if _, err := Install(o); err != nil {
 		t.Fatal(err)
 	}
 	// The kit drops b, and the user changes c.
-	o.FS = fstest.MapFS{"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("a\n")}}
+	o.FS = managedKitWith(t, fstest.MapFS{"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("a\n")}})
 	c := filepath.Join(o.ManagedDir, "skills", "c", "SKILL.md")
 	if err := os.WriteFile(c, []byte("mine\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -404,45 +423,109 @@ func hasNotAction(res *Result, action string) bool {
 	return true
 }
 
-// --managed installs the skills and the guard, and touches nothing else; --hooks prints the settings
-// entry instead of writing it.
+// --managed installs the skills and the guard always, and touches nothing else; --hooks adds the
+// settings entry to add by hand and writes nothing more.
 func TestInstallManaged(t *testing.T) {
-	o, home, _ := testOpts(t)
+	for _, hooks := range []bool{false, true} {
+		t.Run(fmt.Sprintf("hooks=%v", hooks), func(t *testing.T) {
+			o, home, _ := testOpts(t)
+			dir := t.TempDir()
+			o.Scope, o.ManagedDir, o.Hooks = ScopeManaged, dir, hooks
+			res, err := Install(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "skills", "teknoir-platform", "SKILL.md")); err != nil {
+				t.Error(err)
+			}
+			guard := filepath.Join(dir, "hooks", guardName)
+			st, err := os.Stat(guard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Mode().Perm() != 0o755 {
+				t.Errorf("guard mode %04o, want 0755", st.Mode().Perm())
+			}
+			if _, err := os.Stat(filepath.Join(dir, "hooks", manifestName)); err != nil {
+				t.Errorf("no manifest for the guard: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "settings.json")); !os.IsNotExist(err) {
+				t.Errorf("a managed install wrote settings.json: %v", err)
+			}
+			// The guard is installed once: one write of it, not a second from a hooks step.
+			guardActions := 0
+			for _, a := range res.Actions {
+				if a.Path == guard && a.Action != ActionSkip {
+					guardActions++
+				}
+			}
+			if guardActions != 1 {
+				t.Errorf("%d install actions for the guard, want 1: %v", guardActions, actionsOf(res))
+			}
+			joined := strings.Join(res.Warnings, "\n")
+			if !hooks {
+				if len(res.Warnings) != 0 {
+					t.Errorf("a managed install without --hooks printed %v", res.Warnings)
+				}
+				if !hasNotAction(res, ActionSkip) {
+					t.Errorf("a managed install without --hooks recorded a snippet: %v", actionsOf(res))
+				}
+			} else {
+				if !strings.Contains(joined, "managed-settings") {
+					t.Errorf("the snippet does not name the managed settings: %v", res.Warnings)
+				}
+				snippet := joined
+				if !strings.Contains(snippet, `"command":"`+shellQuote(guard)+`"`) {
+					t.Errorf("the snippet names no guard: %v", res.Warnings)
+				}
+				if !hasAction(res, ActionSkip, guard) {
+					t.Errorf("the snippet is not an action: %v", actionsOf(res))
+				}
+			}
+			// Nothing went to the home directory.
+			if _, err := os.Stat(filepath.Join(home, ".claude")); !os.IsNotExist(err) {
+				t.Errorf("a managed install wrote below HOME: %v", err)
+			}
+		})
+	}
+}
+
+// A managed install always holds the guard: uninstall removes it and its manifest without --hooks, and
+// a dry run of it has exactly one action for the guard.
+func TestInstallManagedGuardUninstall(t *testing.T) {
+	o, _, _ := testOpts(t)
 	dir := t.TempDir()
-	o.Scope, o.ManagedDir, o.Hooks = ScopeManaged, dir, true
+	o.Scope, o.ManagedDir = ScopeManaged, dir
+	o.Hooks, o.DryRun = true, true
+	// A fresh directory: the plan has one write for the guard.
 	res, err := Install(o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "skills", "teknoir-platform", "SKILL.md")); err != nil {
-		t.Error(err)
-	}
 	guard := filepath.Join(dir, "hooks", guardName)
-	st, err := os.Stat(guard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Mode().Perm() != 0o755 {
-		t.Errorf("guard mode %04o, want 0755", st.Mode().Perm())
-	}
-	if _, err := os.Stat(filepath.Join(dir, "hooks", manifestName)); err != nil {
-		t.Errorf("no manifest for the guard: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "settings.json")); !os.IsNotExist(err) {
-		t.Errorf("a managed install wrote settings.json: %v", err)
-	}
-	var snippet string
-	for _, w := range res.Warnings {
-		if strings.Contains(w, "PreToolUse") {
-			snippet = w
+	n := 0
+	for _, a := range res.Actions {
+		if a.Path == guard && a.Action != ActionSkip {
+			n++
 		}
 	}
-	if !strings.Contains(snippet, `"command":"`+guard+`"`) {
-		t.Errorf("the snippet names no guard: %v", res.Warnings)
+	if n != 1 || !hasAction(res, ActionWrite, guard) {
+		t.Errorf("%d install actions for the guard, want one write: %v", n, actionsOf(res))
 	}
-	// Nothing went to the home directory.
-	if _, err := os.Stat(filepath.Join(home, ".claude")); !os.IsNotExist(err) {
-		t.Errorf("a managed install wrote below HOME: %v", err)
+	o.DryRun, o.Hooks = false, false
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(guard); err != nil {
+		t.Fatalf("no guard after a managed install without --hooks: %v", err)
+	}
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{guard, filepath.Join(dir, "hooks", manifestName)} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived the uninstall: %v", p, err)
+		}
 	}
 }
 

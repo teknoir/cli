@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -91,7 +92,8 @@ func (p *op) opencodeMCPFile() (string, bool) {
 		dir = p.o.OpencodeConfigDir
 	}
 	jsonc := filepath.Join(dir, "opencode.jsonc")
-	if _, err := os.Stat(jsonc); err == nil {
+	// Lstat: a dangling opencode.jsonc link is found too, so the .json is not created beside it.
+	if _, err := os.Lstat(jsonc); err == nil {
 		return jsonc, true
 	}
 	return filepath.Join(dir, "opencode.json"), false
@@ -118,34 +120,36 @@ func (p *op) registerJSONEntry(path string, def os.FileMode, jsonc bool, contain
 		p.refuse(path, agent, why+" "+snippet, why+" "+snippet)
 		return nil
 	}
-	top, err := p.readJSONConfig(target, jsonc, agent, snippet)
-	if top == nil {
-		return err
-	}
-	existing, err := jsonLookup(top, container, mcpServerName)
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	switch {
-	case existing == nil:
-		if err := jsonSetPath(top, container, mcpServerName, entry); err != nil {
+	return p.withClaudeConfigLock(path, func() error {
+		top, err := p.readJSONConfig(target, jsonc, agent, snippet)
+		if top == nil {
+			return err
+		}
+		existing, err := jsonLookup(top, container, mcpServerName)
+		if err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
-		p.r.act(ActionRegister, path, agent, entryAt)
-	case jsonEqual(existing, entry):
-		p.r.act(ActionAlreadyRegister, path, agent, entryAt)
-		return nil
-	case p.o.Force:
-		if err := jsonSetPath(top, container, mcpServerName, entry); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+		switch {
+		case existing == nil:
+			if err := jsonSetPath(top, container, mcpServerName, entry); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			p.r.act(ActionRegister, path, agent, entryAt)
+		case jsonEqual(existing, entry):
+			p.r.act(ActionAlreadyRegister, path, agent, entryAt)
+			return nil
+		case p.o.Force:
+			if err := jsonSetPath(top, container, mcpServerName, entry); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			p.r.act(ActionRegister, path, agent, entryAt+": replaced a differing one (--force)")
+		default:
+			p.r.act(ActionSkip, path, agent, entryAt+".teknoir differs: kept it (use --force to replace it)")
+			p.r.warn("%s already has a different %s.%s; kept it (use --force to replace it)", path, entryAt, mcpServerName)
+			return nil
 		}
-		p.r.act(ActionRegister, path, agent, entryAt+": replaced a differing one (--force)")
-	default:
-		p.r.act(ActionSkip, path, agent, entryAt+".teknoir differs: kept it (use --force to replace it)")
-		p.r.warn("%s already has a different %s.%s; kept it (use --force to replace it)", path, entryAt, mcpServerName)
-		return nil
-	}
-	return p.writeJSON(target, top, def)
+		return p.writeJSON(target, top, def)
+	})
 }
 
 // removeJSONEntry drops the MCP entry from a JSON config file, when it is ours.
@@ -156,28 +160,76 @@ func (p *op) removeJSONEntry(path string, def os.FileMode, jsonc bool, container
 		p.refuse(path, agent, why+" "+snippet, why+" "+snippet)
 		return nil
 	}
-	top, err := p.readJSONConfig(target, jsonc, agent, snippet)
-	if top == nil {
-		return err
+	return p.withClaudeConfigLock(path, func() error {
+		top, err := p.readJSONConfig(target, jsonc, agent, snippet)
+		if top == nil {
+			return err
+		}
+		existing, err := jsonLookup(top, container, mcpServerName)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		switch {
+		case existing == nil:
+			p.r.act(ActionSkip, path, agent, "no teknoir MCP entry")
+			return nil
+		case !jsonEqual(existing, entry):
+			p.r.act(ActionSkip, path, agent, "a different teknoir MCP entry: kept it")
+			p.r.warn("%s has a teknoir MCP entry that is not the kit's; kept it", path)
+			return nil
+		}
+		if err := jsonRemovePath(top, container, mcpServerName); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		p.r.act(ActionDelete, path, agent, "teknoir MCP entry")
+		return p.writeJSON(target, top, def)
+	})
+}
+
+const (
+	// claudeConfigLockWait is how long an edit of the user-scope Claude config waits for Claude Code's
+	// lock before it gives up, as Claude Code's own lock does.
+	claudeConfigLockWait = 5 * time.Second
+	// claudeConfigLockStale is the age at which a lock is taken over: Claude Code removes its own lock
+	// when it closes, so one this old was left behind by a process that died.
+	claudeConfigLockStale = 10 * time.Second
+)
+
+// withClaudeConfigLock runs fn under the lock Claude Code itself holds while it saves its config file
+// (~/.claude.json.lock, a lock directory), so tnctl's read, merge and write cannot lose a save Claude
+// Code makes at the same moment. Only the user-scope Claude config file is locked; a dry run never takes
+// the lock, and a symlinked config file is locked under the path Claude Code knows.
+func (p *op) withClaudeConfigLock(path string, fn func() error) error {
+	if p.o.DryRun || p.o.Scope != ScopeUser || p.o.ClaudeConfigFile == "" ||
+		filepath.Clean(path) != filepath.Clean(p.o.ClaudeConfigFile) {
+		return fn()
 	}
-	existing, err := jsonLookup(top, container, mcpServerName)
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+	lock := path + ".lock"
+	wait := p.o.lockTimeout
+	if wait <= 0 {
+		wait = claudeConfigLockWait
 	}
-	switch {
-	case existing == nil:
-		p.r.act(ActionSkip, path, agent, "no teknoir MCP entry")
-		return nil
-	case !jsonEqual(existing, entry):
-		p.r.act(ActionSkip, path, agent, "a different teknoir MCP entry: kept it")
-		p.r.warn("%s has a teknoir MCP entry that is not the kit's; kept it", path)
-		return nil
+	deadline := time.Now().Add(wait)
+	for {
+		err := os.Mkdir(lock, 0o755)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		if fi, serr := os.Stat(lock); serr == nil && time.Since(fi.ModTime()) > claudeConfigLockStale {
+			if rerr := os.Remove(lock); rerr == nil || errors.Is(rerr, fs.ErrNotExist) {
+				continue
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Claude Code holds %s; run again", lock)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	if err := jsonRemovePath(top, container, mcpServerName); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	p.r.act(ActionDelete, path, agent, "teknoir MCP entry")
-	return p.writeJSON(target, top, def)
+	defer os.Remove(lock)
+	return fn()
 }
 
 // readJSONConfig reads a JSON config file, returning nil (and an error) when it cannot be edited. A
@@ -253,7 +305,7 @@ func jsonSetPath(obj map[string]json.RawMessage, container []string, name string
 	if err := jsonSetPath(child, container[1:], name, value); err != nil {
 		return err
 	}
-	b, err := json.Marshal(child)
+	b, err := marshalNoEscape(child)
 	if err != nil {
 		return err
 	}
@@ -283,7 +335,7 @@ func jsonRemovePath(obj map[string]json.RawMessage, container []string, name str
 		delete(obj, container[0])
 		return nil
 	}
-	b, err := json.Marshal(child)
+	b, err := marshalNoEscape(child)
 	if err != nil {
 		return err
 	}

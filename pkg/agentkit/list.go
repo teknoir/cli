@@ -100,6 +100,10 @@ func (p *op) rootStatus(r root) (*RootStatus, bool, error) {
 	mfPath := manifestPath(r.Dir)
 	rr, err := openRoot(r.Dir)
 	if err != nil || rr == nil {
+		if err == nil && p.o.Scope == ScopeManaged {
+			// A managed install is checked as a whole: a root that is not there has every file missing.
+			return p.absentRoot(r)
+		}
 		// A root that does not exist holds nothing.
 		return nil, false, err
 	}
@@ -109,6 +113,9 @@ func (p *op) rootStatus(r root) (*RootStatus, bool, error) {
 		return nil, false, err
 	}
 	if !exists {
+		if p.o.Scope == ScopeManaged {
+			return p.absentRoot(r)
+		}
 		return nil, false, nil
 	}
 	kind := rootKind(r.Dir)
@@ -178,6 +185,20 @@ func (p *op) rootStatus(r root) (*RootStatus, bool, error) {
 		}
 	}
 	return st, true, nil
+}
+
+// absentRoot is a managed root without a manifest: the install is not there, and every kit file is
+// missing from it.
+func (p *op) absentRoot(r root) (*RootStatus, bool, error) {
+	kind := rootKind(r.Dir)
+	kit, err := p.kitFiles(kind)
+	if err != nil {
+		return nil, false, fmt.Errorf("read the kit: %w", err)
+	}
+	return &RootStatus{
+		Root: r.Dir, Agent: agentLabel(r.Agents), Kind: kind, EmbeddedVersion: p.o.KitVersion,
+		Missing: sortedKeys(kit),
+	}, true, nil
 }
 
 // belowAny reports whether path is at or below one of the links.

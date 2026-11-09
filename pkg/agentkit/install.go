@@ -3,6 +3,8 @@ package agentkit
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"path/filepath"
 )
 
 // Install installs the kit for the agents of the options, in the scope of the options: the skills, and
@@ -66,7 +68,14 @@ func (p *op) install() error {
 			return err
 		}
 	}
-	if p.o.Hooks {
+	switch {
+	case p.o.Scope == ScopeManaged:
+		// A managed install is the TeknoirBot image's Claude Code, and the image's managed settings
+		// point at the guard: it is always written, and --hooks only adds the entry to add by hand.
+		if err := p.installManagedGuard(); err != nil {
+			return err
+		}
+	case p.o.Hooks:
 		if !p.has(AgentClaude) {
 			p.r.warn("hooks are installed for Claude Code only")
 		} else if err := p.installHooks(); err != nil {
@@ -83,5 +92,27 @@ func (p *op) install() error {
 			return err
 		}
 	}
+	return nil
+}
+
+// installManagedGuard writes the guard below the managed directory's hooks root, and with Hooks records
+// the settings entry the image adds to Claude Code's managed settings by hand. Each run writes the guard
+// exactly once, with or without --hooks.
+func (p *op) installManagedGuard() error {
+	content, err := fs.ReadFile(p.o.FS, "hooks/"+guardName)
+	if err != nil {
+		return err
+	}
+	hooksDir := filepath.Join(p.o.ManagedDir, "hooks")
+	if err := p.installSet(hooksDir, map[string][]byte{guardName: content}, string(AgentClaude)); err != nil {
+		return err
+	}
+	if !p.o.Hooks {
+		return nil
+	}
+	snippet := settingsSnippet(p.guardCommand())
+	p.r.warn("add this entry to Claude Code's managed settings (on Linux /etc/claude-code/managed-settings.json, or a file in /etc/claude-code/managed-settings.d/):")
+	p.r.warn("  %s", snippet)
+	p.r.act(ActionSkip, filepath.Join(hooksDir, guardName), string(AgentClaude), "settings entry to add by hand: "+snippet)
 	return nil
 }

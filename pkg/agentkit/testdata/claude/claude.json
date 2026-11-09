@@ -2,7 +2,7 @@
   "numStartups": 42,
   "projects": {
     "/home/anders/git/ai": {
-      "allowedTools": ["Bash(go test:*)"],
+      "allowedTools": ["Bash(go test:*)", "Bash(echo a && echo b < in > out)"],
       "history": [{"display": "tnctl robots", "pastedContents": {}}]
     }
   },

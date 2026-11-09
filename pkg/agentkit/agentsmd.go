@@ -78,8 +78,14 @@ func (p *op) installAgentsMD() error {
 		p.refuseAgentsMD(path, "damaged teknoir section markers in AGENTS.md: fix them by hand", false)
 		return nil
 	case agentsMDOk:
+		next := text[:start] + block + text[end:]
+		if next == text {
+			// The section is already the kit's: the file is not written at all.
+			p.r.act(ActionKeep, path, "", "the teknoir section is up to date")
+			return nil
+		}
 		p.r.act(ActionWrite, path, "", "replaced the teknoir section")
-		return p.overwriteFile(target, []byte(text[:start]+block+text[end:]), 0o644)
+		return p.overwriteFile(target, []byte(next), 0o644)
 	}
 	if text != "" {
 		if !strings.HasSuffix(text, "\n") {

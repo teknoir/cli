@@ -678,16 +678,58 @@ func regularAt(path string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
-// settingsSnippet is the PreToolUse entry --hooks adds to a Claude Code settings.json, for a guard at
-// path, as one JSON object.
-func settingsSnippet(guard string) string {
-	return fmt.Sprintf(`{"hooks":{"PreToolUse":[%s]}}`, preToolUseEntry(guard))
+// preToolUseHandler is one handler of the guard's PreToolUse group.
+type preToolUseHandler struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
 }
 
-func preToolUseEntry(guard string) string {
-	return fmt.Sprintf(`{"matcher":%q,"hooks":[{"type":"command","command":%q}]}`, guardMatcher, guard)
+// preToolUseGroup is the guard's PreToolUse group: it runs the guard for the tools of guardMatcher.
+type preToolUseGroup struct {
+	Matcher string              `json:"matcher"`
+	Hooks   []preToolUseHandler `json:"hooks"`
+}
+
+// preToolUseEntry is the PreToolUse group --hooks adds to a Claude Code settings.json, for a command.
+func preToolUseEntry(command string) ([]byte, error) {
+	return marshalNoEscape(preToolUseGroup{Matcher: guardMatcher, Hooks: []preToolUseHandler{{Type: "command", Command: command}}})
+}
+
+// settingsSnippetType is the part of a settings.json the guard's entry lives in.
+type settingsSnippetType struct {
+	Hooks struct {
+		PreToolUse []json.RawMessage `json:"PreToolUse"`
+	} `json:"hooks"`
+}
+
+// settingsSnippet is the PreToolUse entry --hooks adds to a Claude Code settings.json, for a command, as
+// one JSON object. It cannot fail: every value of it is a string.
+func settingsSnippet(command string) string {
+	group, err := preToolUseEntry(command)
+	if err != nil {
+		return ""
+	}
+	var v settingsSnippetType
+	v.Hooks.PreToolUse = []json.RawMessage{group}
+	b, err := marshalNoEscape(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// marshalNoEscape is json.Marshal without the HTML escaping of &, < and >: a foreign value the kit
+// writes back keeps its bytes.
+func marshalNoEscape(v any) ([]byte, error) {
+	var b bytes.Buffer
+	e := json.NewEncoder(&b)
+	e.SetEscapeHTML(false)
+	if err := e.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(b.Bytes(), "\n"), nil
 }
 
 // guardMatcher is the tool matcher of the guard: shell commands and every tool of the teknoir MCP
-// server, the read-only one and any other.
-const guardMatcher = "Bash|mcp__teknoir__.*"
+// server, whichever way it is installed (the read-only server, and the plugin that carries the kit).
+const guardMatcher = "Bash|mcp__teknoir__.*|mcp__plugin_teknoir_teknoir__.*"

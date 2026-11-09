@@ -113,9 +113,16 @@ func TestAgentInstallFlags(t *testing.T) {
 	if _, _, err := runCLI(t, nil, "agent", "install", "--agent", "vim"); err == nil || exitCodeOf(err) != codeUsage {
 		t.Errorf("unknown agent: %v", err)
 	}
-	// The scopes are mutually exclusive.
-	if _, _, err := runCLI(t, nil, "agent", "install", "--user", "--project"); err == nil {
-		t.Error("--user --project was accepted")
+	// The scopes are mutually exclusive: a usage error, exit 2.
+	for _, scopes := range [][]string{
+		{"--user", "--project"},
+		{"--user", "--managed", t.TempDir()},
+		{"--project", "--managed", t.TempDir()},
+	} {
+		args := append([]string{"agent", "install"}, scopes...)
+		if _, _, err := runCLI(t, nil, args...); err == nil || exitCodeOf(err) != codeUsage {
+			t.Errorf("%v: %v, want exit %d", scopes, err, codeUsage)
+		}
 	}
 	// --agents-md needs --project.
 	if _, _, err := runCLI(t, nil, "agent", "install", "--agents-md"); err == nil || exitCodeOf(err) != codeUsage {
@@ -615,5 +622,101 @@ func TestAgentInstallRefusalsDryRun(t *testing.T) {
 	}
 	if strings.Count(out, "would refuse") < 2 {
 		t.Errorf("the dry run does not report both refusals:\n%s", out)
+	}
+}
+
+// `agent list --managed DIR --check` on a directory nothing was installed into is a failure: the image
+// test must not pass on an install that never happened.
+func TestAgentListManagedEmptyCheck(t *testing.T) {
+	agentHome(t)
+	dir := t.TempDir()
+	out, _, err := runCLI(t, nil, "agent", "list", "--managed", dir)
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "not installed") {
+		t.Errorf("list does not say the roots are not installed:\n%s", out)
+	}
+	if _, _, err := runCLI(t, nil, "agent", "list", "--managed", dir, "--check"); err == nil || exitCodeOf(err) != codeRejected {
+		t.Errorf("--check on an empty managed dir: %v, want exit %d", err, codeRejected)
+	}
+	// The same on a directory that does not exist at all.
+	if _, _, err := runCLI(t, nil, "agent", "list", "--managed", filepath.Join(dir, "missing"), "--check"); err == nil || exitCodeOf(err) != codeRejected {
+		t.Errorf("--check on a missing managed dir: %v, want exit %d", err, codeRejected)
+	}
+}
+
+// A managed install without the guard fails --check: the image always gets the guard, and the test says
+// so when it is gone.
+func TestAgentListManagedMissingGuard(t *testing.T) {
+	agentHome(t)
+	dir := t.TempDir()
+	if _, _, err := runCLI(t, nil, "agent", "install", "--managed", dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runCLI(t, nil, "agent", "list", "--managed", dir, "--check"); err != nil {
+		t.Errorf("--check on a clean managed install: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "hooks", "teknoir-guard")); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runCLI(t, nil, "agent", "list", "--managed", dir, "--check")
+	if err == nil || exitCodeOf(err) != codeRejected {
+		t.Fatalf("--check without the guard: %v, want exit %d", err, codeRejected)
+	}
+	if !strings.Contains(out, "1 missing") {
+		t.Errorf("list:\n%s", out)
+	}
+}
+
+// -o json keeps stdout a parseable array, and the managed settings snippet goes to stderr with the other
+// warnings.
+func TestAgentInstallManagedJSONWarnings(t *testing.T) {
+	agentHome(t)
+	dir := t.TempDir()
+	out, errs, err := runCLI(t, nil, "agent", "install", "--managed", dir, "--hooks", "-o", "json")
+	if err != nil {
+		t.Fatalf("%v\n%s%s", err, out, errs)
+	}
+	var actions []struct {
+		Action, Path, Agent, Note string
+	}
+	if err := json.Unmarshal([]byte(out), &actions); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, out)
+	}
+	found := false
+	for _, a := range actions {
+		if strings.Contains(a.Note, "settings entry to add by hand") && strings.Contains(a.Note, "PreToolUse") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no action carries the snippet: %s", out)
+	}
+	if !strings.Contains(errs, "warning: ") || !strings.Contains(errs, "managed-settings") {
+		t.Errorf("stderr holds no warning:\n%s", errs)
+	}
+	if strings.Contains(out, "warning:") {
+		t.Errorf("a warning went to stdout:\n%s", out)
+	}
+}
+
+// The docs' synopsis of uninstall names --agents-md, as the flag exists.
+func TestAgentCommandsSynopsis(t *testing.T) {
+	agentHome(t)
+	out, _, err := runCLI(t, nil, "agent", "uninstall", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The usage line holds the synopsis agentkit/README.md quotes.
+	if !strings.Contains(out, "Usage:\n  tnctl agent uninstall [--agent ...] [--user|--project|--managed DIR] [--mcp] [--hooks] [--agents-md]") {
+		t.Errorf("the uninstall synopsis does not name --agents-md:\n%s", out)
+	}
+	out, _, err = runCLI(t, nil, "agent", "list", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Only the user scope (default: both scopes)") {
+		t.Errorf("the --user help does not say what list visits:\n%s", out)
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.yaml.in/yaml/v3"
+
 	kit "github.com/teknoir/cli/agentkit"
 )
 
@@ -75,23 +77,22 @@ func TestSkillFrontmatter(t *testing.T) {
 		t.Fatal("no end of the frontmatter")
 	}
 	fm := body[4 : 4+end]
-	lines := strings.Split(fm, "\n")
-	want := []string{"name:", "description:", "license:", "metadata:", "  teknoir-kit-version:"}
-	var keys []string
-	for _, l := range lines {
-		if strings.HasPrefix(l, "  ") {
-			keys = append(keys, l[:strings.Index(l, ":")+1])
-			continue
-		}
-		if i := strings.Index(l, ":"); i >= 0 {
-			keys = append(keys, l[:i+1])
-		}
+	// It must parse as YAML: an unquoted value with ": " in it does not.
+	var meta map[string]any
+	if err := yaml.Unmarshal([]byte(fm), &meta); err != nil {
+		t.Fatalf("the frontmatter is not YAML: %v\n%s", err, fm)
 	}
-	if strings.Join(keys, "|") != strings.Join(want, "|") {
-		t.Errorf("frontmatter keys %v, want %v", keys, want)
+	want := []string{"description", "license", "metadata", "name"} // sorted
+	if got := sortedKeys(meta); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("frontmatter keys %v, want %v", got, want)
 	}
-	if !strings.Contains(fm, "name: teknoir-platform") {
-		t.Errorf("the skill is not named after its directory:\n%s", fm)
+	if sub, ok := meta["metadata"].(map[string]any); !ok || len(sub) != 1 {
+		t.Errorf("metadata %v, want only teknoir-kit-version", meta["metadata"])
+	} else if _, ok := sub["teknoir-kit-version"]; !ok {
+		t.Errorf("metadata %v, want teknoir-kit-version", sub)
+	}
+	if meta["name"] != "teknoir-platform" {
+		t.Errorf("the skill is not named after its directory: %v\n%s", meta["name"], fm)
 	}
 	if !strings.Contains(fm, `teknoir-kit-version: "`+kit.Version+`"`) {
 		t.Errorf("the kit version:\n%s", fm)

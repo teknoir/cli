@@ -33,9 +33,9 @@ Codex and OpenCode read the same root, so `--agent codex,opencode` writes one co
 file it wrote. The manifest is how an upgrade, `agent list --check` and `agent uninstall` tell a file the
 kit wrote from one you changed.
 
-`--managed DIR` installs the skills to `DIR/skills` and the guard to `DIR/hooks/teknoir-guard` (with
-`--hooks`), and nothing else: no MCP entry and no settings file. This is how the TeknoirBot image installs
-the kit into `/etc/claude-code/.claude`.
+`--managed DIR` always installs the skills to `DIR/skills` and the guard to `DIR/hooks/teknoir-guard`, and
+nothing else: no MCP entry and no settings file. `--hooks` only adds the settings entry to add by hand
+(see below). This is how the TeknoirBot image installs the kit into `/etc/claude-code/.claude`.
 
 ## Install
 
@@ -52,13 +52,21 @@ With no `--agent` every agent is installed for, in the user scope.
   into what is there: every other server and key survives. A `teknoir` entry that differs is kept and
   warned about unless `--force` replaces it.
 - `--hooks` installs the guard hook for Claude Code and adds a `PreToolUse` entry for `Bash` and the
-  `teknoir` MCP tools to `~/.claude/settings.json` (project: `.claude/settings.json`), keeping the other
-  hooks and permissions. A re-run adds no duplicate. For Codex and OpenCode it prints that hooks are
-  installed for Claude Code only.
+  `teknoir` MCP tools (`mcp__teknoir__*`, or `mcp__plugin_teknoir_teknoir__*` when the server comes from
+  the kit's plugin) to `~/.claude/settings.json` (project: `.claude/settings.json`), keeping the other
+  hooks and permissions. The command is the guard's absolute path, shell-quoted, so a home or a project
+  directory with a space in it works; in project scope it is
+  `"\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/teknoir-guard"`, so the committed file works on every machine. A
+  re-run adds no duplicate, and `uninstall --hooks` takes out that handler only, never a hook of yours
+  beside it. For Codex and OpenCode it prints that hooks are installed for Claude Code only. With
+  `--managed` it prints the entry to add to Claude Code's managed settings
+  (`/etc/claude-code/managed-settings.json`, or a file in `/etc/claude-code/managed-settings.d/`) instead
+  of writing any.
 - `--agents-md` (project scope) adds a short section to `./AGENTS.md`, between
   `<!-- teknoir-agent-kit:begin -->` and `<!-- teknoir-agent-kit:end -->`; a re-run replaces only that
   section.
-- `--dry-run` prints the plan and writes nothing.
+- `--dry-run` prints the plan and writes none of the kit's files or agent configs (like every `tnctl`
+  command, the first run creates `~/.tnctl.yaml`).
 - `--force` overwrites a file you changed, and replaces a differing `teknoir` MCP entry.
 
 ### What it will not overwrite
@@ -82,7 +90,11 @@ if it is unchanged, and kept (and reported) if you changed it.
 | OpenCode | `~/.config/opencode/opencode.jsonc` if it exists, else `opencode.json` | `opencode.jsonc` if it exists, else `opencode.json` | under `mcp.servers`: `{"type":"local","command":["tnctl","mcp"]}` |
 
 JSON files keep every foreign key and value as JSON; `tnctl` writes them with 2-space indent, so an
-existing file's **key order changes** (the data does not). Codex's TOML is edited line by line, so its
+existing file's **key order changes** (the data does not). Values are written as they are (`&`, `<` and
+`>` are not escaped) and the file ends in one newline, so installing and then uninstalling gives a file
+`tnctl` wrote back byte for byte. While it edits `~/.claude.json`, `tnctl` holds the lock Claude Code
+itself uses (`~/.claude.json.lock`): an install run inside a Claude Code session waits for it, and fails
+with `Claude Code holds …; run again` after 5 seconds. Codex's TOML is edited line by line, so its
 comments stay; the result is parsed and compared with the original **before** anything is written, and an
 edit that would break the file, or touch anything beside `[mcp_servers.teknoir]`, is refused with the
 lines to edit by hand. A config file that is a symlink (dotfiles, stow, home-manager) keeps its link: the
@@ -101,8 +113,9 @@ tnctl agent list --user -o json   # the roots and the MCP registrations, as JSON
 
 `list` prints each root, the kit version installed and the one this `tnctl` carries, the files missing,
 changed or outdated, and which agent config files register the `teknoir` MCP server. `--check` exits 5 when
-anything differs: a missing file, a changed file or another kit version. CI and the TeknoirBot image test
-use it.
+anything differs: a missing file, a changed file or another kit version, or nothing installed at all. A
+managed install is checked as a whole, so a `DIR` whose skills or guard are not there fails too. CI and the
+TeknoirBot image test use it.
 
 ## Uninstall
 
@@ -114,7 +127,11 @@ tnctl agent uninstall --project --mcp --agents-md
 Deletes exactly the files the manifests record, while they still match (a file you changed is kept and
 reported), removes the skill directories that become empty and the manifests. With `--mcp` it removes the
 `teknoir` MCP entry from the config files, with `--hooks` the guard and its `PreToolUse` entry, with
-`--agents-md` the section from `./AGENTS.md`.
+`--agents-md` the section from `./AGENTS.md`. A managed install always holds the guard, so it goes with or
+without `--hooks`.
+
+Codex and OpenCode read the same `~/.agents/skills` (project: `.agents/skills`), so an uninstall of one of
+them keeps that root: it goes only when both are named (`--agent codex,opencode`, or the default, all).
 
 ## The plugin instead
 
@@ -132,15 +149,16 @@ The plugin has no hook: a hook that sees every command is installed only with `t
 
 One line per action `(write|keep|upgrade|refuse|delete|register|already registered|skip)`, then a summary;
 `--dry-run` prefixes each with `would`. `-o json` prints the actions as
-`[{"action","path","agent","note"}]`; `agent list -o json` prints `{"roots":[...],"mcp":[...]}`.
+`[{"action","path","agent","note"}]`; `agent list -o json` prints `{"roots":[...],"mcp":[...]}`. Warnings
+always go to stderr as `warning: …`, so a structured result stays parseable.
 
 | Exit | Meaning |
 |---|---|
 | 0 | ok |
 | 1 | error |
 | 2 | usage: an unknown agent, two scopes, `--agents-md` without `--project` |
-| 5 | `list --check`: an install differs from this `tnctl`'s kit |
-| 8 | a file you changed (or a commented `.jsonc`) needs `--force` or a hand edit |
+| 5 | `list --check`: an install differs from this `tnctl`'s kit, or nothing is installed |
+| 8 | a file you changed, a commented `.jsonc`, a symlink `tnctl` does not follow, a damaged manifest or damaged AGENTS.md markers, or a Codex edit `tnctl` cannot make safely: needs `--force` or a hand edit |
 
 ## See also
 

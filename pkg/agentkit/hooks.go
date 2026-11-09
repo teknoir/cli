@@ -11,45 +11,62 @@ import (
 	"strings"
 )
 
-// installHooks installs the guard hook for Claude Code and registers it as a PreToolUse hook in its
-// settings.json. A managed install writes the guard only and prints the settings entry for the image's
-// settings file.
+// projectGuardCommand is the hook command of a project-scope install: Claude Code sets
+// $CLAUDE_PROJECT_DIR for a hook command, so the committed settings.json works on every machine.
+const projectGuardCommand = `"$CLAUDE_PROJECT_DIR"/.claude/hooks/teknoir-guard`
+
+// shellQuote quotes s for the shell that runs a hook command, so a path with a space, a quote or a
+// dollar sign is one word.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// guardCommand is the command our PreToolUse handler runs in this scope.
+func (p *op) guardCommand() string {
+	if p.o.Scope == ScopeProject {
+		return projectGuardCommand
+	}
+	return shellQuote(p.absGuardPath())
+}
+
+// absGuardPath is where the guard is installed in this scope.
+func (p *op) absGuardPath() string { return filepath.Join(p.claudeDir(), "hooks", guardName) }
+
+// installHooks installs the guard hook for Claude Code and registers it as a PreToolUse handler in its
+// settings.json. The managed scope installs the guard on its own (install) and only prints the entry.
 func (p *op) installHooks() error {
-	dir := p.claudeDir()
-	guard := filepath.Join(dir, "hooks", guardName)
+	hooksDir := filepath.Join(p.claudeDir(), "hooks")
 	content, err := fs.ReadFile(p.o.FS, "hooks/"+guardName)
 	if err != nil {
 		return err
 	}
-	if err := p.installSet(filepath.Join(dir, "hooks"), map[string][]byte{guardName: content}, string(AgentClaude)); err != nil {
+	if err := p.installSet(hooksDir, map[string][]byte{guardName: content}, string(AgentClaude)); err != nil {
 		return err
 	}
-	if p.o.Scope == ScopeManaged {
-		p.r.warn("write this entry to the agent's settings.json (%s):", filepath.Join(dir, "settings.json"))
-		p.r.warn("  %s", settingsSnippet(filepath.Join(dir, "hooks", guardName)))
+	settings := filepath.Join(p.claudeDir(), "settings.json")
+	if p.wasRefused(p.absGuardPath()) || p.wasRefused(manifestPath(hooksDir)) {
+		// The hook would run whatever is at the guard's path, or nothing: it is not registered.
+		p.r.act(ActionSkip, settings, string(AgentClaude), "the guard was refused: its hook is not registered")
 		return nil
 	}
-	return p.mergeSettings(filepath.Join(dir, "settings.json"), guard, false)
+	return p.mergeSettings(settings, false)
 }
 
 // uninstallHooks removes the guard hook and its settings entry.
 func (p *op) uninstallHooks() error {
 	dir := p.claudeDir()
-	guard := filepath.Join(dir, "hooks", guardName)
-	if p.o.Scope != ScopeManaged {
-		if err := p.mergeSettings(filepath.Join(dir, "settings.json"), guard, true); err != nil {
-			return err
-		}
+	if err := p.mergeSettings(filepath.Join(dir, "settings.json"), true); err != nil {
+		return err
 	}
 	return p.uninstallSet(filepath.Join(dir, "hooks"), string(AgentClaude))
 }
 
-// mergeSettings adds (or, with remove, drops) the guard's PreToolUse entry in a Claude Code
-// settings.json, keeping every other key, hook and permission as it is.
-func (p *op) mergeSettings(path, guard string, remove bool) error {
-	snippet := "add " + settingsSnippet(guard)
+// mergeSettings adds the guard's PreToolUse handler to a Claude Code settings.json, or with remove takes
+// it out, keeping every other key, group and handler as it is. A group is only ever changed in its own
+// handlers array, and is dropped only when that array is left empty.
+func (p *op) mergeSettings(path string, remove bool) error {
+	command := p.guardCommand()
+	snippet := "add " + settingsSnippet(command)
 	if remove {
-		snippet = "remove " + settingsSnippet(guard)
+		snippet = "remove " + settingsSnippet(command)
 	}
 	target, why := p.foreignTarget(path)
 	if why != "" {
@@ -78,33 +95,84 @@ func (p *op) mergeSettings(path, guard string, remove bool) error {
 			return fmt.Errorf("hooks.PreToolUse in %s is not an array: %w", path, err)
 		}
 	}
-
-	ours, kept := -1, entries[:0:0]
-	for i, e := range entries {
-		if entryUsesGuard(e, guard) {
-			ours = i
+	groups := parseHookGroups(entries)
+	legacy := p.absGuardPath()
+	registered, upgraded, changed, removed := false, false, false, false
+	for _, g := range groups {
+		if g.opaque {
 			continue
 		}
-		kept = append(kept, e)
+		ours := g.matcher() == guardMatcher
+		gChanged := false
+		var kept []map[string]json.RawMessage
+		for _, h := range g.handlers {
+			cmd, isCommand := handlerCommand(h)
+			guardHere := isCommand && matchesGuard(cmd, command, legacy)
+			switch {
+			case !guardHere:
+				if isCommand && !remove && guardScript(cmd) {
+					p.r.warn("%s: another teknoir-guard hook is registered: %s", path, cmd)
+				}
+				kept = append(kept, h)
+			case remove:
+				// Ours goes, whatever group it is in.
+				gChanged, changed, removed = true, true, true
+			case !ours:
+				// Ours does not belong in a group of another matcher: it would run twice over.
+				gChanged, changed = true, true
+			case registered:
+				// A second handler of this run's command: one is enough.
+				gChanged, changed = true, true
+			case cmd == command:
+				registered = true
+				kept = append(kept, h)
+			default:
+				// The unquoted absolute path an older install wrote.
+				kept = append(kept, setHandlerCommand(h, command))
+				gChanged, changed, upgraded, registered = true, true, true, true
+			}
+		}
+		if gChanged {
+			g.handlers = kept
+			g.changed = true
+		}
 	}
-	entries = kept
 
 	switch {
 	case remove:
-		if ours < 0 {
+		if !removed {
 			p.r.act(ActionSkip, path, string(AgentClaude), "no teknoir guard entry")
 			return nil
 		}
 		p.r.act(ActionDelete, path, string(AgentClaude), "PreToolUse entry")
-	case ours >= 0:
-		p.r.act(ActionAlreadyRegister, path, string(AgentClaude), "PreToolUse entry")
-		return nil
-	default:
-		entries = append(entries, json.RawMessage(preToolUseEntry(guard)))
+	case !registered:
+		entry, err := preToolUseEntry(command)
+		if err != nil {
+			return err
+		}
+		groups = append(groups, &hookGroup{raw: entry})
+		changed = true
 		p.r.act(ActionRegister, path, string(AgentClaude), "PreToolUse entry")
+	case upgraded:
+		p.r.act(ActionUpgrade, path, string(AgentClaude), "PreToolUse entry: quoted guard command")
+	default:
+		p.r.act(ActionAlreadyRegister, path, string(AgentClaude), "PreToolUse entry")
+	}
+	if !changed {
+		return nil
 	}
 
-	if err := setJSONList(&hooks, "PreToolUse", entries); err != nil {
+	out := make([]json.RawMessage, 0, len(groups))
+	for _, g := range groups {
+		b, err := g.marshal()
+		if err != nil {
+			return err
+		}
+		if b != nil {
+			out = append(out, b)
+		}
+	}
+	if err := setJSONList(&hooks, "PreToolUse", out); err != nil {
 		return err
 	}
 	if len(hooks) == 0 {
@@ -115,31 +183,117 @@ func (p *op) mergeSettings(path, guard string, remove bool) error {
 	return p.writeJSON(target, top, 0o644)
 }
 
-// entryUsesGuard reports whether a PreToolUse entry runs the guard at guard, or any teknoir-guard.
-func entryUsesGuard(raw json.RawMessage, guard string) bool {
-	var e struct {
-		Hooks []struct {
-			Command string `json:"command"`
-		} `json:"hooks"`
-	}
-	if err := json.Unmarshal(raw, &e); err != nil {
-		return false
-	}
-	for _, h := range e.Hooks {
-		fields := strings.Fields(h.Command)
-		if len(fields) == 0 {
+// hookGroup is one PreToolUse group of a settings.json: its keys, and its handlers. A group that is
+// not changed is written back as the bytes it was read from.
+type hookGroup struct {
+	raw      json.RawMessage
+	keys     map[string]json.RawMessage
+	handlers []map[string]json.RawMessage
+	changed  bool
+	// opaque marks a group the kit does not read: it is written back as it was.
+	opaque bool
+}
+
+// parseHookGroups decodes the PreToolUse groups. A group the kit cannot read (not an object, or a hooks
+// value that is not an array of objects) is kept as it is and never changed: it holds no handler of ours.
+func parseHookGroups(entries []json.RawMessage) []*hookGroup {
+	groups := make([]*hookGroup, 0, len(entries))
+	for _, raw := range entries {
+		g := &hookGroup{raw: raw, keys: map[string]json.RawMessage{}}
+		if err := json.Unmarshal(raw, &g.keys); err != nil {
+			g.opaque = true
+			groups = append(groups, g)
 			continue
 		}
-		if fields[0] == guard || filepath.Base(fields[0]) == guardName {
-			return true
+		if hooks, ok := g.keys["hooks"]; ok {
+			if err := json.Unmarshal(hooks, &g.handlers); err != nil {
+				g.opaque = true
+			}
 		}
+		groups = append(groups, g)
 	}
-	return false
+	return groups
+}
+
+// matcher is the group's matcher, "" when it has none.
+func (g *hookGroup) matcher() string {
+	var s string
+	if raw, ok := g.keys["matcher"]; ok {
+		_ = json.Unmarshal(raw, &s)
+	}
+	return s
+}
+
+// marshal is the group as JSON: its original bytes when nothing changed, and nil for a group that is
+// dropped because its handlers array is empty.
+func (g *hookGroup) marshal() (json.RawMessage, error) {
+	if !g.changed {
+		return g.raw, nil
+	}
+	if len(g.handlers) == 0 {
+		return nil, nil
+	}
+	b, err := marshalNoEscape(g.handlers)
+	if err != nil {
+		return nil, err
+	}
+	g.keys["hooks"] = b
+	return marshalNoEscape(g.keys)
+}
+
+// handlerCommand is the command a handler runs, and whether it is a command handler at all.
+func handlerCommand(h map[string]json.RawMessage) (string, bool) {
+	var typ, cmd string
+	if raw, ok := h["type"]; ok {
+		_ = json.Unmarshal(raw, &typ)
+	}
+	if typ != "command" {
+		return "", false
+	}
+	raw, ok := h["command"]
+	if !ok {
+		return "", false
+	}
+	if err := json.Unmarshal(raw, &cmd); err != nil {
+		return "", false
+	}
+	return cmd, true
+}
+
+// setHandlerCommand is h with its command replaced.
+func setHandlerCommand(h map[string]json.RawMessage, command string) map[string]json.RawMessage {
+	b, err := marshalNoEscape(command)
+	if err != nil {
+		return h
+	}
+	out := make(map[string]json.RawMessage, len(h))
+	for k, v := range h {
+		out[k] = v
+	}
+	out["command"] = b
+	return out
+}
+
+// matchesGuard reports whether command is exactly this kit's guard command of the scope, or the
+// unquoted path an older install wrote (the legacy form). No other form counts.
+func matchesGuard(command, current, legacy string) bool {
+	c := strings.TrimSpace(command)
+	return c == current || c == legacy
+}
+
+// guardScript reports whether a command that is not ours still runs a script named teknoir-guard: the
+// user's own guard, or one the kit does not manage here.
+func guardScript(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	return filepath.Base(strings.Trim(fields[0], `'"`)) == guardName
 }
 
 // setJSONValue puts v into obj under key, creating obj when it is nil.
 func setJSONValue(obj *map[string]json.RawMessage, key string, v any) error {
-	raw, err := json.Marshal(v)
+	raw, err := marshalNoEscape(v)
 	if err != nil {
 		return err
 	}
@@ -161,18 +315,16 @@ func setJSONList(obj *map[string]json.RawMessage, key string, list []json.RawMes
 }
 
 // writeJSON writes an object with 2-space indent, keeping the file's mode (def when it is new). Keys are
-// sorted: an existing file's key order is not kept.
+// sorted: an existing file's key order is not kept. The file ends in exactly one newline, as it was
+// written.
 func (p *op) writeJSON(path string, v any, def os.FileMode) error {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	raw, err := marshalNoEscape(v)
+	if err != nil {
 		return err
 	}
 	var out bytes.Buffer
-	if err := json.Indent(&out, buf.Bytes(), "", "  "); err != nil {
+	if err := json.Indent(&out, raw, "", "  "); err != nil {
 		return err
 	}
-	out.WriteByte('\n')
-	return p.overwriteFile(path, out.Bytes(), def)
+	return p.overwriteFile(path, append(out.Bytes(), '\n'), def)
 }
