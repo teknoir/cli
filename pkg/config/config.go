@@ -15,15 +15,17 @@ import (
 // which read them; tool calls of `tnctl mcp` run concurrently.
 var viperMu sync.RWMutex
 
-// AuthConfig defines the authentication credentials for a domain.
+// AuthConfig defines the authentication credentials for a domain. Save writes it into the config
+// file with viper's encoder of the file's format, so every format has a tag: without one, the JSON
+// and TOML encoders write the Go field names, which mapstructure does not read back.
 type AuthConfig struct {
-	AccessToken  string `mapstructure:"access_token" yaml:"access_token,omitempty"`
-	RefreshToken string `mapstructure:"refresh_token" yaml:"refresh_token,omitempty"`
-	Expiry       string `mapstructure:"expiry" yaml:"expiry,omitempty"`
-	Realm        string `mapstructure:"realm" yaml:"realm,omitempty"`
-	ClientID     string `mapstructure:"client_id" yaml:"client_id,omitempty"`
-	ClientSecret string `mapstructure:"client_secret" yaml:"client_secret,omitempty"`
-	Namespace    string `mapstructure:"namespace" yaml:"namespace,omitempty"`
+	AccessToken  string `mapstructure:"access_token" yaml:"access_token,omitempty" json:"access_token,omitempty" toml:"access_token,omitempty"`
+	RefreshToken string `mapstructure:"refresh_token" yaml:"refresh_token,omitempty" json:"refresh_token,omitempty" toml:"refresh_token,omitempty"`
+	Expiry       string `mapstructure:"expiry" yaml:"expiry,omitempty" json:"expiry,omitempty" toml:"expiry,omitempty"`
+	Realm        string `mapstructure:"realm" yaml:"realm,omitempty" json:"realm,omitempty" toml:"realm,omitempty"`
+	ClientID     string `mapstructure:"client_id" yaml:"client_id,omitempty" json:"client_id,omitempty" toml:"client_id,omitempty"`
+	ClientSecret string `mapstructure:"client_secret" yaml:"client_secret,omitempty" json:"client_secret,omitempty" toml:"client_secret,omitempty"`
+	Namespace    string `mapstructure:"namespace" yaml:"namespace,omitempty" json:"namespace,omitempty" toml:"namespace,omitempty"`
 }
 
 const ClientID = "teknoir-cli"
@@ -32,8 +34,8 @@ var Debug bool
 
 // Config defines the structure for tnctl configuration.
 type Config struct {
-	Domain string                `mapstructure:"domain" yaml:"domain"`
-	Auths  map[string]AuthConfig `mapstructure:"auths" yaml:"auths"`
+	Domain string                `mapstructure:"domain" yaml:"domain" json:"domain" toml:"domain"`
+	Auths  map[string]AuthConfig `mapstructure:"auths" yaml:"auths" json:"auths" toml:"auths"`
 }
 
 // DefaultConfig returns a Config with default values.
@@ -78,39 +80,106 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
-// Save writes the configuration back to Viper and the config file.
+// notSaved are the keys Save never writes, and removes from the file when an older tnctl wrote them
+// there: the flags and environment variables root.go binds (flag_namespace and flag_device from -n,
+// --device, TNCTL_NAMESPACE and TNCTL_DEVICE; device and debug through AutomaticEnv) belong to one
+// run. The teamspace a user chooses lives under auths (SetNamespace). A top-level namespace is not
+// among them: tnctl v0.0.1-beta and v0.0.2-beta wrote the chosen teamspace there, and GetNamespace
+// still reads it for a login without one of its own. Save removes it only when an older Save copied
+// it from TNCTL_NAMESPACE (see Save).
+var notSaved = []string{"device", "debug", "flag_namespace", "flag_device"}
+
+// Save writes the configuration to the config file. The file is built from the file itself plus the
+// domain and auths of c, never from the global viper: viper's settings also hold the bound flags and
+// environment variables, and a -n or TNCTL_NAMESPACE of one run must not end up in the file. Other
+// top-level keys of the file are kept, and the file is replaced atomically, readable by the user
+// alone (writeConfigAtomic). Afterwards
+// the global viper reads the file again and keeps no domain or auths of its own, as after Reload, so
+// --domain, TNCTL_DOMAIN and the file decide on the next Load, and this run's -n and
+// TNCTL_NAMESPACE still apply.
 func (c *Config) Save() error {
 	viperMu.Lock()
 	defer viperMu.Unlock()
-	viper.Set("domain", c.Domain)
-	viper.Set("auths", c.Auths)
-	// Clear top-level namespace/debug to ensure they are only in Auths (or not at all for debug)
+	path := viper.ConfigFileUsed()
+	if path == "" {
+		// No config file named: viper's own write (it fails without a file to write to).
+		viper.Set("domain", c.Domain)
+		viper.Set("auths", c.Auths)
+		viper.Set("namespace", nil)
+		viper.Set("device", nil)
+		viper.Set("debug", nil)
+		return viper.WriteConfig()
+	}
+	m := map[string]any{}
+	fv := newFileViper(path)
+	if err := fv.ReadInConfig(); err == nil { // a missing or broken file is overwritten, as before
+		m = fv.AllSettings()
+	}
+	// An older Save wrote TNCTL_NAMESPACE (AutomaticEnv) as both namespace and flag_namespace: such a
+	// namespace is one run's environment. It wrote flag_namespace "" without it, and -n only as
+	// flag_namespace, so a top-level namespace of the user's own differs from a non-empty one.
+	if fns, ok := m["flag_namespace"].(string); ok && fns != "" && m["namespace"] == fns {
+		delete(m, "namespace")
+	}
+	for _, k := range notSaved {
+		delete(m, k)
+	}
+	m["domain"] = c.Domain
+	m["auths"] = c.Auths
+	wv := newFileViper(path)
+	if err := wv.MergeConfigMap(m); err != nil {
+		return err
+	}
+	if err := writeConfigAtomic(wv, path); err != nil {
+		return err
+	}
+	if err := viper.ReadInConfig(); err != nil {
+		// The file was written but the global viper cannot read it back: it holds c instead.
+		viper.Set("domain", c.Domain)
+		viper.Set("auths", c.Auths)
+		return nil
+	}
+	viper.Set("domain", nil)
+	viper.Set("auths", nil)
 	viper.Set("namespace", nil)
 	viper.Set("device", nil)
 	viper.Set("debug", nil)
-	return writeConfigAtomic()
+	return nil
 }
 
-// writeConfigAtomic writes viper's state next to the config file and renames
-// it into place, so a concurrent reader never sees a half-written file.
-func writeConfigAtomic() error {
-	path := viper.ConfigFileUsed()
-	if path == "" {
-		return viper.WriteConfig()
+// newFileViper is a viper of the config file alone, with no flags, environment or defaults. A file
+// without extension is YAML, as initConfig reads it; a file it creates is the user's alone (0600).
+func newFileViper(path string) *viper.Viper {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigPermissions(0o600)
+	if filepath.Ext(path) == "" {
+		v.SetConfigType("yaml")
+	}
+	return v
+}
+
+// writeConfigAtomic writes v next to the config file and renames it into place, so a concurrent
+// reader never sees a half-written file. The file holds tokens: it is 0600 when it is new, and an
+// existing file loses its group and other bits (tnctl created ~/.tnctl.yaml 0644 before). A config
+// that is a symlink (a dotfiles repo) stays one: the file it points to is replaced.
+func writeConfigAtomic(v *viper.Viper, path string) error {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".tnctl-*"+filepath.Ext(path))
 	if err != nil {
-		return viper.WriteConfig()
+		return v.WriteConfigAs(path)
 	}
 	tmp := f.Name()
 	_ = f.Close()
 	defer os.Remove(tmp)
-	if err := viper.WriteConfigAs(tmp); err != nil {
+	if err := v.WriteConfigAs(tmp); err != nil {
 		return err
 	}
 	mode := os.FileMode(0o600)
 	if st, err := os.Stat(path); err == nil {
-		mode = st.Mode().Perm()
+		mode = st.Mode().Perm() & 0o600
 	}
 	_ = os.Chmod(tmp, mode)
 	return os.Rename(tmp, path)
@@ -118,19 +187,25 @@ func writeConfigAtomic() error {
 
 // LoadFresh reads the configuration file from disk again, ignoring viper's
 // in-memory state, for long-running processes that must see token refreshes
-// made by other tnctl processes. Without a config file it behaves like Load, also when viper names
-// a file that is not there (a HOME where the default config could not be created): that is "not
-// logged in", not an error of its own.
+// made by other tnctl processes. Without a config file named it behaves like Load. When viper names
+// a file that is not there (a HOME where the default config could not be created, or a file removed
+// while tnctl runs: the reset docs/troubleshooting.md gives), that is "not logged in", not an error
+// of its own: Load's domain with no logins, never the global viper's copy of a removed file, so a
+// token refresh neither redeems nor writes back the login that was removed.
 func LoadFresh() (*Config, error) {
 	path := viper.ConfigFileUsed()
 	if path == "" {
 		return Load()
 	}
-	v := viper.New()
-	v.SetConfigFile(path)
+	v := newFileViper(path)
 	if err := v.ReadInConfig(); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return Load()
+			cfg, err := Load()
+			if err != nil {
+				return nil, err
+			}
+			cfg.Auths = make(map[string]AuthConfig)
+			return cfg, nil
 		}
 		return nil, err
 	}
@@ -146,7 +221,10 @@ func LoadFresh() (*Config, error) {
 
 // Reload reads the config file into the global viper again and drops what Save set in memory, so a
 // long-running process (tnctl mcp) sees the login and teamspace another tnctl saved since it
-// started. Without a config file, or when it cannot be read, viper keeps what it has.
+// started. When the file was removed (the reset docs/troubleshooting.md gives), the file's settings
+// are dropped too: that is "not logged in", and a token refresh must not write the old login back.
+// When the file cannot be read or parsed, viper keeps what it has. Without a config file named, it
+// does nothing.
 func Reload() {
 	viperMu.Lock()
 	defer viperMu.Unlock()
@@ -154,7 +232,13 @@ func Reload() {
 		return
 	}
 	if err := viper.ReadInConfig(); err != nil {
-		return
+		if !errors.Is(err, fs.ErrNotExist) {
+			return
+		}
+		// An empty document: "" for YAML and TOML, "{}" for JSON, which refuses "".
+		if viper.ReadConfig(strings.NewReader("")) != nil && viper.ReadConfig(strings.NewReader("{}")) != nil {
+			return
+		}
 	}
 	viper.Set("domain", nil)
 	viper.Set("auths", nil)

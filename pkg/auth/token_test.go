@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/viper"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -231,5 +232,246 @@ func TestFreshAccessTokenForcesRefresh(t *testing.T) {
 	}
 	if len(sawExpiry) != 1 || sawExpiry[0] != "" {
 		t.Fatalf("refresh did not see a cleared expiry: %v", sawExpiry)
+	}
+}
+
+const fileLogin = "domain: teknoir.cloud\nauths:\n  teknoir_cloud:\n    access_token: at-old\n    refresh_token: rt-old\n    namespace: teknoir-demo\n"
+
+// useFileLogin makes the global viper read a config file holding fileLogin, as tnctl does at start,
+// and returns its path.
+func useFileLogin(t *testing.T) string {
+	t.Helper()
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	path := filepath.Join(t.TempDir(), ".tnctl.yaml")
+	if err := os.WriteFile(path, []byte(fileLogin), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	viper.SetConfigFile(path)
+	if err := viper.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The config file is removed while a long-lived tnctl (tnctl mcp) runs, the reset the troubleshooting
+// docs give: after the next Reload the login is gone, no refresh is made and the file stays removed.
+func TestRefreshAfterTheConfigWasRemovedIsNotLoggedIn(t *testing.T) {
+	path := useFileLogin(t)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	config.Reload() // the next tool call
+	refreshed := false
+	d := tokenDeps{
+		load: config.LoadFresh,
+		refresh: func(ctx context.Context, domain string, a config.AuthConfig) (*oauth2.Token, error) {
+			refreshed = true
+			return &oauth2.Token{AccessToken: "at-new", RefreshToken: "rt-new", Expiry: time.Now().Add(time.Hour)}, nil
+		},
+		save: func(c *config.Config) error { return c.Save() },
+	}
+	_, err := accessToken(context.Background(), "teknoir.cloud", d)
+	if !errors.Is(err, ErrNotLoggedIn) {
+		t.Errorf("after the config was removed: %v, want not logged in", err)
+	}
+	if refreshed {
+		t.Error("the removed login's refresh token was redeemed")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the removed config file is back (%v)", err)
+	}
+}
+
+// Another tnctl (tnctl login, which takes no file lock) replaces the login while this process
+// refreshes the old one: the new login stays, and the rotated token of the old one is not saved.
+func TestRefreshKeepsAConcurrentLogin(t *testing.T) {
+	path := useFileLogin(t)
+	saved := 0
+	d := tokenDeps{
+		load: config.LoadFresh,
+		lock: fileLock,
+		refresh: func(ctx context.Context, domain string, a config.AuthConfig) (*oauth2.Token, error) {
+			// the other process writes while the refresh is on the network
+			other := strings.NewReplacer("rt-old", "rt-newlogin", "at-old", "at-newlogin", "teknoir-demo", "acme").Replace(fileLogin)
+			if err := os.WriteFile(path, []byte(other), 0o600); err != nil {
+				t.Error(err)
+			}
+			return &oauth2.Token{AccessToken: "at-rot", RefreshToken: "rt-rot", Expiry: time.Now().Add(time.Hour)}, nil
+		},
+		save: func(c *config.Config) error { saved++; return c.Save() },
+	}
+	if _, err := accessToken(context.Background(), "teknoir.cloud", d); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if !strings.Contains(s, "acme") || !strings.Contains(s, "rt-newlogin") || strings.Contains(s, "rt-rot") || saved != 0 {
+		t.Errorf("the concurrent login was overwritten: acme=%v rt-newlogin=%v rt-rot=%v, %d saves",
+			strings.Contains(s, "acme"), strings.Contains(s, "rt-newlogin"), strings.Contains(s, "rt-rot"), saved)
+	}
+}
+
+// A tnctl ns acme lands while this process refreshes (AccessToken) or redeems a hub token
+// (HubAccessToken): both the teamspace and the rotated refresh token stay in the file.
+func TestRefreshKeepsAConcurrentNsAndSavesTheToken(t *testing.T) {
+	for _, hub := range []bool{false, true} {
+		path := useFileLogin(t)
+		other := func() {
+			if err := os.WriteFile(path, []byte(strings.Replace(fileLogin, "teknoir-demo", "acme", 1)), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+		rot := &oauth2.Token{AccessToken: "at-rot", RefreshToken: "rt-rot", Expiry: time.Now().Add(time.Hour)}
+		d := tokenDeps{
+			load: config.LoadFresh,
+			lock: fileLock,
+			refresh: func(context.Context, string, config.AuthConfig) (*oauth2.Token, error) {
+				other()
+				return rot, nil
+			},
+			hub: func(context.Context, string, config.AuthConfig) (*oauth2.Token, error) {
+				other()
+				return rot, nil
+			},
+			save: func(c *config.Config) error { return c.Save() },
+		}
+		var err error
+		if hub {
+			_, _, err = hubAccessToken(context.Background(), "teknoir.cloud", d)
+		} else {
+			_, err = accessToken(context.Background(), "teknoir.cloud", d)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		fresh, err := config.LoadFresh()
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := fresh.Auths["teknoir_cloud"]
+		if a.Namespace != "acme" || a.RefreshToken != "rt-rot" {
+			t.Errorf("hub=%v: the file holds namespace %q and refresh token %q, want acme and rt-rot", hub, a.Namespace, a.RefreshToken)
+		}
+		if wantAT := map[bool]string{false: "at-rot", true: "at-old"}[hub]; a.AccessToken != wantAT {
+			t.Errorf("hub=%v: stored access token %q, want %q (a hub token never replaces the main token)", hub, a.AccessToken, wantAT)
+		}
+	}
+}
+
+// saveRefreshed with faked deps: the login whose refresh token was redeemed gets the new tokens, a
+// replaced or removed login is left alone, and a load error is returned.
+func TestSaveRefreshed(t *testing.T) {
+	set := func(a *config.AuthConfig) { a.RefreshToken = "rt-new" }
+	for name, c := range map[string]struct {
+		stored  *config.Config
+		wantRT  string
+		wantSav bool
+	}{
+		"same login":       {cfgWith("teknoir.cloud", config.AuthConfig{AccessToken: "a", RefreshToken: "rt-old", Namespace: "ns"}), "rt-new", true},
+		"replaced login":   {cfgWith("teknoir.cloud", config.AuthConfig{AccessToken: "a", RefreshToken: "rt-other"}), "rt-other", false},
+		"removed login":    {cfgWith("other.example", config.AuthConfig{AccessToken: "a", RefreshToken: "rt-old"}), "", false},
+		"no refresh token": {cfgWith("teknoir.cloud", config.AuthConfig{AccessToken: "a"}), "", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var saved *config.Config
+			d := tokenDeps{
+				load: func() (*config.Config, error) { return c.stored, nil },
+				save: func(cfg *config.Config) error { saved = cfg; return nil },
+			}
+			if err := saveRefreshed(d, "teknoir_cloud", "rt-old", set); err != nil {
+				t.Fatal(err)
+			}
+			if (saved != nil) != c.wantSav {
+				t.Fatalf("saved %v, want %v", saved != nil, c.wantSav)
+			}
+			if saved != nil {
+				if a := saved.Auths["teknoir_cloud"]; a.RefreshToken != c.wantRT || a.Namespace != "ns" {
+					t.Errorf("saved refresh token %q and namespace %q, want %q and ns", a.RefreshToken, a.Namespace, c.wantRT)
+				}
+			}
+		})
+	}
+	boom := errors.New("boom")
+	d := tokenDeps{load: func() (*config.Config, error) { return nil, boom }}
+	if err := saveRefreshed(d, "teknoir_cloud", "rt-old", set); !errors.Is(err, boom) {
+		t.Errorf("load error: %v", err)
+	}
+}
+
+// The config file is removed while a refresh is on the network, after this tool call's Reload saw
+// it: the refresh saves nothing, the file stays removed, and the next call is not logged in.
+func TestRefreshDuringWhichTheConfigIsRemovedSavesNothing(t *testing.T) {
+	for _, hub := range []bool{false, true} {
+		path := useFileLogin(t)
+		config.Reload()
+		rot := &oauth2.Token{AccessToken: "at-rot", RefreshToken: "rt-rot", Expiry: time.Now().Add(time.Hour)}
+		remove := func() {
+			if err := os.Remove(path); err != nil {
+				t.Error(err)
+			}
+		}
+		saves := 0
+		d := tokenDeps{
+			load: config.LoadFresh,
+			lock: fileLock,
+			refresh: func(context.Context, string, config.AuthConfig) (*oauth2.Token, error) {
+				remove()
+				return rot, nil
+			},
+			hub: func(context.Context, string, config.AuthConfig) (*oauth2.Token, error) {
+				remove()
+				return rot, nil
+			},
+			save: func(c *config.Config) error { saves++; return c.Save() },
+		}
+		var err error
+		if hub {
+			_, _, err = hubAccessToken(context.Background(), "teknoir.cloud", d)
+		} else {
+			_, err = accessToken(context.Background(), "teknoir.cloud", d)
+		}
+		if err != nil {
+			t.Errorf("hub=%v: %v, want the refreshed token", hub, err)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) || saves != 0 {
+			t.Errorf("hub=%v: the removed config file is back (%v), %d saves", hub, err, saves)
+		}
+		config.Reload() // the next tool call
+		d.refresh = func(context.Context, string, config.AuthConfig) (*oauth2.Token, error) { return rot, nil }
+		if _, err := accessToken(context.Background(), "teknoir.cloud", d); !errors.Is(err, ErrNotLoggedIn) {
+			t.Errorf("hub=%v: the next call after the remove: %v, want not logged in", hub, err)
+		}
+	}
+}
+
+// A long-lived tnctl that never reloads the config (wg-proxy) renews after the config file was
+// removed: not logged in, the removed login's refresh token is not redeemed and the file stays gone.
+func TestRenewalAfterTheConfigWasRemovedWithoutReload(t *testing.T) {
+	path := useFileLogin(t)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := false
+	d := forceRefresh(tokenDeps{
+		load: config.LoadFresh,
+		lock: fileLock,
+		refresh: func(context.Context, string, config.AuthConfig) (*oauth2.Token, error) {
+			refreshed = true
+			return &oauth2.Token{AccessToken: "at-rot", RefreshToken: "rt-rot", Expiry: time.Now().Add(time.Hour)}, nil
+		},
+		save: func(c *config.Config) error { return c.Save() },
+	})
+	if _, err := accessToken(context.Background(), "teknoir.cloud", d); !errors.Is(err, ErrNotLoggedIn) {
+		t.Errorf("renewal after the config was removed: %v, want not logged in", err)
+	}
+	if refreshed {
+		t.Error("the removed login's refresh token was redeemed")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the removed config file is back (%v)", err)
 	}
 }

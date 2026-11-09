@@ -113,8 +113,11 @@ func initConfig() {
 		return
 	}
 	if cfgFile != "" {
-		// Use config file from the flag.
+		// Use config file from the flag. A file without extension is YAML, as Save writes it.
 		viper.SetConfigFile(cfgFile)
+		if filepath.Ext(cfgFile) == "" {
+			viper.SetConfigType("yaml")
+		}
 	} else {
 		// Find home directory.
 		home, err := os.UserHomeDir()
@@ -158,7 +161,14 @@ func createDefaultConfig() {
 			os.MkdirAll(dir, 0755)
 		}
 
-		if err := viper.SafeWriteConfigAs(path); err != nil {
+		// The file will hold the login's tokens: it is the user's alone (0600). It is written from a
+		// viper of its own with the default domain only, never from the global viper, whose settings
+		// also hold this run's flags and environment (-n, TNCTL_NAMESPACE, --domain).
+		v := viper.New()
+		v.SetConfigPermissions(0o600)
+		v.SetConfigType("yaml")
+		v.Set("domain", config.DefaultConfig().Domain)
+		if err := v.SafeWriteConfigAs(path); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating default config: %v\n", err)
 		}
 	}
