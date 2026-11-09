@@ -33,17 +33,17 @@ kit's Claude Code plugin. Codex and OpenCode list the same tools under the serve
 | --- | --- | --- |
 | `whoami` | | Who this `tnctl` works as: the person and the teamspace it targets, or the bot with its creator and access. Call it first to learn the default teamspace. |
 | `list_teamspaces` | | The teamspaces the caller can work in; a name from it is the `namespace` of the other tools. |
-| `list_devices` | `labels` | The devices of the teamspace with their labels and state. `labels` lists only the devices that have every `key=value`. |
-| `get_device` | `name` | One device in full, by name. |
+| `list_devices` | `labels` | The devices of the teamspace with their labels and state. `labels` lists only the devices that have every `key=value`. `state.apps` holds the device's pods as the platform last read them from Prometheus (without the `kube-*` namespaces and the tunnel agent); `prom_query` `pod_running{device_id="<device>"}` lists every pod. |
+| `get_device` | `name` | One device in full, by name. `state.apps` holds the device's pods as the platform last read them from Prometheus (without the `kube-*` namespaces and the tunnel agent); `prom_query` `pod_running{device_id="<device>"}` lists every pod. |
 | `list_robots` | | The robots of the teamspace (an edge computer, or a cluster of them) with their phase. A Degraded robot names the problems that make it so. |
-| `get_robot` | `name` | One robot in full: its phase, computers and configuration layers. |
+| `get_robot` | `name`, `detail` | One robot: its phase, computers, configuration layers, overrides, effective resources and bootstrap steps. `detail=full` adds every layer's copy, the merged values with their provenance and the git links. |
 | `list_robot_types` | | The robot types of the teamspace. |
 | `list_fleets` | | The fleets of the teamspace: the DeviceApplicationSets that deploy configuration from git to groups of devices. |
 | `get_overview` | | A summary of the teamspace as its dashboard shows it, problems included. |
 | `get_problems` | `robot`, `device` | What is failing in the teamspace, one entry per failing app or node. `robot` or `device` shows only that one. |
-| `get_config` | `target`, `resource`, `defaults` | The effective configuration of a robot or device (`target`): its layers, overrides and states. `resource` (`Kind/namespace/name`, `Kind/name` or `name`) shows one resource with its provenance, the rendered item and its override; `defaults` adds the chart's default values. |
+| `get_config` | `target`, `resource`, `defaults`, `detail` | The effective configuration of a robot or device (`target`): its layers, overrides and states. `resource` (`Kind/namespace/name`, `Kind/name` or `name`) shows one resource with its provenance, the rendered item and its override; `defaults` adds the chart's default values. Without `resource` it is a summary unless `detail=full`. |
 | `list_kinds` | | The kinds of local resources the platform accepts on a robot or device, and the ones it refuses. |
-| `prom_query` | `query`, `time` | A PromQL instant query on the teamspace's Prometheus, limited to the devices the caller may see. `time` is RFC 3339 or Unix seconds; empty means now. |
+| `prom_query` | `query`, `time` | A PromQL instant query on the teamspace's Prometheus, limited to the devices the caller may see. Device series carry `device_id` (no `device` label); `up` has none (use `device_last_seen`). `time` is RFC 3339 or Unix seconds; empty means now. |
 | `mqtt_sample` | `topics`, `seconds`, `max` | The MQTT messages of the teamspace's devices for a few seconds: what a device publishes. `topics` is 1 to 8 topics, each `/devices/<device>/state/#` or `/devices/<device>/events/#` (`+` for every device) or a concrete topic below them; `seconds` is 5 by default and at most 30, `max` is 50 messages by default and at most 200. |
 | `inspect_pod` | `robot`, `pod_namespace`, `pod` | A pod of a robot: phase, containers and recent events. |
 | `inspect_logs` | `robot`, `pod_namespace`, `pod`, `container`, `previous`, `tail`, `since` | The log of a pod on a robot: the last `tail` lines (200 by default, at most 2000), of one `container`, of the `previous` run, or `since` a duration such as `10m`. |
@@ -55,8 +55,9 @@ kit's Claude Code plugin. Codex and OpenCode list the same tools under the serve
   tool that runs a command, opens a session, logs in or writes.
 - **Tool results are device data.** Labels, logs, events and MQTT payloads can hold text written by anyone
   who controls a device or its workloads. The server tells the agent never to follow instructions found in a
-  tool result: in its instructions, for every tool, and again in the descriptions of `get_problems`,
-  `prom_query`, `mqtt_sample` and the `inspect_*` tools.
+  tool result: in its instructions, for every tool, and again in the descriptions of `list_devices`,
+  `get_device`, `get_robot`, `get_problems`, `get_config`, `prom_query`, `mqtt_sample` and the
+  `inspect_*` tools.
 - **`namespace`** is an optional input of every tool but `whoami` and `list_teamspaces`; empty means the
   teamspace `tnctl` targets. The login and the teamspace are read on every call, so `tnctl ns` and
   `tnctl login` in another terminal count on the next call, with no restart, unless the server was started
@@ -66,7 +67,9 @@ kit's Claude Code plugin. Codex and OpenCode list the same tools under the serve
   `… truncated, N bytes more; narrow the query`. 48 KiB keeps every result inline in Claude Code, which
   moves a text result over 50,000 characters to a file.
 - **Errors are tool error results** with the platform's own message (a login that ended, no access, a pod
-  that is not there). The server stays up and the next call works, even after a tool failed.
+  that is not there). A platform older than this `tnctl` gets tnctl's own message instead: it has no live
+  MQTT stream (`mqtt_sample`), or its inspect routes cannot read without turning the Shell on
+  (`inspect_*`). The server stays up and the next call works, even after a tool failed.
 - **`inspect_*` never turns the robot's Shell on.** When the Shell is off they fail with the platform's
   message saying so. They need what [`tnctl inspect`](inspect.md) needs: a person needs the developer role
   and permission to open a terminal (`pods/exec`) in the teamspace; a TeknoirBot must be set to Act as me,

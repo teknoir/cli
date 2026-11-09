@@ -99,8 +99,9 @@ tnctl inspect logs <robot> <namespace>/<pod> -n <teamspace> --previous --tail 10
 tnctl inspect release <robot> <namespace>/<release> -n <teamspace> -o json
 ```
 
-- Pod names come from step 2 (`problems[].pods[]` and `problems[].namespace`) or from the device's
-  `state.apps` keys. There is no command that lists the pods of a robot.
+- Pod names come from step 2 (`problems[].pods[]` and `problems[].namespace`), from the device's
+  `state.apps` (each with its `namespace`), or from Prometheus: `pod_running{device_id="<device>"}`
+  lists every pod with `name` and `namespace`.
 - `inspect pod` also carries the recent events (`-o json`: `events[]`), so you usually do not need a
   separate event source. `eventsTruncated` says the list was cut.
 - `--previous` is the log of the container instance before a restart: that is where a crash-loop's
@@ -123,8 +124,9 @@ access `read`, where `inspect` is refused. **Only events from now on arrive**: t
 retained, so run it while the problem happens, or ask the person to reproduce it. `--seconds` bounds
 the run; `--json` prints each event's data as one JSON line.
 
-A 404 from this command means the platform is older than this tnctl and has no stream route yet: say
-so instead of retrying.
+A 404 whose message is `device <name> not found` means that device is outside what you may see.
+When tnctl says `this platform has no live MQTT stream yet`, the platform is older than this tnctl:
+say so instead of retrying.
 
 ### 7. Prometheus
 

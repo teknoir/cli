@@ -303,7 +303,7 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"inspect_logs", "inspect_pod", "inspect_release", "get_problems", "prom_query", "mqtt_sample"} {
+	for _, name := range []string{"inspect_logs", "inspect_pod", "inspect_release", "get_problems", "prom_query", "mqtt_sample", "list_devices", "get_device", "get_robot", "get_config"} {
 		for _, tool := range tools.Tools {
 			if tool.Name == name && !strings.HasSuffix(tool.Description, mcpUntrustedNote) {
 				t.Errorf("%s: description does not end with the untrusted note: %q", name, tool.Description)
@@ -1940,4 +1940,366 @@ func TestMCPMqttSampleEndsWhenTheServerStops(t *testing.T) {
 		t.Fatal("runMCP did not return")
 	}
 	mcpWaitEnded(t, ended)
+}
+
+// ---------- (q) the label names, an empty result, and the summary ----------
+
+// An agent that guesses the label names gets an empty result and no clue why: the description names
+// them.
+func TestMCPPromQueryNamesTheDeviceLabel(t *testing.T) {
+	noBotMode(t)
+	cs := mcpClient(t, newMCPServer(&cliEnv{}))
+	tools, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name != "prom_query" {
+			continue
+		}
+		for _, want := range []string{"device_id=<device name>", "up has no device_id; use device_last_seen", "exported_app"} {
+			if !strings.Contains(tool.Description, want) {
+				t.Errorf("the prom_query description lacks %q: %q", want, tool.Description)
+			}
+		}
+		return
+	}
+	t.Fatal("no prom_query tool")
+}
+
+// An empty prom_query result says why it may be empty; every other answer passes through as it came.
+func TestMCPPromQueryEmptyResultHint(t *testing.T) {
+	nonEmpty := `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"device_id":"d1"},"value":[1762682400,"1"]}]}}`
+	empty := `{"status":"success","data":{"resultType":"vector","result":[]}}`
+	cases := []struct{ name, answer, want string }{
+		{"empty vector", empty, ""},
+		{"non-empty vector", nonEmpty, ""},
+		{"no data", `{"status":"success"}`, ""},
+		{"not JSON", `not json`, `not json`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c := c
+			a := mcpCase{tool: "prom_query", args: map[string]any{"query": "up"}, answer: c.answer,
+				reqs: []mcpWant{{method: "GET", path: "/prometheus/query", query: "query=up"}}}
+			p, cs := mcpHarness(t, a)
+			res := mcpCall(t, cs, "prom_query", map[string]any{"query": "up"})
+			if res.IsError {
+				t.Fatalf("error result: %s", mcpText(t, res))
+			}
+			text := mcpText(t, res)
+			if c.want != "" {
+				if text != c.want {
+					t.Errorf("text %q, want %q", text, c.want)
+				}
+			} else {
+				var got map[string]any
+				if err := json.Unmarshal([]byte(text), &got); err != nil {
+					t.Fatalf("result %q: %v", text, err)
+				}
+				hint, has := got["hint"]
+				if want := c.name == "empty vector"; has != want {
+					t.Errorf("hint %v (present %v), want present %v: %q", hint, has, want, text)
+				}
+				if has && hint != mcpEmptyQueryHint {
+					t.Errorf("hint %q, want the empty-query hint", hint)
+				}
+				if has && !strings.Contains(text, "device_id=<device>") {
+					t.Errorf("the hint is escaped: %q", text)
+				}
+				if has {
+					// The hint is added; every key of the answer stays as it came.
+					delete(got, "hint")
+					var want map[string]any
+					if err := json.Unmarshal([]byte(c.answer), &want); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("the hint changed the answer: %v, want %v", got, want)
+					}
+				}
+				if !has && text != mcpIndented(t, c.answer) {
+					t.Errorf("the answer changed: %q, want %q", text, mcpIndented(t, c.answer))
+				}
+			}
+			if n := p.countAll(); n != 1 {
+				t.Errorf("%d requests, want 1: the hint must not make a second request", n)
+			}
+		})
+	}
+}
+
+// mcpRobotAnswer is a robot detail whose full answer is what the 48 KiB cap cuts: 24 configuration
+// resources and 12 effective rows, each with its links, merged values and per-leaf provenance. Its
+// shape is the platform's, so tnctl decodes it as it decodes a real answer.
+func mcpRobotAnswer() string {
+	resources := make([]any, 24)
+	for i := range resources {
+		resources[i] = map[string]any{"kind": "HelmChart", "name": fmt.Sprintf("chart%02d", i), "layer": "fleet",
+			"namespace": "default", "source": "test", "status": "winner"}
+	}
+	effective := make([]any, 12)
+	for i := range effective {
+		provenance := make([]any, 30)
+		for j := range provenance {
+			provenance[j] = map[string]any{
+				"path": fmt.Sprintf("leaf%02d", j), "value": "fleet", "layer": "fleet", "source": "test",
+			}
+		}
+		effective[i] = map[string]any{
+			"identity": fmt.Sprintf("HelmChart-default-app%02d", i),
+			"kind":     "HelmChart", "name": fmt.Sprintf("app%02d", i), "namespace": "default",
+			"layer": "fleet", "source": "test", "status": "winner",
+			"override": map[string]any{"storage": "device", "state": "applied", "paths": []any{"replicas"}},
+			"links": map[string]any{
+				"repo":      "https://github.com/teknoir/teknoir-demo-gitops",
+				"view":      "https://github.com/teknoir/teknoir-demo-gitops/blob/main/apps/app/app.yaml",
+				"permalink": "https://github.com/teknoir/teknoir-demo-gitops/blob/abc123/apps/app/app.yaml",
+				"history":   "https://github.com/teknoir/teknoir-demo-gitops/commits/main/apps/app/app.yaml",
+				"commit":    "https://github.com/teknoir/teknoir-demo-gitops/commit/abc123",
+				"edit":      "https://github.com/teknoir/teknoir-demo-gitops/edit/main/apps/app/app.yaml",
+				"pinned":    true,
+			},
+			"chartLinks": map[string]any{
+				"owner": "teknoir", "repo": "teknoir/helm", "chartDir": "charts/app", "guessed": false,
+				"source":  "https://github.com/teknoir/helm/tree/main/charts/app",
+				"values":  "https://github.com/teknoir/helm/blob/main/charts/app/values.yaml",
+				"release": "https://github.com/teknoir/teknoir-demo-gitops/releases/tag/app-0.1.0",
+				"tag":     "app-0.1.0",
+			},
+			"values": map[string]any{
+				"merged":     map[string]any{"image": map[string]any{"tag": "main"}, "replicas": 1},
+				"provenance": provenance,
+			},
+			"ownValues": map[string]any{"image": map[string]any{"tag": "main"}},
+			"application": map[string]any{
+				"repo_url": "https://github.com/teknoir/teknoir-demo-gitops",
+				"path":     "apps/app", "revision": "main",
+				"ref": map[string]any{"kind": "branch", "name": "main", "commit": "abc123"},
+			},
+		}
+	}
+	// The platform's own text for an agent computer when the server address is not set: <, > and &
+	// must reach the agent as written.
+	steps := []any{map[string]any{"role": "camera", "nodeName": "r1-camera", "k3s": "agent",
+		"commands": []any{"K3S_URL=https://<server-address>:6443 sudo -E bash bootstrap_agent_d1.sh"},
+		"note":     "Run this after r1-main is Ready & the address is set."}}
+	b, err := json.Marshal(map[string]any{
+		"name": "r1", "namespace": "ns1", "phase": "Online",
+		"nodes":       []any{map[string]any{"role": "main", "nodeName": "r1-main", "ready": true}},
+		"layers":      []any{map[string]any{"layer": "fleet", "source": "test", "applications": 3}},
+		"bootstrap":   map[string]any{"prepare": []any{"tnctl bootstrap d1 -n ns1 --skip-upload"}, "steps": steps, "blockers": []any{}},
+		"futureField": map[string]any{"added": "later"},
+		"configuration": map[string]any{
+			"resources":  resources,
+			"effective":  effective,
+			"deviations": []any{map[string]any{"identity": "HelmChart-app00-default", "reason": "overridden"}},
+			"warnings":   []any{"the git path apps/x could not be read"},
+		},
+	})
+	if err != nil {
+		panic(err) // a fixture that does not marshal is a bug in the test
+	}
+	return string(b)
+}
+
+// mcpEffectiveRows is the effective rows of an answer as decoded JSON.
+func mcpEffectiveRows(t *testing.T, top map[string]any) []map[string]any {
+	t.Helper()
+	conf, ok := top["configuration"].(map[string]any)
+	if !ok {
+		t.Fatalf("no configuration object: %v", top)
+	}
+	rows, ok := conf["effective"].([]any)
+	if !ok {
+		t.Fatalf("no effective rows: %v", conf)
+	}
+	out := make([]map[string]any, len(rows))
+	for i, row := range rows {
+		r, ok := row.(map[string]any)
+		if !ok {
+			t.Fatalf("row %d is %T", i, row)
+		}
+		out[i] = r
+	}
+	return out
+}
+
+// get_robot gives the effective resources and the bootstrap steps by default, and the platform's whole
+// answer only with detail=full.
+func TestMCPGetRobotDetail(t *testing.T) {
+	noBotMode(t)
+	full := mcpRobotAnswer()
+	p := newFakePlatform(t)
+	p.on("GET", "/robots/r1", 200, full)
+	e, _ := testEnv(t, p, nil)
+	cs := mcpClient(t, newMCPServer(e))
+
+	res := mcpCall(t, cs, "get_robot", map[string]any{"name": "r1"})
+	if res.IsError {
+		t.Fatalf("error result: %s", mcpText(t, res))
+	}
+	text := mcpText(t, res)
+	if len(text) >= 12<<10 {
+		t.Errorf("the summary is %d bytes, want under 12 KiB", len(text))
+	}
+	if strings.Contains(text, "truncated") {
+		t.Errorf("the summary was cut: %q", text[len(text)-80:])
+	}
+	if !strings.Contains(text, "K3S_URL=https://<server-address>:6443") || strings.Contains(text, `\u003c`) || strings.Contains(text, `\u0026`) {
+		t.Errorf("the summary changed the platform's text: %q", text)
+	}
+	for _, key := range []string{`"links"`, `"chartLinks"`, `"values"`, `"ownValues"`, `"provenance"`, `"resources"`} {
+		if strings.Contains(text, key) {
+			t.Errorf("the summary carries %s: %q", key, text)
+		}
+	}
+	var top map[string]any
+	if err := json.Unmarshal([]byte(text), &top); err != nil {
+		t.Fatalf("the summary is not JSON: %v", err)
+	}
+	if top["phase"] != "Online" || top["detail"] != "summary" {
+		t.Errorf("phase %v, detail %v", top["phase"], top["detail"])
+	}
+	if more, _ := top["more"].(string); !strings.Contains(more, "detail=full") {
+		t.Errorf("more %q", top["more"])
+	}
+	if _, ok := top["futureField"]; !ok {
+		t.Error("a top-level key the platform added later was dropped")
+	}
+	if nodes, _ := top["nodes"].([]any); len(nodes) != 1 {
+		t.Errorf("nodes %v", top["nodes"])
+	}
+	if layers, _ := top["layers"].([]any); len(layers) != 1 {
+		t.Errorf("layers %v", top["layers"])
+	}
+	bootstrap, _ := top["bootstrap"].(map[string]any)
+	if prepare, _ := bootstrap["prepare"].([]any); len(prepare) != 1 || prepare[0] != "tnctl bootstrap d1 -n ns1 --skip-upload" {
+		t.Errorf("bootstrap.prepare %v", bootstrap["prepare"])
+	}
+	conf, _ := top["configuration"].(map[string]any)
+	if conf["resourceRows"] != float64(24) {
+		t.Errorf("resourceRows %v, want 24", conf["resourceRows"])
+	}
+	if d, _ := conf["deviations"].([]any); len(d) != 1 {
+		t.Errorf("configuration.deviations %v", conf["deviations"])
+	}
+	if w, _ := conf["warnings"].([]any); len(w) != 1 {
+		t.Errorf("configuration.warnings %v", conf["warnings"])
+	}
+	rows := mcpEffectiveRows(t, top)
+	if len(rows) != 12 {
+		t.Fatalf("%d effective rows, want 12", len(rows))
+	}
+	for i, row := range rows {
+		if row["kind"] != "HelmChart" || row["name"] != fmt.Sprintf("app%02d", i) {
+			t.Errorf("row %d: %v", i, row)
+		}
+		if override, _ := row["override"].(map[string]any); override["state"] != "applied" {
+			t.Errorf("row %d lost its override: %v", i, row["override"])
+		}
+		app, _ := row["application"].(map[string]any)
+		if app["repo_url"] != "https://github.com/teknoir/teknoir-demo-gitops" || app["path"] != "apps/app" || app["revision"] != "main" {
+			t.Errorf("row %d application: %v", i, app)
+		}
+		if _, ok := app["ref"]; ok {
+			t.Errorf("row %d keeps application.ref", i)
+		}
+	}
+
+	// detail=full is today's answer: the indented platform answer, cut at the cap when it is larger.
+	res = mcpCall(t, cs, "get_robot", map[string]any{"name": "r1", "detail": "full"})
+	wantFull := mcpText(t, mcpResult(json.RawMessage(full)))
+	if got := mcpText(t, res); res.IsError || got != wantFull {
+		t.Errorf("detail=full gave %d bytes (error %v), want the %d-byte answer", len(got), res.IsError, len(wantFull))
+	}
+
+	before := p.countAll()
+	res = mcpCall(t, cs, "get_robot", map[string]any{"name": "r1", "detail": "x"})
+	if want := "detail must be summary or full"; !res.IsError || mcpText(t, res) != want {
+		t.Errorf("%+v %q, want %q", res, mcpText(t, res), want)
+	}
+	if n := p.countAll() - before; n != 0 {
+		t.Errorf("a refused detail sent %d request(s)", n)
+	}
+}
+
+// get_config without resource summarises the same way, and with resource it answers as it always did.
+func TestMCPGetConfigDetail(t *testing.T) {
+	noBotMode(t)
+	var robot map[string]any
+	if err := json.Unmarshal([]byte(mcpRobotAnswer()), &robot); err != nil {
+		t.Fatal(err)
+	}
+	fullView := map[string]any{
+		"target":           map[string]any{"kind": "robot", "name": "r1", "device": "d1", "robot": "r1"},
+		"overrides":        map[string]any{"resources": map[string]any{"HelmChart/default/app00": map[string]any{"note": "pinned"}}},
+		"oldestOverrideAt": "2026-10-19T08:00:00Z",
+		"overrideStatus":   []any{map[string]any{"target": "HelmChart/default/app00", "state": "applied"}},
+		"configuration":    robot["configuration"],
+	}
+	b, err := json.Marshal(fullView)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := string(b)
+
+	p := newFakePlatform(t)
+	p.on("GET", "/config/r1", 200, full)
+	p.on("GET", "/config/r1/resource", 200, `{"id":"HelmChart/default/app00","values":{"replicas":2}}`)
+	e, _ := testEnv(t, p, nil)
+	cs := mcpClient(t, newMCPServer(e))
+
+	res := mcpCall(t, cs, "get_config", map[string]any{"target": "r1"})
+	if res.IsError {
+		t.Fatalf("error result: %s", mcpText(t, res))
+	}
+	text := mcpText(t, res)
+	var top map[string]any
+	if err := json.Unmarshal([]byte(text), &top); err != nil {
+		t.Fatalf("the summary is not JSON: %v", err)
+	}
+	if top["detail"] != "summary" {
+		t.Errorf("detail %v", top["detail"])
+	}
+	conf, _ := top["configuration"].(map[string]any)
+	if conf["resourceRows"] != float64(24) {
+		t.Errorf("resourceRows %v, want 24", conf["resourceRows"])
+	}
+	for i, row := range mcpEffectiveRows(t, top) {
+		for _, k := range []string{"links", "chartLinks", "values", "ownValues", "provenance"} {
+			if _, ok := row[k]; ok {
+				t.Errorf("row %d keeps %q", i, k)
+			}
+		}
+	}
+	if _, ok := top["overrides"]; !ok {
+		t.Error("the summary lost overrides")
+	}
+	if st, _ := top["overrideStatus"].([]any); len(st) != 1 {
+		t.Errorf("overrideStatus %v", top["overrideStatus"])
+	}
+
+	res = mcpCall(t, cs, "get_config", map[string]any{"target": "r1", "detail": "full"})
+	wantFull := mcpText(t, mcpResult(json.RawMessage(full)))
+	if got := mcpText(t, res); res.IsError || got != wantFull {
+		t.Errorf("detail=full gave %d bytes (error %v), want %d", len(got), res.IsError, len(wantFull))
+	}
+
+	before := p.countAll()
+	res = mcpCall(t, cs, "get_config", map[string]any{"target": "r1", "detail": "x"})
+	if want := "detail must be summary or full"; !res.IsError || mcpText(t, res) != want {
+		t.Errorf("%+v %q, want %q", res, mcpText(t, res), want)
+	}
+	if n := p.countAll() - before; n != 0 {
+		t.Errorf("a refused detail sent %d request(s)", n)
+	}
+
+	// With resource, detail does not apply: the answer is the platform's, even for a bad detail.
+	for _, detail := range []string{"full", "x"} {
+		res = mcpCall(t, cs, "get_config", map[string]any{"target": "r1", "resource": "HelmChart/default/app00", "detail": detail})
+		if got, want := mcpText(t, res), mcpIndented(t, `{"id":"HelmChart/default/app00","values":{"replicas":2}}`); res.IsError || got != want {
+			t.Errorf("resource with detail %q: %q (error %v), want %q", detail, got, res.IsError, want)
+		}
+	}
 }

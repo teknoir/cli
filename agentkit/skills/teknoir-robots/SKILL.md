@@ -190,8 +190,8 @@ hand them over.
 What a person does, on a trusted workstation with their own login:
 
 ```bash
-tnctl ns <teamspace>
-tnctl bootstrap <device> --skip-upload [--robot <robot> --role <role> --agent-role <role> …]
+tnctl bootstrap <device> -n <teamspace> --skip-upload \
+  [--robot <robot> --role <role> --agent-role <role> …]
 ```
 
 That writes `bootstrap_server_<device>.sh`, `bootstrap_agent_<device>.sh` and

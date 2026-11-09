@@ -96,9 +96,15 @@ type FleetDeviceApp struct {
 	// CPU and Memory are fractions of 1.
 	CPU    float64 `json:"cpu,omitempty"`
 	Memory float64 `json:"memory,omitempty"`
+	// Namespace is the pod's namespace on the robot.
+	Namespace string `json:"namespace,omitempty"`
+	// ManagedBy is what deployed the pod: devstudio, backstage, device-controller, or empty when the
+	// platform does not know.
+	ManagedBy string `json:"managedBy,omitempty"`
 }
 
-// FleetDeviceState is what the device last reported. A device that reported nothing has no state.
+// FleetDeviceState is what the platform last read about the device from the teamspace's Prometheus.
+// A device that reported nothing has no state.
 type FleetDeviceState struct {
 	// CPU, Memory and Storage are fractions of 1 (0.25 is 25 %).
 	CPU     float64 `json:"cpu,omitempty"`

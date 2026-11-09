@@ -493,3 +493,90 @@ func TestBotWhoamiNeedsTheBotAndReadsTheWhoamiRoute(t *testing.T) {
 		t.Errorf("a user fleet answered: %v", err)
 	}
 }
+
+// An older platform has no stream route: Express answers a 404 with no or an HTML body, and a missing
+// device inside the route answers a JSON error. Only the first says the platform is older.
+func TestMqttStreamOnAnOlderPlatform(t *testing.T) {
+	for _, c := range []struct{ name, body, want string }{
+		{"no route", "", msgNoStreamOnOlderPlatform},
+		{"an HTML page", "<!DOCTYPE html><html><body>Not Found</body></html>", msgNoStreamOnOlderPlatform},
+		{"a missing device", `{"error":{"name":"NotFoundError","message":"device x not found"}}`, "device x not found"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, c.body)
+			}))
+			defer ts.Close()
+			f := &Fleet{Base: ts.URL + "/api/device/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }}
+			_, err := f.MqttStream(context.Background(), []string{"/devices/+/state/#"})
+			ae, ok := err.(*Error)
+			if !ok || ae.Status != http.StatusNotFound {
+				t.Fatalf("%T %v", err, err)
+			}
+			if ae.Message != c.want {
+				t.Errorf("message %q, want %q", ae.Message, c.want)
+			}
+		})
+	}
+}
+
+// A platform whose inspect routes do not know enable=false is older than tnctl; it must be named as
+// such rather than as a bad request, and tnctl must not ask again without enable=false.
+func TestInspectOnAnOlderPlatform(t *testing.T) {
+	ctx := context.Background()
+	t.Run("the three inspect routes", func(t *testing.T) {
+		requests := 0
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			// The older platform's own answers: the logs and release routes name what they allow.
+			msg := "The query parameter enable is not known."
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/logs"):
+				msg = "The query parameter enable is not known. Use container, previous, tail, since."
+			case strings.Contains(r.URL.Path, "/inspect/releases/"):
+				msg = "The query parameter enable is not known. Use revision."
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"name":"InputError","message":"`+msg+`"}}`)
+		}))
+		defer ts.Close()
+		f := &Fleet{Base: ts.URL + "/api/device/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }}
+		for _, c := range []struct {
+			name string
+			call func() error
+		}{
+			{"pod", func() error { _, _, err := f.InspectPod(ctx, "vs", "default", "p"); return err }},
+			{"logs", func() error { _, _, err := f.InspectLogs(ctx, "vs", "default", "p", InspectLogsOptions{}); return err }},
+			{"release", func() error { _, _, err := f.InspectRelease(ctx, "vs", "default", "r"); return err }},
+		} {
+			before := requests
+			err := c.call()
+			ae, ok := err.(*Error)
+			if !ok || ae.Status != http.StatusBadRequest || ae.Code != "InputError" {
+				t.Errorf("%s: %T %v", c.name, err, err)
+				continue
+			}
+			want := "this platform is older than this tnctl: it cannot read a robot without turning its Shell on, so tnctl does not ask it (ask for a platform update)"
+			if ae.Message != want {
+				t.Errorf("%s: message %q, want %q", c.name, ae.Message, want)
+			}
+			if n := requests - before; n != 1 {
+				t.Errorf("%s sent %d request(s), want 1: tnctl must never retry without enable=false", c.name, n)
+			}
+		}
+	})
+	t.Run("another 400", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"name":"InputError","message":"tail must be at most 2000."}}`)
+		}))
+		defer ts.Close()
+		f := &Fleet{Base: ts.URL + "/api/device/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }}
+		_, _, err := f.InspectLogs(ctx, "vs", "default", "p", InspectLogsOptions{})
+		ae, ok := err.(*Error)
+		if !ok || ae.Status != http.StatusBadRequest || ae.Message != "tail must be at most 2000." {
+			t.Errorf("%T %v", err, err)
+		}
+	})
+}

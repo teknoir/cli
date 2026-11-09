@@ -15,6 +15,12 @@ selector. A device outside that scope, or a series without `device_id` such as `
 (exit 6). For everyone, a query over 4096 characters, or one Prometheus rejects, is exit 5. The
 answer may be at most 10 MiB, and the platform gives Prometheus 10 seconds.
 
+Besides `device_id`, every device series carries the labels of the platform's scrape:
+`app="fleet-metrics"`, `job`, `instance`, `kubernetes_namespace` (the teamspace) and
+`kubernetes_pod_name`. So a pod's own `app` label is renamed `exported_app`: filter
+`exported_app="mock-io"`, never `app=`. `namespace` is the pod's namespace on the robot. There is
+no `device` or robot label: find the robot's device with get_robot or `tnctl robot <robot>`.
+
 ## What a device reports
 
 The robot's agent builds these every scrape and the platform writes them into the teamspace's
@@ -25,7 +31,7 @@ Prometheus. A series that the device stops reporting disappears about 90 seconds
 |---|---|---|
 | `device_last_seen` | unix seconds of the last state or event message; 0 = none since the metrics processor last started (for a new device: never reported) | `device_id` |
 | `device_updated_at` | unix seconds of the last configuration message | `device_id` |
-| `pod_running` | 1 when the container's reason is `Running`, else 0 | `name`, `namespace`, `node`, `version`, `reason`, the pod's labels |
+| `pod_running` | 1 when the container's reason is `Running`, else 0 | `name`, `namespace`, `node`, `version`, `reason`, the pod's labels (its `app` label as `exported_app`) |
 | `pod_restarts` | restarts of the container | the same |
 | `pod_ready_containers`, `pod_total_containers` | counts | the same |
 | `pod_age` | nanoseconds | the same |
@@ -75,6 +81,7 @@ Replace `edge-01` with the device's name. Each selector is pinned to one device.
 | 10 | Disk used (a fraction) and free (GB) | `max by (name) (node_storage_usage{device_id="edge-01"} / node_storage_capacity{device_id="edge-01"})`, `node_storage_available{device_id="edge-01"} / 1e9` |
 | 11 | Nodes not ready, and how many joined | `node_ready{device_id="edge-01"} == 0`, `count(node_ready{device_id="edge-01"})` |
 | 12 | The robot agent's version and capabilities | `toe_build_info{device_id="edge-01"}` |
+| 13 | What does a device report? | `count by (__name__) ({device_id="edge-01"})` |
 
 Read the answer with jq:
 

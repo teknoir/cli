@@ -148,6 +148,10 @@ func splitSSE(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	return 0, nil, nil
 }
 
+// msgNoStreamOnOlderPlatform is what a 404 without a JSON error body of the stream route says: the
+// platform was built before the route, not the device gone.
+const msgNoStreamOnOlderPlatform = "this platform has no live MQTT stream yet: it is older than this tnctl (ask for a platform update)"
+
 // MqttSubscription is an open MQTT stream. Close it when done.
 type MqttSubscription struct {
 	body io.ReadCloser
@@ -222,7 +226,16 @@ func (f *Fleet) MqttStream(ctx context.Context, topics []string) (*MqttSubscript
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 		_ = resp.Body.Close()
-		return nil, errorFromResponse(http.MethodGet, u, resp, body)
+		err := errorFromResponse(http.MethodGet, u, resp, body)
+		// Express's answer to a route the platform does not have is a 404 with an empty body (or an
+		// HTML page); a missing device inside the route is a JSON error. The first is an older
+		// platform, not a missing device.
+		if resp.StatusCode == http.StatusNotFound {
+			if trimmed := strings.TrimSpace(string(body)); trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+				err.Message = msgNoStreamOnOlderPlatform
+			}
+		}
+		return nil, err
 	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Split(splitSSE)

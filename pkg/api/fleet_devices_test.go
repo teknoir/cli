@@ -507,3 +507,26 @@ func TestDeviceRawKeepsUnknownFields(t *testing.T) {
 		t.Errorf("%+v %v", got, err)
 	}
 }
+
+// state.apps carries each pod's namespace on the robot and what deployed it.
+func TestDeviceAppNamespaceAndManagedBy(t *testing.T) {
+	const raw = `{"name":"d1","state":{"apps":{"notebook":{"running":true,"restarts":0,"ready":"1/1",
+"namespace":"teknoir-demo-notebook","managedBy":"devstudio"}}}}`
+	var d FleetDevice
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		t.Fatal(err)
+	}
+	app := d.StateOrZero().Apps["notebook"]
+	if app.Namespace != "teknoir-demo-notebook" || app.ManagedBy != "devstudio" || !app.Running {
+		t.Errorf("app %+v", app)
+	}
+	b, err := json.Marshal(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"namespace":"teknoir-demo-notebook"`, `"managedBy":"devstudio"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("%s lacks %s", b, want)
+		}
+	}
+}

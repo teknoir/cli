@@ -49,7 +49,8 @@ list of summaries: the same fields without `spec`, `configuration` and `bootstra
 | `phase`, `phaseMessage` | `WaitingForDevice`, `Registered`, `Online`, `Degraded` or `Offline`, and a sentence for a person. |
 | `nodes[]` | `{role, nodeName, joined, ready, k3s, hardware, optional}` per computer. |
 | `layers[]` | `{layer, source, applications}`: which layer contributes which application. |
-| `deviations`, `overrides`, `oldestOverrideAt` | Where the robot's configuration differs from git, and since when. |
+| `deviations` | How many resources differ from the robot's type: a higher layer (fleet, robot, local or a per-robot override) changes or replaces a type resource, a type resource is missing, or a resource is turned off. |
+| `overrides`, `oldestOverrideAt` | The per-robot overrides on its device (resources turned off are not counted), and when the oldest was made. |
 | `fleets[]` | The fleets that match it. |
 | `org` | `{unit, path[{id,name}]}` when it is placed in a unit. |
 | `disabled` | `{state: disabling\|disabled\|enabling, at, by, reason, sessionsClosed, message, error}` when it is in the disable cycle. |
@@ -70,7 +71,7 @@ list of summaries: the same fields without `spec`, `configuration` and `bootstra
   "nodes": [{"role": "main", "nodeName": "amr-02-main", "joined": false, "ready": false, "k3s": "server"}],
   "bootstrap": {
     "device": "amr-02",
-    "prepare": ["tnctl ns <teamspace>", "tnctl bootstrap amr-02 --skip-upload --robot amr-02 --role main"],
+    "prepare": ["tnctl bootstrap amr-02 -n <teamspace> --skip-upload --robot amr-02 --role main"],
     "steps": [{"role": "main", "nodeName": "amr-02-main", "k3s": "server", "commands": ["sudo bash bootstrap_server_amr-02.sh"], "note": "Run this first and wait until the node is Ready."}],
     "blockers": []
   }
@@ -138,7 +139,9 @@ equal the path).
 }
 ```
 
-The answer adds the counts: `robots`, `robotsWithOverrides`, and the robots that use the type.
+The answer adds the counts: `robots`, `robotsWithOverrides` (robots with per-robot overrides on
+their device), `robotsDeviating` (robots whose configuration differs from the type), and the robots
+that use the type.
 
 ## A fleet
 

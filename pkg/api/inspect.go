@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // Go mirror of the read-only inspect routes of the fleet API (InspectPodResponse,
@@ -200,12 +202,24 @@ type InspectReleaseResponse struct {
 // robot's Shell on. When it is off the platform answers 409 with the code terminal_off.
 func inspectQuery() url.Values { return url.Values{"enable": {"false"}} }
 
+// inspectVersionErr names an older platform for what it is: one whose inspect routes do not know
+// enable=false, so it can only read a robot by turning the Shell on, which tnctl never asks it to do.
+// Any other error passes through unchanged.
+func inspectVersionErr(err error) error {
+	var ae *Error
+	if errors.As(err, &ae) && ae.Status == http.StatusBadRequest &&
+		strings.Contains(ae.Message, "query parameter enable is not known") {
+		ae.Message = "this platform is older than this tnctl: it cannot read a robot without turning its Shell on, so tnctl does not ask it (ask for a platform update)"
+	}
+	return err
+}
+
 // InspectPod reads a pod of a robot and its recent events.
 func (f *Fleet) InspectPod(ctx context.Context, robot, podNamespace, pod string) (*InspectPodResponse, json.RawMessage, error) {
 	r, raw, err := decode[InspectPodResponse](f.Do(ctx, http.MethodGet,
 		"robots/"+url.PathEscape(robot)+"/inspect/pods/"+url.PathEscape(podNamespace)+"/"+url.PathEscape(pod),
 		inspectQuery(), nil))
-	return &r, raw, err
+	return &r, raw, inspectVersionErr(err)
 }
 
 // InspectLogsOptions are the flags of one logs call. The zero value asks for the server's defaults.
@@ -236,7 +250,7 @@ func (f *Fleet) InspectLogs(ctx context.Context, robot, podNamespace, pod string
 	r, raw, err := decode[InspectLogsResponse](f.Do(ctx, http.MethodGet,
 		"robots/"+url.PathEscape(robot)+"/inspect/pods/"+url.PathEscape(podNamespace)+"/"+url.PathEscape(pod)+"/logs",
 		q, nil))
-	return &r, raw, err
+	return &r, raw, inspectVersionErr(err)
 }
 
 // InspectRelease reads an installed Helm release of a robot: its revision, status and objects.
@@ -244,5 +258,5 @@ func (f *Fleet) InspectRelease(ctx context.Context, robot, releaseNamespace, rel
 	r, raw, err := decode[InspectReleaseResponse](f.Do(ctx, http.MethodGet,
 		"robots/"+url.PathEscape(robot)+"/inspect/releases/"+url.PathEscape(releaseNamespace)+"/"+url.PathEscape(release),
 		inspectQuery(), nil))
-	return &r, raw, err
+	return &r, raw, inspectVersionErr(err)
 }
