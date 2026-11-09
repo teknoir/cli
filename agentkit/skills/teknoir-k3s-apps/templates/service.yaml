@@ -1,0 +1,22 @@
+# A ClusterIP Service for an app in the apps namespace of a TeknoirBot's computer.
+# Replace <app>. Apply it with:
+#   kubectl -n apps apply -f service.yaml
+#
+# Only ClusterIP is allowed in this namespace: a NodePort, a LoadBalancer, an ExternalName or an
+# externalIPs entry is refused by the admission policy. Nothing outside the bot's VM can reach
+# the app; view it through a port-forward into the bot's browser.
+apiVersion: v1
+kind: Service
+metadata:
+  name: <app>
+  namespace: apps
+  labels:
+    app: <app>
+spec:
+  type: ClusterIP
+  selector:
+    app: <app>
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

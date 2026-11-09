@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# teknoirbot-app-key — copy the TeknoirBot's key into a Kubernetes Secret in the apps namespace.
+#
+# A relay Deployment in `apps` needs the bot key to read the platform's MQTT stream, but the key
+# lives in the desktop's Secret. This copies it into `apps/<secret-name>` (data key `key`) without
+# ever putting the value on a command line or on the terminal: the value goes from the key file
+# through kubectl's stdin into the API server.
+#
+# The copy is as sensitive as the key itself and stays inside the bot's own computer.
+set -euo pipefail
+
+KUBECTL="${KUBECTL:-kubectl}"
+
+usage() {
+  cat <<'EOF'
+Copy the TeknoirBot's key into a Secret in the apps namespace.
+
+Usage:
+  teknoirbot-app-key <secret-name>
+
+Arguments:
+  <secret-name>   a DNS label (lowercase letters, digits and '-', at most 63
+                  characters); the Secret is created or updated in namespace apps
+
+Options:
+  -h, --help      print this help
+
+Only runs on a TeknoirBot's computer: TEKNOIRBOT_API must be set and the key file
+($TNCTL_BOT_KEY_FILE, /run/teknoirbot/key on a bot) must be readable and non-empty.
+
+The copy is as sensitive as the key itself and stays inside the bot's own computer:
+
+  - never read it with kubectl get or describe and -o yaml, -o json or -o jsonpath;
+  - never exec into a pod that mounts it;
+  - never print its env or its files;
+  - mount it read-only, only into the relay, and delete the Secret when the relay is
+    gone (kubectl -n apps delete secret <secret-name>).
+EOF
+}
+
+die() {
+  echo "teknoirbot-app-key: $*" >&2
+  exit 2
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+[ $# -eq 1 ] || die "usage: teknoirbot-app-key <secret-name> (see --help)"
+name="$1"
+
+if [ -z "${TEKNOIRBOT_API:-}" ]; then
+  die "this runs only on a TeknoirBot's computer (TEKNOIRBOT_API is not set)"
+fi
+keyfile="${TNCTL_BOT_KEY_FILE:-}"
+if [ -z "$keyfile" ]; then
+  die "this runs only on a TeknoirBot's computer (TNCTL_BOT_KEY_FILE is not set)"
+fi
+if [ ! -r "$keyfile" ] || [ ! -s "$keyfile" ]; then
+  die "the bot key file $keyfile is missing, unreadable or empty; a person must re-create the bot"
+fi
+
+case "$name" in
+  ''|*[!a-z0-9-]*) die "$name is not a DNS label: use lowercase letters, digits and '-' only" ;;
+esac
+case "$name" in
+  -*|*-) die "$name is not a DNS label: it must start and end with a letter or a digit" ;;
+esac
+[ "${#name}" -le 63 ] || die "$name is longer than 63 characters"
+
+# The key goes from the file, through kubectl's stdin, to the API server: it is never an
+# argument and never on the terminal. Server-side apply leaves no last-applied-configuration
+# annotation, so the API server holds exactly one copy.
+"$KUBECTL" -n apps create secret generic "$name" --from-file=key="$keyfile" --dry-run=client -o yaml \
+  | "$KUBECTL" label --local -f - app.kubernetes.io/managed-by=teknoirbot-app-key -o yaml \
+  | "$KUBECTL" -n apps apply --server-side --field-manager=teknoirbot-app-key -f - >/dev/null
+
+cat <<EOF
+Secret apps/$name written (data key: key).
+
+Mount it read-only into the relay only:
+
+  spec:
+    containers:
+      - name: mqtt-relay
+        args: ["--sse", "--key-file", "/run/teknoirbot-app/key"]
+        volumeMounts:
+          - {name: bot-key, mountPath: /run/teknoirbot-app, readOnly: true}
+    volumes:
+      - {name: bot-key, secret: {secretName: $name}}
+
+Delete it when the relay is gone: $KUBECTL -n apps delete secret $name
+EOF
