@@ -1,0 +1,9 @@
+model = "gpt-5"
+
+[mcp_servers.teknoir]
+command = "tnctl"
+args = ["mcp"]
+
+[[hooks.PreToolUse]]
+matcher = "Bash"
+command = "/usr/local/bin/check"

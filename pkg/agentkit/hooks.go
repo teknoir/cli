@@ -47,9 +47,13 @@ func (p *op) uninstallHooks() error {
 // mergeSettings adds (or, with remove, drops) the guard's PreToolUse entry in a Claude Code
 // settings.json, keeping every other key, hook and permission as it is.
 func (p *op) mergeSettings(path, guard string, remove bool) error {
+	snippet := "add " + settingsSnippet(guard)
+	if remove {
+		snippet = "remove " + settingsSnippet(guard)
+	}
 	target, why := p.foreignTarget(path)
 	if why != "" {
-		p.refuse(path, string(AgentClaude), why+" "+settingsSnippet(guard), why+" "+settingsSnippet(guard))
+		p.refuse(path, string(AgentClaude), why+" "+snippet, why+" "+snippet)
 		return nil
 	}
 	data, err := os.ReadFile(target)

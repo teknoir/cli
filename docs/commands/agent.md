@@ -86,8 +86,10 @@ existing file's **key order changes** (the data does not). Codex's TOML is edite
 comments stay; the result is parsed and compared with the original **before** anything is written, and an
 edit that would break the file, or touch anything beside `[mcp_servers.teknoir]`, is refused with the
 lines to edit by hand. A config file that is a symlink (dotfiles, stow, home-manager) keeps its link: the
-change goes to the file it points at. In project scope such a file is left alone, and so is a project
-whose `.claude`, `.agents` or `.codex` is a symlink.
+change goes to the file it points at. In project scope such a file is refused (exit 8) with the lines to
+edit by hand, and so is a project whose `.claude`, `.agents` or `.codex` is a symlink. `AGENTS.md` is the
+exception: a link to a Markdown file inside the project, outside `.git` (AGENTS.md -> CLAUDE.md), is
+followed, and the section goes into that file.
 
 ## List and check
 

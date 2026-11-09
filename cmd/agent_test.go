@@ -369,6 +369,71 @@ func TestAgentInstallEmptyConfigDirs(t *testing.T) {
 	}
 }
 
+// CLAUDE_CONFIG_DIR holds everything of Claude Code's: the skills, the guard, settings.json and its
+// .claude.json, and nothing goes to the home directory.
+func TestAgentClaudeConfigDirEverything(t *testing.T) {
+	home, _ := agentHome(t)
+	cfg := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	if _, _, err := runCLI(t, nil, "agent", "install", "--agent", "claude", "--mcp", "--hooks"); err != nil {
+		t.Fatal(err)
+	}
+	guard := filepath.Join(cfg, "hooks", "teknoir-guard")
+	if _, err := os.Stat(guard); err != nil {
+		t.Errorf("the guard: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(cfg, "settings.json")); err != nil || !strings.Contains(string(b), guard) {
+		t.Errorf("settings.json: %s %v", b, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(cfg, ".claude.json")); err != nil || !strings.Contains(string(b), `"teknoir"`) {
+		t.Errorf(".claude.json: %s %v", b, err)
+	}
+	for _, p := range []string{filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json")} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s was written: %v", p, err)
+		}
+	}
+}
+
+// No variable set: every agent's files go to the default paths below HOME.
+func TestAgentAllConfigDirsEmpty(t *testing.T) {
+	home, project := agentHome(t) // all three are ""
+	if _, _, err := runCLI(t, nil, "agent", "install", "--agent", "claude,codex,opencode", "--mcp", "--hooks"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(home, ".claude", "settings.json"), filepath.Join(home, ".claude.json"), filepath.Join(home, ".codex", "config.toml"), filepath.Join(home, ".config", "opencode", "opencode.json")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	if entries, _ := os.ReadDir(project); len(entries) != 0 {
+		t.Errorf("a user-scope install wrote into the current directory: %v", entries)
+	}
+}
+
+// Project scope ignores all three variables: the config files are the project's own.
+func TestAgentProjectIgnoresConfigDirs(t *testing.T) {
+	_, project := agentHome(t)
+	dirs := map[string]string{}
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME"} {
+		dirs[v] = t.TempDir()
+		t.Setenv(v, dirs[v])
+	}
+	if _, _, err := runCLI(t, nil, "agent", "install", "--project", "--mcp", "--hooks"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{".claude/settings.json", ".mcp.json", ".codex/config.toml", "opencode.json"} {
+		if _, err := os.Stat(filepath.Join(project, p)); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	for v, d := range dirs {
+		if entries, _ := os.ReadDir(d); len(entries) != 0 {
+			t.Errorf("project scope wrote into $%s: %v", v, entries)
+		}
+	}
+}
+
 // unsetEnv makes a variable unset for the test.
 func unsetEnv(t *testing.T, name string) {
 	t.Helper()
@@ -489,6 +554,44 @@ func TestAgentInstallTwoRefusals(t *testing.T) {
 	// Another agent's file of the same run is still written.
 	if _, err := os.Stat(filepath.Join(project, ".agents", "skills", "teknoir-platform", "SKILL.md")); err != nil {
 		t.Errorf("the rest of the run did not write: %v", err)
+	}
+}
+
+// Two refusals in one run, one for each agent, and the run goes on: what the kit writes after the first
+// refused file (the shared skills root and the MCP file) is written after the refusals too.
+func TestAgentInstallTwoRefusalsRunGoesOn(t *testing.T) {
+	_, project := agentHome(t)
+	if _, _, err := runCLI(t, nil, "agent", "install", "--project", "--agent", "claude,opencode", "--mcp"); err != nil {
+		t.Fatal(err)
+	}
+	skill := filepath.Join(project, ".claude", "skills", "teknoir-platform", "SKILL.md")
+	if err := os.WriteFile(skill, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "opencode.jsonc"), []byte("{\n  // my comment\n  \"model\": \"x\"\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Remove what the first run wrote after the refused file, so the checks below see the second run.
+	if err := os.RemoveAll(filepath.Join(project, ".agents")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(project, ".mcp.json")); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := runCLI(t, nil, "agent", "install", "--project", "--agent", "claude,opencode", "--mcp")
+	if err == nil || exitCodeOf(err) != codeConflict {
+		t.Fatalf("exit %v, want %d", err, codeConflict)
+	}
+	for _, p := range []string{
+		filepath.Join(project, ".agents", "skills", "teknoir-platform", "SKILL.md"),
+		filepath.Join(project, ".agents", "skills", ".tnctl-agent-kit.json"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("the run stopped after the refusal: %v", err)
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(project, ".mcp.json")); err != nil || !strings.Contains(string(b), `"teknoir"`) {
+		t.Errorf(".mcp.json was not registered after the refusal: %s %v", b, err)
 	}
 }
 

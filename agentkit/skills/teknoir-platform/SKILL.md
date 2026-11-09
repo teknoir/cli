@@ -1,6 +1,6 @@
 ---
 name: teknoir-platform
-description: Use when working with Teknoir devices, robots or teamspaces, or with the tnctl CLI: what the platform is and how to start safely.
+description: "Use when working with Teknoir devices, robots or teamspaces, or with the tnctl CLI: what the platform is and how to start safely."
 license: Apache-2.0
 metadata:
   teknoir-kit-version: "0.1.0"

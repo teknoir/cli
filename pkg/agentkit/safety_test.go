@@ -357,7 +357,8 @@ func TestProjectRootSymlinkDryRun(t *testing.T) {
 	}
 }
 
-// agent list reports a symlinked project root as its problem, and reads nothing below it.
+// agent list reports a symlinked project root as its problem, and reads nothing below it — the MCP
+// config file of the agent that lives below it included.
 func TestListProjectRootSymlink(t *testing.T) {
 	o, _, project := testOpts(t)
 	o.Scope = ScopeProject
@@ -365,6 +366,10 @@ func TestListProjectRootSymlink(t *testing.T) {
 	mustSymlink(t, outside, filepath.Join(project, ".claude"))
 	// Something below the link that looks installed: it must not be read.
 	writeAt(t, filepath.Join(outside, "skills", manifestName), `{"kitVersion":"0.1.0","files":{}}`, 0o644)
+	// A Codex config below a symlinked .codex that registers the server: it must not be read either.
+	codexDir := t.TempDir()
+	writeAt(t, filepath.Join(codexDir, "config.toml"), codexOurs, 0o644)
+	mustSymlink(t, codexDir, filepath.Join(project, ".codex"))
 	res, err := List(o)
 	if err != nil {
 		t.Fatalf("list of a symlinked project root: %v", err)
@@ -382,6 +387,14 @@ func TestListProjectRootSymlink(t *testing.T) {
 	}
 	if found.InSync() || res.InSync() {
 		t.Error("a symlinked root reports in sync")
+	}
+	for _, m := range res.MCP {
+		if m.Agent != string(AgentCodex) {
+			continue
+		}
+		if m.Registered || !strings.Contains(m.Note, "is a symlink") {
+			t.Errorf("list read the MCP config through the link: %+v", m)
+		}
 	}
 }
 
@@ -422,6 +435,173 @@ func TestIsBelowDotDotFoo(t *testing.T) {
 			t.Errorf("isBelow(%q) = %v, want %v", tc.path, got, tc.want)
 		}
 	}
+}
+
+// A single bad thing below a root never fails the run: a file or a link where the skill's directory
+// belongs, a manifest that is not a regular file, a manifest key with a NUL byte. Install and uninstall
+// refuse that root (exit 8), list reports it and exits 0, the other roots are still processed, and
+// nothing outside the root changes.
+func TestRootErrorsRefusedNotFatal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// set damages .claude/skills and returns a check that runs after each op.
+		set func(t *testing.T, root string) func(t *testing.T)
+		ops []string
+	}{
+		{
+			// (a) 'statat teknoir-platform/SKILL.md: not a directory'
+			name: "a file where the skill directory belongs",
+			set: func(t *testing.T, root string) func(t *testing.T) {
+				if err := os.MkdirAll(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				file := filepath.Join(root, "teknoir-platform")
+				writeAt(t, file, "not a directory\n", 0o644)
+				tamperManifest(t, root, map[string]string{"teknoir-platform/old.md": hashOf("old\n")})
+				return func(t *testing.T) {
+					if got := readFile(t, file); got != "not a directory\n" {
+						t.Errorf("the file below the root was changed: %q", got)
+					}
+				}
+			},
+			ops: []string{"list", "install"},
+		},
+		{
+			// (b) 'too many levels of symbolic links'
+			name: "a looping skill directory",
+			set: func(t *testing.T, root string) func(t *testing.T) {
+				if err := os.MkdirAll(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(root, "teknoir-platform")
+				mustSymlink(t, "teknoir-platform", link)
+				tamperManifest(t, root, map[string]string{"teknoir-platform/old.md": hashOf("old\n")})
+				return func(t *testing.T) {
+					if fi, err := os.Lstat(link); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+						t.Errorf("the loop was replaced: %v %v", fi, err)
+					}
+				}
+			},
+			ops: []string{"list", "install"},
+		},
+		{
+			// (c) a dangling link inside the root: 'mkdirat teknoir-platform: file exists'
+			name: "a dangling skill directory",
+			set: func(t *testing.T, root string) func(t *testing.T) {
+				if err := os.MkdirAll(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(root, "teknoir-platform")
+				mustSymlink(t, "missing", link)
+				tamperManifest(t, root, map[string]string{"teknoir-platform/old.md": hashOf("old\n")})
+				return func(t *testing.T) {
+					if fi, err := os.Lstat(link); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+						t.Errorf("the link was replaced: %v %v", fi, err)
+					}
+					if _, err := os.Lstat(filepath.Join(root, "missing")); !os.IsNotExist(err) {
+						t.Errorf("the dangling target was created: %v", err)
+					}
+				}
+			},
+			ops: []string{"list", "install"},
+		},
+		{
+			// (d) a manifest that is a link out of the root: 'path escapes from parent'
+			name: "a manifest linked out of the root",
+			set: func(t *testing.T, root string) func(t *testing.T) {
+				if err := os.MkdirAll(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				outside := filepath.Join(t.TempDir(), "m.json")
+				writeAt(t, outside, `{"kitVersion":"0.1.0","files":{}}`, 0o644)
+				link := filepath.Join(root, manifestName)
+				mustSymlink(t, outside, link)
+				return func(t *testing.T) {
+					if got := readFile(t, outside); got != `{"kitVersion":"0.1.0","files":{}}` {
+						t.Errorf("the manifest outside the root was written: %q", got)
+					}
+					if fi, err := os.Lstat(link); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+						t.Errorf("the manifest link was replaced: %v %v", fi, err)
+					}
+				}
+			},
+			ops: []string{"list", "install", "uninstall"},
+		},
+		{
+			// (e) a manifest key with a NUL byte: 'statat teknoir-platform/a b: invalid argument'
+			name: "a manifest key with a NUL byte",
+			set: func(t *testing.T, root string) func(t *testing.T) {
+				if err := os.MkdirAll(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				body := `{"kitVersion":"0.1.0","tnctl":"x","files":{"teknoir-platform/a\u0000b":"sha256:00"}}`
+				writeAt(t, filepath.Join(root, manifestName), body, 0o644)
+				return func(t *testing.T) {
+					if got := readFile(t, filepath.Join(root, manifestName)); got != body {
+						t.Errorf("the manifest was rewritten: %q", got)
+					}
+				}
+			},
+			ops: []string{"list", "install", "uninstall"},
+		},
+	} {
+		for _, operation := range tc.ops {
+			t.Run(tc.name+"/"+operation, func(t *testing.T) {
+				o, _, project := testOpts(t)
+				o.Scope, o.Agents, o.MCP = ScopeProject, []Agent{AgentClaude, AgentCodex}, true
+				root := filepath.Join(project, ".claude", "skills")
+				check := tc.set(t, root)
+				switch operation {
+				case "list":
+					res, err := List(o)
+					if err != nil {
+						t.Fatalf("list failed on one bad root: %v", err)
+					}
+					var found *RootStatus
+					for i := range res.Roots {
+						if res.Roots[i].Root == root {
+							found = &res.Roots[i]
+						}
+					}
+					if found == nil || found.InSync() {
+						t.Errorf("the root is not reported as differing: %+v", res.Roots)
+					}
+				case "install":
+					res, err := Install(o)
+					if _, ok := Refused(err); !ok {
+						t.Fatalf("err %v, want a refusal", err)
+					}
+					if !refusedBelow(res, root) {
+						t.Errorf("no refusal below the root: %v", actionsOf(res))
+					}
+					// The other root is still processed.
+					shared := filepath.Join(project, ".agents", "skills", filepath.FromSlash(skillRel))
+					if _, err := os.Stat(shared); err != nil {
+						t.Errorf("the run stopped before .agents/skills: %v", err)
+					}
+				case "uninstall":
+					res, err := Uninstall(o)
+					if _, ok := Refused(err); !ok {
+						t.Fatalf("err %v, want a refusal", err)
+					}
+					if !refusedBelow(res, root) {
+						t.Errorf("no refusal below the root: %v", actionsOf(res))
+					}
+				}
+				check(t)
+			})
+		}
+	}
+}
+
+// refusedBelow reports whether an action of the run refused something at or below dir.
+func refusedBelow(res *Result, dir string) bool {
+	for _, a := range res.Actions {
+		if a.Action == ActionRefuse && atOrBelow(a.Path, dir) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- U2 and U14: the Codex TOML ----------
@@ -465,7 +645,8 @@ path = "/b"
 	golden(t, "codex/force.array.golden.toml", readFile(t, path))
 }
 
-// [[hooks.PreToolUse]] after ours ends it, and uninstall leaves both blocks.
+// [[hooks.PreToolUse]] after ours ends it, and uninstall leaves both blocks; --force puts the kit's
+// block back in front of it.
 func TestCodexHooksArrayTableAfterOurs(t *testing.T) {
 	body := codexOurs + `
 [[hooks.PreToolUse]]
@@ -477,6 +658,74 @@ command = "/usr/local/bin/check"
 		t.Fatal(err)
 	}
 	golden(t, "codex/uninstall.hooks.golden.toml", readFile(t, path))
+
+	o, path = codexConfig(t, strings.Replace(body, `command = "tnctl"`, `command = "/other/tnctl"`, 1))
+	o.Force = true
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "codex/force.hooks.golden.toml", readFile(t, path))
+}
+
+// A text whose edit would touch more than [mcp_servers.teknoir] is refused by the invariant, as a real
+// run and as a dry run: nothing is written and no register or delete is recorded.
+func TestCodexInvariantRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		run  func(o *Options) (*Result, error)
+		o    func(o *Options)
+		want string
+	}{
+		{
+			// A header the range scanner does not see ("a]b") would go with the table.
+			name: "uninstall would cut a header",
+			body: "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n\n[\"a]b\"]\nc = 2\n",
+			run:  Uninstall,
+			want: "remove [mcp_servers.teknoir]",
+		},
+		{
+			// A sub-table of ours survives the replacement, so the entry is not the kit's.
+			name: "force would leave a sub-table",
+			body: "[mcp_servers.teknoir]\ncommand = \"/other/tnctl\"\nargs = [\"mcp\"]\n\n[mcp_servers.teknoir.env]\nX = \"1\"\n",
+			run:  Install,
+			o:    func(o *Options) { o.Force = true },
+			want: tomlEntryBlock,
+		},
+	} {
+		for _, dry := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/dry=%v", tc.name, dry), func(t *testing.T) {
+				o, path := codexConfig(t, tc.body)
+				if tc.o != nil {
+					tc.o(o)
+				}
+				o.DryRun = dry
+				before := snapshotTree(t, filepath.Dir(path))
+				res, err := tc.run(o)
+				re, ok := Refused(err)
+				if !ok {
+					t.Fatalf("err %v, want a refusal", err)
+				}
+				if !strings.Contains(re.Reason, "cannot edit [mcp_servers.teknoir] safely here") {
+					t.Errorf("the reason: %q", re.Reason)
+				}
+				if !strings.Contains(re.Reason, tc.want) {
+					t.Errorf("the reason does not name %q: %q", tc.want, re.Reason)
+				}
+				if !hasAction(res, ActionRefuse, path) {
+					t.Errorf("actions %v", actionsOf(res))
+				}
+				for _, a := range res.Actions {
+					if a.Path == path && (a.Action == ActionRegister || a.Action == ActionDelete) {
+						t.Errorf("%s was recorded for a refused file", a.Action)
+					}
+				}
+				if after := snapshotTree(t, filepath.Dir(path)); fmt.Sprint(after) != fmt.Sprint(before) {
+					t.Errorf("the refused %v changed the tree:\nbefore %v\nafter  %v", dry, before, after)
+				}
+			})
+		}
+	}
 }
 
 // The comment lines above the next table stay with that table: uninstall keeps them, --force keeps
@@ -525,6 +774,32 @@ command = "not-ours"
 		t.Fatal(err)
 	}
 	golden(t, "codex/force.quoted.golden.toml", readFile(t, path))
+}
+
+// The quoted whole key comes before ours: the quote-aware key split leaves it alone and takes ours.
+func TestCodexQuotedTableBeforeOurs(t *testing.T) {
+	quoted := "[\"mcp_servers.teknoir\"]\ncommand = \"not-ours\"\n\n"
+	o, path := codexConfig(t, quoted+codexOurs[strings.Index(codexOurs, "[mcp_servers.teknoir]"):])
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readFile(t, path), strings.TrimRight(quoted, "\n")+"\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// The U1.1 key shape: a skills key has at least two segments, a hooks key is exactly the guard.
+func TestManifestKeyShapeRefused(t *testing.T) {
+	for _, tc := range []struct{ kind, key string }{{kindSkills, "SKILL.md"}, {kindSkills, "teknoir-platform"}, {kindHooks, "settings.json"}, {kindHooks, "x/teknoir-guard"}} {
+		if validManifestKey(tc.key, tc.kind) {
+			t.Errorf("validManifestKey(%q, %s) = true", tc.key, tc.kind)
+		}
+	}
+	for _, tc := range []struct{ kind, key string }{{kindSkills, "teknoir-platform/SKILL.md"}, {kindSkills, "teknoir-platform/refs/a.md"}, {kindHooks, guardName}} {
+		if !validManifestKey(tc.key, tc.kind) {
+			t.Errorf("validManifestKey(%q, %s) = false", tc.key, tc.kind)
+		}
+	}
 }
 
 // An [mcp_servers] left empty by the uninstall goes too, and the rest of the file stays.
@@ -592,6 +867,7 @@ func TestCodexDottedKeysRefused(t *testing.T) {
 					tc.o(o)
 				}
 				o.DryRun = dry
+				before := snapshotTree(t, filepath.Dir(path))
 				res, err := tc.run(o)
 				re, ok := Refused(err)
 				if !ok {
@@ -603,8 +879,8 @@ func TestCodexDottedKeysRefused(t *testing.T) {
 				if !hasAction(res, ActionRefuse, path) {
 					t.Errorf("actions %v", actionsOf(res))
 				}
-				if got := readFile(t, path); got != tc.body {
-					t.Errorf("the file was written:\n%q", got)
+				if after := snapshotTree(t, filepath.Dir(path)); fmt.Sprint(after) != fmt.Sprint(before) {
+					t.Errorf("the refused edit changed the file:\nbefore %v\nafter  %v", before, after)
 				}
 			})
 		}
@@ -649,6 +925,77 @@ func TestCodexUninstallKeepsMultilineString(t *testing.T) {
 	got := readFile(t, path)
 	if !strings.Contains(got, "Rule one.\n\n\nRule two after two blank lines.") || strings.Contains(got, "teknoir") {
 		t.Errorf("the file:\n%q", got)
+	}
+}
+
+// A comment at the end of the file is the user's: uninstall and --force keep it.
+func TestCodexTrailingCommentAtEOF(t *testing.T) {
+	body := codexOurs + "\n# keep me: my notes\n"
+	o, path := codexConfig(t, body)
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readFile(t, path), "model = \"gpt-5\"\n\n# keep me: my notes\n"; got != want {
+		t.Errorf("uninstall: got %q, want %q", got, want)
+	}
+	o, path = codexConfig(t, strings.Replace(body, `command = "tnctl"`, `command = "/other/tnctl"`, 1))
+	o.Force = true
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readFile(t, path), codexOurs+"\n# keep me: my notes\n"; got != want {
+		t.Errorf("--force: got %q, want %q", got, want)
+	}
+}
+
+// A tail of blank lines alone is the table's, not the user's: each one uninstalls to exactly the file
+// above our table.
+func TestCodexBlankTailUninstallsClean(t *testing.T) {
+	for _, tail := range []string{"", "\n", "\n\n"} {
+		o, path := codexConfig(t, codexOurs+tail)
+		if _, err := Uninstall(o); err != nil {
+			t.Fatalf("tail %q: %v", tail, err)
+		}
+		if got, want := readFile(t, path), "model = \"gpt-5\"\n"; got != want {
+			t.Errorf("tail %q: got %q, want %q", tail, got, want)
+		}
+	}
+}
+
+// Golden: our table last, then a blank line and a user comment, with and without the final newline.
+func TestCodexEOFCommentGoldens(t *testing.T) {
+	o, path := codexConfig(t, codexOurs+"\n# user note\n")
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "codex/uninstall.eofcomment.golden.toml", readFile(t, path))
+
+	// The last line without its newline: the comment stays as it is, and no newline is added.
+	o, path = codexConfig(t, codexOurs+"\n# user note")
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readFile(t, path), "model = \"gpt-5\"\n\n# user note"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	forceBody := strings.Replace(codexOurs, `command = "tnctl"`, `command = "/other/tnctl"`, 1)
+	o, path = codexConfig(t, forceBody+"\n# user note\n")
+	o.Force = true
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "codex/force.eofcomment.golden.toml", readFile(t, path))
+
+	// Without the final newline too.
+	o, path = codexConfig(t, forceBody+"\n# user note")
+	o.Force = true
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	if !strings.HasSuffix(got, "\n# user note") || strings.Contains(got, "/other/tnctl") {
+		t.Errorf("--force did not keep the comment:\n%q", got)
 	}
 }
 
@@ -731,6 +1078,49 @@ func TestSymlinkedConfigProjectScope(t *testing.T) {
 	}
 }
 
+// jsonSnippet builds the OpenCode snippet byte for byte, and Claude Code's own object with its keys.
+func TestJSONSnippet(t *testing.T) {
+	if got := jsonSnippet([]string{"mcp", "servers"}, opencodeMCPEntry); got != opencodeSnippet {
+		t.Errorf("jsonSnippet = %s, want %s", got, opencodeSnippet)
+	}
+	got := jsonSnippet([]string{"mcpServers"}, claudeMCPEntry)
+	if want := `{"mcpServers":{"teknoir":{"type":"stdio","command":"tnctl","args":["mcp"]}}}`; got != want {
+		t.Errorf("jsonSnippet = %s, want %s", got, want)
+	}
+}
+
+// A refusal of Claude Code's .mcp.json prints Claude Code's snippet, not OpenCode's.
+func TestSymlinkedClaudeMCPSnippet(t *testing.T) {
+	o, _, project := testOpts(t)
+	o.Scope, o.Agents, o.MCP = ScopeProject, []Agent{AgentClaude}, true
+	target := filepath.Join(t.TempDir(), "mcp.json")
+	writeAt(t, target, "{}\n", 0o644)
+	mustSymlink(t, target, filepath.Join(project, ".mcp.json"))
+	re := refusalOf(t, "a symlinked .mcp.json", func() (*Result, error) { return Install(o) })
+	if !strings.Contains(re.Reason, `"mcpServers"`) || strings.Contains(re.Reason, `"type":"local"`) {
+		t.Errorf("the snippet is not Claude Code's: %q", re.Reason)
+	}
+	// The uninstall direction says to remove it, and names the same keys.
+	re = refusalOf(t, "a symlinked .mcp.json", func() (*Result, error) { return Uninstall(o) })
+	if !strings.Contains(re.Reason, `remove {"mcpServers"`) || strings.Contains(re.Reason, `"servers"`) {
+		t.Errorf("the uninstall snippet is not Claude Code's: %q", re.Reason)
+	}
+}
+
+// An AGENTS.md whose section is damaged says what to do, and the reason of a symlinked settings.json on
+// an uninstall says "remove", never "add".
+func TestUninstallRefusalSaysRemove(t *testing.T) {
+	o, _, project := testOpts(t)
+	o.Scope, o.Agents, o.Hooks = ScopeProject, []Agent{AgentClaude}, true
+	outside := filepath.Join(t.TempDir(), "settings.json")
+	writeAt(t, outside, "{}\n", 0o644)
+	mustSymlink(t, outside, filepath.Join(project, ".claude", "settings.json"))
+	re := refusalOf(t, "a symlinked settings.json", func() (*Result, error) { return Uninstall(o) })
+	if !strings.Contains(re.Reason, `remove {"hooks"`) || strings.Contains(re.Reason, "add ") {
+		t.Errorf("the uninstall refusal tells the user to add: %q", re.Reason)
+	}
+}
+
 // A dangling symlink is refused, with the snippet, in user scope.
 func TestSymlinkedConfigDangling(t *testing.T) {
 	o, home, _ := testOpts(t)
@@ -743,6 +1133,42 @@ func TestSymlinkedConfigDangling(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(home, ".codex", "missing.toml")); !os.IsNotExist(err) {
 		t.Errorf("the dangling target was created: %v", err)
+	}
+}
+
+// The writability check of a symlinked user-scope file writes nothing: a dry run leaves the directory it
+// points into exactly as it was, with no temp file made and removed.
+func TestSymlinkedConfigDryRunWritesNothing(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.MCP = []Agent{AgentCodex}, true
+	dir := t.TempDir()
+	writeAt(t, filepath.Join(dir, "config.toml"), "model = \"gpt-5\"\n", 0o644)
+	mustSymlink(t, filepath.Join(dir, "config.toml"), filepath.Join(home, ".codex", "config.toml"))
+	st, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.DryRun = true
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(st.ModTime()) {
+		t.Errorf("the dry run touched %s: mtime %v, want %v", dir, after.ModTime(), st.ModTime())
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.toml" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("the dry run left %v in %s, want only config.toml", names, dir)
 	}
 }
 
@@ -831,6 +1257,65 @@ func TestAgentsMDSymlinkOutsideProject(t *testing.T) {
 	}
 }
 
+// A project AGENTS.md that links to something that is not Markdown of the project (.git/config, a Codex
+// config) is refused by install and by uninstall: a cloned repository cannot make the kit edit a file it
+// could not ship itself.
+func TestAgentsMDSymlinkNotMarkdown(t *testing.T) {
+	for _, tc := range []struct{ name, rel, body string }{
+		{"git config", ".git/config", "[core]\n\trepositoryformatversion = 0\n"},
+		{"codex config", ".codex/config.toml", "model = \"gpt-5\"\n"},
+	} {
+		for _, op := range []string{"install", "uninstall"} {
+			t.Run(tc.name+"/"+op, func(t *testing.T) {
+				o, _, project := testOpts(t)
+				o.Scope, o.Agents, o.AgentsMD = ScopeProject, []Agent{AgentClaude}, true
+				target := filepath.Join(project, filepath.FromSlash(tc.rel))
+				writeAt(t, target, tc.body, 0o644)
+				link := filepath.Join(project, "AGENTS.md")
+				mustSymlink(t, filepath.FromSlash(tc.rel), link)
+				run := func() (*Result, error) {
+					if op == "install" {
+						return Install(o)
+					}
+					return Uninstall(o)
+				}
+				res, err := run()
+				re, ok := Refused(err)
+				if !ok {
+					t.Fatalf("err %v, want a refusal", err)
+				}
+				if !strings.Contains(re.Reason, "is not a Markdown file of the project") {
+					t.Errorf("the reason: %q", re.Reason)
+				}
+				if !hasAction(res, ActionRefuse, link) {
+					t.Errorf("actions %v", actionsOf(res))
+				}
+				if got := readFile(t, target); got != tc.body {
+					t.Errorf("the link's target was written: %q", got)
+				}
+				if fi, err := os.Lstat(link); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+					t.Errorf("the link was replaced: %v %v", fi, err)
+				}
+			})
+		}
+	}
+}
+
+// A dangling AGENTS.md link, and one to a directory of the project, say what is wrong instead of calling
+// a project directory "outside the project".
+func TestAgentsMDSymlinkToDirectoryInProject(t *testing.T) {
+	o, _, project := testOpts(t)
+	o.Scope, o.Agents, o.AgentsMD = ScopeProject, []Agent{AgentClaude}, true
+	if err := os.MkdirAll(filepath.Join(project, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, "docs", filepath.Join(project, "AGENTS.md"))
+	re := refusalOf(t, "an AGENTS.md link to a directory", func() (*Result, error) { return Install(o) })
+	if !strings.Contains(re.Reason, "which is not a regular file") || strings.Contains(re.Reason, "outside the project") {
+		t.Errorf("the reason: %q", re.Reason)
+	}
+}
+
 // ---------- U11: damaged AGENTS.md markers ----------
 
 // A damaged marker set (a missing end marker, two begin markers, an end before the begin) is refused
@@ -867,6 +1352,49 @@ func TestAgentsMDDamagedMarkers(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// An uninstall deletes a root only when it removed that root's manifest: an empty .claude/skills,
+// .claude/hooks or .agents/skills the kit never wrote to stays as it is.
+func TestUninstallKeepsRootsItNeverWrote(t *testing.T) {
+	for _, scope := range []Scope{ScopeUser, ScopeProject} {
+		t.Run(scope.String(), func(t *testing.T) {
+			o, home, project := testOpts(t)
+			o.Scope, o.Agents, o.Hooks = scope, []Agent{AgentClaude, AgentCodex}, true
+			base := home
+			if scope == ScopeProject {
+				base = project
+			}
+			var roots []string
+			for _, d := range []string{".claude/skills", ".claude/hooks", ".agents/skills"} {
+				p := filepath.Join(base, filepath.FromSlash(d))
+				if err := os.MkdirAll(p, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				roots = append(roots, p)
+			}
+			if _, err := Uninstall(o); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range roots {
+				if fi, err := os.Stat(p); err != nil || !fi.IsDir() {
+					t.Errorf("%s was removed by an uninstall that never wrote there: %v", p, err)
+				}
+			}
+			// A root whose manifest the uninstall removed and that is now empty still goes.
+			if _, err := Install(o); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Uninstall(o); err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range []string{".claude/skills", ".agents/skills"} {
+				if _, err := os.Stat(filepath.Join(base, filepath.FromSlash(d))); !os.IsNotExist(err) {
+					t.Errorf("%s survived the uninstall of what the kit wrote there: %v", d, err)
+				}
+			}
+		})
 	}
 }
 

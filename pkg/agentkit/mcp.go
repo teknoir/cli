@@ -112,12 +112,13 @@ func (p *op) registerOpencodeMCP() error {
 // registerJSONEntry merges the MCP entry into a JSON (or, with jsonc, possibly JSONC) config file.
 // entryAt is the readable name of the entry's place, for messages.
 func (p *op) registerJSONEntry(path string, def os.FileMode, jsonc bool, container []string, entryAt, agent string, entry json.RawMessage) error {
+	snippet := "add " + jsonSnippet(container, entry)
 	target, why := p.foreignTarget(path)
 	if why != "" {
-		p.refuse(path, agent, why+" "+opencodeSnippet, why+" "+opencodeSnippet)
+		p.refuse(path, agent, why+" "+snippet, why+" "+snippet)
 		return nil
 	}
-	top, err := p.readJSONConfig(target, jsonc, agent, opencodeSnippet)
+	top, err := p.readJSONConfig(target, jsonc, agent, snippet)
 	if top == nil {
 		return err
 	}
@@ -149,13 +150,13 @@ func (p *op) registerJSONEntry(path string, def os.FileMode, jsonc bool, contain
 
 // removeJSONEntry drops the MCP entry from a JSON config file, when it is ours.
 func (p *op) removeJSONEntry(path string, def os.FileMode, jsonc bool, container []string, entry json.RawMessage, agent string) error {
+	snippet := "remove " + jsonSnippet(container, entry)
 	target, why := p.foreignTarget(path)
 	if why != "" {
-		snippet := "remove " + opencodeSnippet
 		p.refuse(path, agent, why+" "+snippet, why+" "+snippet)
 		return nil
 	}
-	top, err := p.readJSONConfig(target, jsonc, agent, "remove "+opencodeSnippet)
+	top, err := p.readJSONConfig(target, jsonc, agent, snippet)
 	if top == nil {
 		return err
 	}
@@ -202,6 +203,18 @@ func (p *op) readJSONConfig(path string, jsonc bool, agent, snippet string) (map
 		}
 	}
 	return top, nil
+}
+
+// jsonSnippet is the entry as the JSON object that holds it, for the message that tells the user to add or
+// remove it by hand: the container keys of the caller, outermost first.
+func jsonSnippet(container []string, entry json.RawMessage) string {
+	v := map[string]json.RawMessage{mcpServerName: entry}
+	for i := len(container) - 1; i >= 0; i-- {
+		b, _ := json.Marshal(v)
+		v = map[string]json.RawMessage{container[i]: b}
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 // jsonLookup returns the value at container.../name, or nil when the path is not there.
@@ -300,7 +313,7 @@ func tomlSnippet(remove bool) string {
 	if remove {
 		return "remove " + strings.TrimRight(tomlEntryBlock, "\n")
 	}
-	return tomlEntryBlock
+	return "add " + tomlEntryBlock
 }
 
 // refuseCodex refuses an edit of the Codex config, naming the snippet to add or remove by hand.
@@ -340,13 +353,13 @@ func (p *op) registerCodexMCP() error {
 		p.r.warn("%s already has a different [mcp_servers.%s]; kept it (use --force to replace it)", path, mcpServerName)
 		return nil
 	case !isTable:
-		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: replace it by hand",
+		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: replace it by hand:",
 			path, mcpServerName, mcpServerName), false)
 		return nil
 	default:
 		start, end, ok := tomlTableRange(text, "mcp_servers."+mcpServerName)
 		if !ok {
-			p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: replace it by hand",
+			p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: replace it by hand:",
 				path, mcpServerName, mcpServerName), false)
 			return nil
 		}
@@ -403,7 +416,7 @@ func (p *op) removeCodexMCP() error {
 	}
 	start, end, ok := tomlTableRange(text, "mcp_servers."+mcpServerName)
 	if !ok {
-		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a table header: remove it by hand",
+		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a table header: remove it by hand:",
 			path, mcpServerName), true)
 		return nil
 	}
@@ -416,6 +429,9 @@ func (p *op) removeCodexMCP() error {
 		if before != "" {
 			before += "\n"
 		}
+	case before == "":
+		// Our table came first: nothing of the user's may end up at the head of the file.
+		after = strings.TrimLeft(after, "\n")
 	case strings.HasSuffix(before, "\n\n") && strings.HasPrefix(after, "\n"):
 		after = strings.TrimLeft(after, "\n")
 	}
@@ -435,11 +451,11 @@ func (p *op) removeCodexMCP() error {
 // else, is refused and false comes back; the file is left as it is.
 func (p *op) codexEditOK(path, orig, next string, put map[string]any, remove bool) bool {
 	if _, err := tomlParse(next); err != nil {
-		p.refuseCodex(path, fmt.Sprintf("%s: the edit would not parse (%v); unchanged: add it by hand", path, err), remove)
+		p.refuseCodex(path, fmt.Sprintf("%s: the edit would not parse (%v); unchanged: add it by hand:", path, err), remove)
 		return false
 	}
 	if err := tomlSameExcept(orig, next, put); err != nil {
-		p.refuseCodex(path, fmt.Sprintf("%s: tnctl cannot edit [mcp_servers.%s] safely here; edit it by hand",
+		p.refuseCodex(path, fmt.Sprintf("%s: tnctl cannot edit [mcp_servers.%s] safely here; edit it by hand:",
 			path, mcpServerName), remove)
 		return false
 	}
@@ -618,7 +634,8 @@ func tomlSplitKey(s string) []string {
 
 // tomlTableRange returns the byte range of the [name] table: its header line through the last line of
 // its own, so the blank and comment lines that separate it from the next table stay with that table. Any
-// header, [x] or [[x]], ends the table; when none follows, the range runs to the end of the text.
+// header, [x] or [[x]], ends the table; when none follows, the range runs to the end of the text when
+// only blank lines are left, and stops before the comment lines at the end of the file, which stay.
 func tomlTableRange(text, name string) (int, int, bool) {
 	lines := strings.SplitAfter(text, "\n")
 	offs := make([]int, len(lines))
@@ -649,7 +666,16 @@ func tomlTableRange(text, name string) (int, int, bool) {
 	if startLine < 0 {
 		return 0, 0, false
 	}
-	return offs[startLine], len(text), true
+	// No header follows: comment lines at the end of the file stay; a tail of blank lines alone goes with
+	// the table.
+	end := len(lines)
+	for end > startLine+1 && separatorLine(lines[end-1]) {
+		end--
+	}
+	if end == len(lines) || strings.TrimSpace(text[offs[end]:]) == "" {
+		return offs[startLine], len(text), true
+	}
+	return offs[startLine], offs[end], true
 }
 
 // separatorLine reports whether a line is blank or holds only a comment: it belongs to the table below

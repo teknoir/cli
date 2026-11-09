@@ -41,13 +41,17 @@ func (p *op) agentsMDBlock() (string, error) {
 }
 
 // refuseAgentsMD refuses AGENTS.md, with the block to add or remove by hand.
-func (p *op) refuseAgentsMD(path, why string) {
+func (p *op) refuseAgentsMD(path, why string, remove bool) {
+	verb := "add "
+	if remove {
+		verb = "remove "
+	}
 	block, err := p.agentsMDBlock()
 	if err != nil {
 		p.refuse(path, "", why, why)
 		return
 	}
-	p.refuse(path, "", why+"\n"+block, why+"\n"+block)
+	p.refuse(path, "", why+"\n"+verb+block, why+"\n"+verb+block)
 }
 
 // installAgentsMD adds the kit's section to AGENTS.md, replacing an earlier one between the markers and
@@ -56,7 +60,7 @@ func (p *op) installAgentsMD() error {
 	path := p.agentsMDPath()
 	target, why := p.foreignTarget(path)
 	if why != "" {
-		p.refuseAgentsMD(path, why)
+		p.refuseAgentsMD(path, why, false)
 		return nil
 	}
 	block, err := p.agentsMDBlock()
@@ -71,7 +75,7 @@ func (p *op) installAgentsMD() error {
 	start, end, state := agentsMDRange(text)
 	switch state {
 	case agentsMDDamaged:
-		p.refuseAgentsMD(path, "damaged teknoir section markers in AGENTS.md: fix them by hand")
+		p.refuseAgentsMD(path, "damaged teknoir section markers in AGENTS.md: fix them by hand", false)
 		return nil
 	case agentsMDOk:
 		p.r.act(ActionWrite, path, "", "replaced the teknoir section")
@@ -92,7 +96,7 @@ func (p *op) uninstallAgentsMD() error {
 	path := p.agentsMDPath()
 	target, why := p.foreignTarget(path)
 	if why != "" {
-		p.refuseAgentsMD(path, why)
+		p.refuseAgentsMD(path, why, true)
 		return nil
 	}
 	data, err := os.ReadFile(target)
@@ -106,7 +110,7 @@ func (p *op) uninstallAgentsMD() error {
 	start, end, state := agentsMDRange(text)
 	switch state {
 	case agentsMDDamaged:
-		p.refuseAgentsMD(path, "damaged teknoir section markers in AGENTS.md: fix them by hand")
+		p.refuseAgentsMD(path, "damaged teknoir section markers in AGENTS.md: fix them by hand", true)
 		return nil
 	case agentsMDNone:
 		return nil

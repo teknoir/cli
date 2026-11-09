@@ -203,6 +203,13 @@ func (p *op) mcpStatus(a Agent) MCPStatus {
 		path, _ = p.opencodeMCPFile()
 	}
 	st.Path = path
+	// list --project reads nothing below a project root that is a symlink, the MCP config file included.
+	for dir, why := range p.projectSymlinks() {
+		if atOrBelow(path, dir) {
+			st.Note = why
+			return st
+		}
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		st.Note = "no config file"

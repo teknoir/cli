@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -36,22 +37,28 @@ func manifestPath(rootDir string) string { return filepath.Join(rootDir, manifes
 // read, write and remove below a root goes through an os.Root instead.
 func joinRel(rootDir, rel string) string { return filepath.Join(rootDir, filepath.FromSlash(rel)) }
 
-// manifestKeyError is a manifest entry that is not a path inside its root. The whole root is refused: a
-// manifest is never edited, and nothing below it is touched.
+// manifestKeyError is a manifest the kit cannot use: an entry that is not a path inside its root, or a
+// manifest that is not a regular file (a symlink, a directory) and can therefore not be read through the
+// root. The whole root is refused: a manifest is never edited, and nothing below it is touched.
 type manifestKeyError struct {
 	Path string
 	Key  string
+	// NotRegular marks a manifest that is not a regular file.
+	NotRegular bool
 }
 
 func (e *manifestKeyError) Error() string {
+	if e.NotRegular {
+		return fmt.Sprintf("%s: not a regular file; fix or delete the manifest by hand", e.Path)
+	}
 	return fmt.Sprintf("%s: entry %q is not a path inside its root; fix or delete the manifest by hand", e.Path, e.Key)
 }
 
 // validManifestKey reports whether rel names a file the kit can have written below a root of kind: a
-// path of its own, never the manifest, never with a backslash or a "..", and of the shape the kit
-// writes (a skill file <skill>/<file>, or the guard alone in a hooks root).
+// path of its own, never the manifest, never with a backslash, a NUL byte or a "..", and of the shape the
+// kit writes (a skill file <skill>/<file>, or the guard alone in a hooks root).
 func validManifestKey(rel, kind string) bool {
-	if rel == "" || rel == manifestName || strings.Contains(rel, `\`) ||
+	if rel == "" || rel == manifestName || strings.Contains(rel, `\`) || strings.ContainsRune(rel, 0) ||
 		path.Clean(rel) != rel || !filepath.IsLocal(filepath.FromSlash(rel)) {
 		return false
 	}
@@ -84,12 +91,17 @@ func readManifest(path string) (*manifest, error) {
 }
 
 // readManifestAt reads the manifest of a root through it, so a manifest that leads out of the root is not
-// followed. A missing manifest is an empty one.
+// followed. A missing manifest is an empty one; one that is not a regular file is a *manifestKeyError,
+// because a link out of the root cannot be read through it.
 func readManifestAt(r *os.Root, path string) (*manifest, error) {
-	b, err := r.ReadFile(manifestName)
-	if errors.Is(err, fs.ErrNotExist) {
+	fi, exists, _ := statRel(r, manifestName)
+	if !exists {
 		return &manifest{Files: map[string]string{}}, nil
 	}
+	if !regular(fi) {
+		return nil, &manifestKeyError{Path: path, NotRegular: true}
+	}
+	b, err := r.ReadFile(manifestName)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +184,13 @@ func (p *op) installSet(rootDir string, files map[string][]byte, agent string) e
 			return err
 		}
 		if !exists {
+			if blocked := blockedPrefix(r, rel); blocked != "" {
+				// A file or a link where a directory belongs: never written through or replaced.
+				note := "not a regular file: not written; --force does not replace it"
+				p.refuse(target, agent, note, target+": "+note)
+				next.Files[rel] = want
+				continue
+			}
 			p.r.act(ActionWrite, target, agent, "new")
 			if err := p.writeRel(r, rel, content, modeFor(rel, content)); err != nil {
 				return err
@@ -252,48 +271,51 @@ func (p *op) installSet(rootDir string, files map[string][]byte, agent string) e
 }
 
 // uninstallSet deletes the files a root's manifest records, while they still match it, then removes the
-// manifest.
+// manifest and, when the root is left empty, the root too. A root without a manifest is not the kit's and
+// is left as it is.
 func (p *op) uninstallSet(rootDir string, agent string) error {
 	r, err := openRoot(rootDir)
 	if err != nil || r == nil {
 		// A root that does not exist holds nothing.
 		return err
 	}
-	err = p.uninstallRoot(r, rootDir, agent)
+	removed, err := p.uninstallRoot(r, rootDir, agent)
 	if cerr := r.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
 		return err
 	}
-	if !p.o.DryRun {
+	if removed && !p.o.DryRun {
 		removeEmptyRoot(rootDir)
 	}
 	return nil
 }
 
-// uninstallRoot is uninstallSet for an open root.
-func (p *op) uninstallRoot(r *os.Root, rootDir, agent string) error {
+// uninstallRoot is uninstallSet for an open root. removed reports whether the manifest was removed: only a
+// root the kit installed into is deleted when the uninstall leaves it empty, never an empty directory the
+// kit never wrote to.
+func (p *op) uninstallRoot(r *os.Root, rootDir, agent string) (removed bool, err error) {
 	mfPath := manifestPath(rootDir)
 	_, exists, err := statRel(r, manifestName)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !exists {
-		return nil
+		return false, nil
 	}
 	m, err := readManifestAt(r, mfPath)
 	if err != nil {
 		if p.refuseManifestKey(mfPath, agent, err) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	for _, rel := range sortedKeys(m.Files) {
 		target := joinRel(rootDir, rel)
 		fi, exists, err := statRel(r, rel)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if !exists {
 			continue
@@ -305,7 +327,7 @@ func (p *op) uninstallRoot(r *os.Root, rootDir, agent string) error {
 		}
 		cur, err := r.ReadFile(rel)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if hashBytes(cur) != m.Files[rel] {
 			p.r.act(ActionKeep, target, agent, "changed since it was installed: kept")
@@ -313,11 +335,14 @@ func (p *op) uninstallRoot(r *os.Root, rootDir, agent string) error {
 		}
 		p.r.act(ActionDelete, target, agent, "")
 		if err := p.removeRel(r, rel); err != nil {
-			return err
+			return false, err
 		}
 	}
 	p.r.act(ActionDelete, mfPath, agent, "manifest")
-	return p.removeRel(r, manifestName)
+	if err := p.removeRel(r, manifestName); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // writeFile writes one file atomically: a temp file in the same directory, then a rename. A dry run
@@ -392,15 +417,10 @@ func openInstallRoot(dir string, dryRun bool) (*os.Root, error) {
 	return openRoot(dir)
 }
 
-// escapeError reports whether err is os.Root refusing to leave its root: a name with "..", an absolute
-// name, or a symlink that leads out of the root. os.Root has no typed error for it.
-func escapeError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "escapes from parent")
-}
-
-// statRel looks up rel below the root. exists is false when there is nothing there; a path os.Root
-// refuses to leave the root is reported as existing with a nil FileInfo, so the caller never writes
-// through, replaces or deletes it.
+// statRel looks up rel below the root. exists is false when there is nothing there. Every other error
+// os.Root can give (a name or a symlink that leads out of the root, a loop, ENOTDIR, EINVAL, EACCES) is
+// reported as existing with a nil FileInfo, which is not a regular file: the caller never writes through,
+// replaces or deletes such a path, and a single one never makes the run fail.
 func statRel(r *os.Root, rel string) (fi os.FileInfo, exists bool, err error) {
 	fi, err = r.Lstat(rel)
 	switch {
@@ -408,14 +428,35 @@ func statRel(r *os.Root, rel string) (fi os.FileInfo, exists bool, err error) {
 		return fi, true, nil
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, false, nil
-	case escapeError(err):
-		return nil, true, nil
 	}
-	return nil, false, err
+	return nil, true, nil
 }
 
 // regular reports whether fi is a regular file. A nil fi (a path that escapes the root) is not.
 func regular(fi os.FileInfo) bool { return fi != nil && fi.Mode().IsRegular() }
+
+// blockedPrefix returns the first directory below the root on the way to rel that exists and is not a
+// real directory: a file, or a symlink whether it dangles or not. A file cannot be written there, so the
+// kit refuses it rather than failing the run; "" means the way is clear.
+func blockedPrefix(r *os.Root, rel string) string {
+	dir := path.Dir(rel)
+	if dir == "." {
+		return ""
+	}
+	segs := strings.Split(dir, "/")
+	for i := range segs {
+		prefix := strings.Join(segs[:i+1], "/")
+		fi, err := r.Lstat(prefix)
+		if err != nil {
+			// Not there: what is below it cannot be either. Any other error is left to the write.
+			continue
+		}
+		if !fi.IsDir() {
+			return prefix
+		}
+	}
+	return ""
+}
 
 // writeRel writes content to rel below the root atomically: a temp file next to it, renamed over it. A
 // dry run writes nothing.
@@ -578,8 +619,11 @@ func isBelow(path, root string) bool {
 //
 // A symlinked file is never replaced by a regular one: in user scope the edit goes to the link's target
 // (dotfiles, stow, home-manager keep working), and in project scope the link is refused, so tnctl never
-// writes through a link into or out of a repository. AGENTS.md is the exception: a link to a file inside
-// the project is followed, because a repository may keep AGENTS.md -> CLAUDE.md.
+// writes through a link into or out of a repository. AGENTS.md is the exception: a link to a Markdown file
+// of the project outside .git is followed, because a repository may keep AGENTS.md -> CLAUDE.md.
+//
+// The reason is verb-neutral, ending in "edit it by hand:", so the caller can append "add <snippet>" on
+// an install or "remove <snippet>" on an uninstall.
 func (p *op) foreignTarget(path string) (target, why string) {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -593,26 +637,37 @@ func (p *op) foreignTarget(path string) (target, why string) {
 	}
 	real, err := filepath.EvalSymlinks(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Sprintf("%s is a dangling symlink: fix it and run again", path)
+		return "", fmt.Sprintf("%s is a dangling symlink: edit it by hand:", path)
 	}
 	if err != nil {
 		return "", fmt.Sprintf("%s: %v", path, err)
 	}
 	if p.o.Scope == ScopeProject && filepath.Clean(path) == filepath.Clean(p.agentsMDPath()) {
 		proj, err := filepath.EvalSymlinks(p.o.ProjectDir)
-		if err != nil || !regularAt(real) || !isBelow(real, proj) {
-			return "", fmt.Sprintf("AGENTS.md is a symlink to %s outside the project: add this by hand", real)
+		switch {
+		case err != nil || !isBelow(real, proj):
+			return "", fmt.Sprintf("AGENTS.md is a symlink to %s outside the project: edit it by hand:", real)
+		case !regularAt(real):
+			return "", fmt.Sprintf("AGENTS.md is a symlink to %s, which is not a regular file: edit it by hand:", real)
+		}
+		// A link into .git, or to anything that is not Markdown, would have the kit write into a file the
+		// repository cannot ship: only a Markdown file of the project is followed.
+		rel, _ := filepath.Rel(proj, real)
+		segs := strings.Split(filepath.ToSlash(rel), "/")
+		if !strings.EqualFold(filepath.Ext(real), ".md") ||
+			slices.ContainsFunc(segs, func(s string) bool { return strings.EqualFold(s, ".git") }) {
+			return "", fmt.Sprintf("AGENTS.md is a symlink to %s, which is not a Markdown file of the project: edit it by hand:", real)
 		}
 		return real, ""
 	}
 	if p.o.Scope == ScopeProject {
-		return "", fmt.Sprintf("%s is a symlink: add this by hand", path)
+		return "", fmt.Sprintf("%s is a symlink: edit it by hand:", path)
 	}
 	if !regularAt(real) {
-		return "", fmt.Sprintf("%s is a symlink to %s, which is not a regular file: fix it by hand", path, real)
+		return "", fmt.Sprintf("%s is a symlink to %s, which is not a regular file: edit it by hand:", path, real)
 	}
-	if !canCreateIn(filepath.Dir(real)) {
-		return "", fmt.Sprintf("%s is a symlink to %s, in a directory tnctl cannot write (a read-only store): add this by hand", path, real)
+	if !dirWritable(filepath.Dir(real)) {
+		return "", fmt.Sprintf("%s is a symlink to %s, in a directory tnctl cannot write (a read-only store): edit it by hand:", path, real)
 	}
 	return real, ""
 }
@@ -621,18 +676,6 @@ func (p *op) foreignTarget(path string) (target, why string) {
 func regularAt(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && fi.Mode().IsRegular()
-}
-
-// canCreateIn reports whether a file can be created in dir: it makes a temp file and removes it.
-func canCreateIn(dir string) bool {
-	f, err := os.CreateTemp(dir, tempPrefix+"*")
-	if err != nil {
-		return false
-	}
-	name := f.Name()
-	f.Close()
-	_ = os.Remove(name)
-	return true
 }
 
 // settingsSnippet is the PreToolUse entry --hooks adds to a Claude Code settings.json, for a guard at
