@@ -2,10 +2,14 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	kit "github.com/teknoir/cli/agentkit"
 )
 
 // agentHome points HOME at a directory of the test's own, and runs the command from another (the
@@ -52,9 +56,25 @@ func TestAgentInstallUser(t *testing.T) {
 	if strings.Contains(out, "write ") {
 		t.Errorf("a re-run wrote:\n%s", out)
 	}
-	if !strings.Contains(out, "1 keep") {
-		t.Errorf("a re-run:\n%s", out)
+	if want := fmt.Sprintf("%d keep", kitSkillFiles(t)); !strings.Contains(out, want) {
+		t.Errorf("a re-run does not say %q:\n%s", want, out)
 	}
+}
+
+// kitSkillFiles is the number of files below the embedded kit's skills/.
+func kitSkillFiles(t *testing.T) int {
+	t.Helper()
+	n := 0
+	err := fs.WalkDir(kit.FS, "skills", func(_ string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			n++
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 // -o json prints the actions as an array of {action, path, agent, note}.
@@ -70,11 +90,18 @@ func TestAgentInstallJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &actions); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	if len(actions) != 1 || actions[0].Action != "write" || actions[0].Agent != "claude" {
-		t.Errorf("actions %+v", actions)
+	if len(actions) != kitSkillFiles(t) {
+		t.Errorf("%d actions, want one per kit file (%d): %+v", len(actions), kitSkillFiles(t), actions)
 	}
-	if !strings.HasSuffix(actions[0].Path, filepath.Join("teknoir-platform", "SKILL.md")) {
-		t.Errorf("path %s", actions[0].Path)
+	entry := false
+	for _, a := range actions {
+		if a.Action != "write" || a.Agent != "claude" {
+			t.Errorf("action %+v", a)
+		}
+		entry = entry || strings.HasSuffix(a.Path, filepath.Join("teknoir-platform", "SKILL.md"))
+	}
+	if !entry {
+		t.Errorf("no write of teknoir-platform/SKILL.md: %+v", actions)
 	}
 }
 

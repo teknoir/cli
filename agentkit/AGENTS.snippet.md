@@ -1,9 +1,8 @@
-This project manages Teknoir devices and robots.
-
-- Use the `teknoir-*` Agent Skills for Teknoir work; start with `teknoir-platform`.
-- `tnctl` is the CLI: `tnctl whoami`, `tnctl robots`, `tnctl inspect`, `tnctl config`.
-- The `teknoir` MCP server (`tnctl mcp`) is read-only: it reads devices, robots and configuration.
-- Change a robot with `tnctl config set`; the platform publishes the change to the robot.
-- Never fetch or print device credentials, keys or passwords.
-
-Installed by `tnctl agent install`; re-run it after a tnctl upgrade to update the kit.
+This project manages Teknoir robots and devices with `tnctl`. Use the `teknoir-*` skills, `teknoir-platform` first; do not guess a command, read `tnctl <cmd> --help`.
+Run `tnctl whoami -o json` first: `mode` is `user` (your own login) or `bot` (a TeknoirBot, limited rights — branch on `.bot.access`, not on error text).
+Read with `tnctl robots|robot|devices|config get|config diff|inspect|mqtt stream`; before any change run `config diff` and the command's `--dry-run`, then the write, then `--wait=published`. Global flags go after the subcommand path.
+The `teknoir` MCP server, if registered, is read-only; writes go through `tnctl`.
+Never fetch, print or store device credentials or the bot key; never run `tnctl login` or type a Teknoir password in a bot's computer.
+Read a robot's pods and logs with `tnctl inspect` and never with a raw inspect route through `tnctl api`, which turns the robot's Shell on.
+Physical onboarding (`tnctl bootstrap`), `ssh`, `exec`, and pushing an image to a registry or to git are a person's steps: give them the exact command.
+tnctl exits 6 when not allowed and 5 when the platform rejects a change; report them, do not work around them.

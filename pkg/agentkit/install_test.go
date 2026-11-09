@@ -130,8 +130,9 @@ func TestInstallAgentsAndScopes(t *testing.T) {
 				if a.Action != ActionWrite {
 					continue
 				}
+				// The root is the skills directory above the file, however deep the file is.
 				dir := filepath.Dir(a.Path)
-				if filepath.Base(dir) == "teknoir-platform" {
+				for filepath.Base(dir) != "skills" && filepath.Dir(dir) != dir {
 					dir = filepath.Dir(dir)
 				}
 				if len(roots) == 0 || roots[len(roots)-1] != dir {
@@ -266,8 +267,18 @@ func TestInstallUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Actions) != 1 || res.Actions[0].Action != ActionUpgrade {
-		t.Fatalf("actions %v, want one upgrade", actionsOf(res))
+	// The changed file is upgraded; every other kit file is kept as it is.
+	upgrades := 0
+	for _, a := range res.Actions {
+		switch {
+		case a.Action == ActionUpgrade && a.Path == target:
+			upgrades++
+		case a.Action != ActionKeep:
+			t.Errorf("action %s %s, want keep", a.Action, a.Path)
+		}
+	}
+	if upgrades != 1 {
+		t.Fatalf("actions %v, want one upgrade of %s", actionsOf(res), target)
 	}
 	if got, want := readFile(t, target), string(kitSkill(t)); got != want {
 		t.Errorf("file not upgraded: %q", got)

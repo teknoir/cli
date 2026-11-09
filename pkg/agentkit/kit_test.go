@@ -66,47 +66,72 @@ func TestEmbeddedKit(t *testing.T) {
 	}
 }
 
-// The SKILL.md frontmatter has exactly the keys the kit promises, and names the kit version.
+// Every SKILL.md's frontmatter has exactly the keys the kit promises, and names the kit version.
 func TestSkillFrontmatter(t *testing.T) {
+	dirs, err := fs.ReadDir(kit.FS, "skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) == 0 {
+		t.Fatal("no skills")
+	}
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		t.Run(d.Name(), func(t *testing.T) {
+			body := string(kitFile(t, "skills/"+d.Name()+"/SKILL.md"))
+			if !strings.HasPrefix(body, "---\n") {
+				t.Fatal("no frontmatter")
+			}
+			end := strings.Index(body[4:], "\n---\n")
+			if end < 0 {
+				t.Fatal("no end of the frontmatter")
+			}
+			fm := body[4 : 4+end]
+			// It must parse as YAML: an unquoted value with ": " in it does not.
+			var meta map[string]any
+			if err := yaml.Unmarshal([]byte(fm), &meta); err != nil {
+				t.Fatalf("the frontmatter is not YAML: %v\n%s", err, fm)
+			}
+			want := []string{"description", "license", "metadata", "name"} // sorted
+			if got := sortedKeys(meta); strings.Join(got, "|") != strings.Join(want, "|") {
+				t.Errorf("frontmatter keys %v, want %v", got, want)
+			}
+			if sub, ok := meta["metadata"].(map[string]any); !ok || len(sub) != 1 {
+				t.Errorf("metadata %v, want only teknoir-kit-version", meta["metadata"])
+			} else if _, ok := sub["teknoir-kit-version"]; !ok {
+				t.Errorf("metadata %v, want teknoir-kit-version", sub)
+			}
+			if meta["name"] != d.Name() {
+				t.Errorf("the skill is not named after its directory: %v\n%s", meta["name"], fm)
+			}
+			if !strings.Contains(fm, `teknoir-kit-version: "`+kit.Version+`"`) {
+				t.Errorf("the kit version:\n%s", fm)
+			}
+			if !strings.Contains(fm, "license: Apache-2.0") {
+				t.Errorf("the license:\n%s", fm)
+			}
+		})
+	}
+	// The entry skill names the safe start and the credentials rule.
 	body := string(kitFile(t, "skills/teknoir-platform/SKILL.md"))
-	if !strings.HasPrefix(body, "---\n") {
-		t.Fatal("no frontmatter")
-	}
-	end := strings.Index(body[4:], "\n---\n")
-	if end < 0 {
-		t.Fatal("no end of the frontmatter")
-	}
-	fm := body[4 : 4+end]
-	// It must parse as YAML: an unquoted value with ": " in it does not.
-	var meta map[string]any
-	if err := yaml.Unmarshal([]byte(fm), &meta); err != nil {
-		t.Fatalf("the frontmatter is not YAML: %v\n%s", err, fm)
-	}
-	want := []string{"description", "license", "metadata", "name"} // sorted
-	if got := sortedKeys(meta); strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Errorf("frontmatter keys %v, want %v", got, want)
-	}
-	if sub, ok := meta["metadata"].(map[string]any); !ok || len(sub) != 1 {
-		t.Errorf("metadata %v, want only teknoir-kit-version", meta["metadata"])
-	} else if _, ok := sub["teknoir-kit-version"]; !ok {
-		t.Errorf("metadata %v, want teknoir-kit-version", sub)
-	}
-	if meta["name"] != "teknoir-platform" {
-		t.Errorf("the skill is not named after its directory: %v\n%s", meta["name"], fm)
-	}
-	if !strings.Contains(fm, `teknoir-kit-version: "`+kit.Version+`"`) {
-		t.Errorf("the kit version:\n%s", fm)
-	}
-	if !strings.Contains(fm, "license: Apache-2.0") {
-		t.Errorf("the license:\n%s", fm)
-	}
-	for _, must := range []string{"tnctl whoami", "credentials", "kit 0.2"} {
+	for _, must := range []string{"tnctl whoami", "credentials"} {
 		if !strings.Contains(body, must) {
-			t.Errorf("SKILL.md does not mention %q", must)
+			t.Errorf("teknoir-platform SKILL.md does not mention %q", must)
 		}
 	}
-	if n := strings.Count(body, "\n"); n > 40 || n < 10 {
-		t.Errorf("SKILL.md is %d lines; the placeholder is about 10 lines of body", n)
+}
+
+// The installer puts AGENTS.snippet.md between its own markers: a marker in the snippet would make two
+// sections, and the next install would refuse AGENTS.md.
+func TestAgentsSnippetHasNoMarkers(t *testing.T) {
+	snippet := string(kitFile(t, "AGENTS.snippet.md"))
+	if strings.Contains(snippet, "teknoir-agent-kit:") {
+		t.Errorf("AGENTS.snippet.md carries a kit marker:\n%s", snippet)
+	}
+	if strings.TrimSpace(snippet) == "" {
+		t.Error("AGENTS.snippet.md is empty")
 	}
 }
 
