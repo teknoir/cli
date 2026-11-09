@@ -104,9 +104,13 @@ Always in this order:
 1. **Dry run.** `--dry-run` writes nothing and prints the before/after of the effective resource, or
    for a manifest, runs every check and prints the findings. Most writes have it; `unset` of a whole
    resource, `reset` and `untry` do not - read `config diff` instead.
-2. **Write.** Add `--note "why"`: everyone who looks at the robot sees it.
+2. **Write.** On `set`, `delete`, `off`, `on` and `try`, add `--note "why"`: everyone who looks at
+   the robot sees it. `unset`, `reset`, `untry`, `add` and `remove` have no `--note`.
 3. **Wait.** `--wait=published` (works in bot mode), `--wait=applied` or `--wait=ready` (a person
-   only). Or `tnctl config wait <robot> [<resource>] --for published`.
+   only; `off` takes `published` or `applied` only). Or, after `set`, `unset`, `delete`, `on`, `off`,
+   `try`, `untry` or `reset`: `tnctl config wait <robot> [<resource>] --for published`. `config wait`
+   follows overrides only: after `add` or `remove`, read `tnctl config get <robot>` again (its
+   `Published:` hash has changed and the item's row is in, or gone from, the `local` layer).
 
 ### `set` and `unset`
 
@@ -129,7 +133,10 @@ tnctl config unset <robot> <resource>                        # the whole overrid
 - `--image` accepts `repo:tag`, `:tag`, `repo` (keeps the tag) or `repo@sha256:...`. A chart with
   several images takes `path=`, a workload with several containers `container=`.
 - `-f` replaces all value overrides of the resource; cannot be combined with `--image`.
-- `--version` is checked against the chart repository's index.
+- `--version` is compared with the chart repository's index. A version the index does not list is
+  still written (exit 0) with the warning `Version <v> is not in the chart repository's index ...`;
+  the robot then cannot install it. Read `warnings` of the `--dry-run` first; if a write warned,
+  `unset <robot> <resource> --version` or set a version the index lists.
 - Setting a value that git already has is accepted; the platform reports the override as `redundant`.
 - Values and `--version` apply to HelmCharts; a workload takes `--image`. A moving tag (`:latest`)
   does not change the spec, so nothing rolls out.
@@ -158,15 +165,15 @@ tnctl config on  <robot> <resource> --wait=applied            # a fresh install
   The robot deletes it and what it owns: a HelmChart's release and what the release created (its own
   PVCs included), a PVC item, and for a Namespace everything in it. What Kubernetes keeps stays
   (StatefulSet `volumeClaimTemplates` volumes).
-- When data goes, the first call writes nothing: it prints the impact and
-  `Run it again with --confirm <text>`. Then repeat it with exactly that `--confirm` text. A noop and
-  `--dry-run` never ask.
+- When data goes, the first call writes nothing: it prints the impact and `Run it again with --confirm
+  <text>` (exit 2). Show the person that impact and the exact command with `--confirm <text>`. Run it
+  only after they agree; never add `--confirm` on your own. A noop and `--dry-run` never ask.
 - `on` is a **fresh install**: override values and version apply again, but the data the item owned
   when it went is not restored.
 - `off` is refused (exit 8) for: a platform item, a local item (use `remove`), a CRD, an item git
-  marks `teknoir.org/required`, a Namespace that still holds items that stay on, a robot whose agent
-  is older than `toe_v4.2`, and an app whose off would need more than 64 resource overrides. A local
-  item is removed with `config remove`, not turned off.
+  marks `teknoir.org/required`, a Namespace that still holds items that stay on, and a robot whose
+  agent is older than `toe_v4.2`. An `--app` off that would need more than 64 resource overrides is
+  refused with exit 5.
 - `off --app <path>` writes every item of that application in one all-or-nothing change; `--repo`
   picks the repository when the path exists in several. A resource the application adds later is not
   off.
@@ -190,7 +197,8 @@ tnctl config remove <robot> <resource> --wait=applied
   stay written. Namespace documents are sent first.
 - Findings come as `file:line:col: error: message` and exit 5. Fix them; do not retry.
 - A local item with an override in place: saving a new version drops the override.
-- `remove` only works on a local item, and deleting a Namespace needs `--yes`. A git item is removed
+- `remove` only works on a local item. Removing a Namespace needs `--yes`: show the person the dry run's
+  list of what goes, and run it only after they agree; never add `--yes` on your own. A git item is removed
   in git, the fleet, the robot type or the robot's apps - the message says where.
 - Which kinds, the size limits and what a bot may not add:
   [references/local-items.md](references/local-items.md).
@@ -241,10 +249,18 @@ has no dry run, so read `config diff` first.
 - Write `--wait=applied`, with an equals sign. `--wait applied` makes `applied` an argument and is
   refused with a hint.
 - A bare `--wait` means `ready` (for `off`: `applied`).
-- `--timeout` is 5 minutes by default. Exit 4 means the wait ran out **and the change is written**:
-  `config wait` again or inspect; do not write it again.
-- `applied` and `ready` look at the robot over WireGuard before anything is written. An unreachable
-  robot means nothing is written and exit 1; use `--wait=published`.
+- `--timeout` is 5 minutes by default. Exit 4 has two causes; tell them apart with `-o json`, not
+  by the message. If stdout holds the write's result with `"wait": {"reached": false, ...}`, the
+  change is written and only the wait ran out: run `config wait` again (after `add`/`remove`,
+  re-read `config get` instead); do not write it again. If stdout is empty (the error is only on
+  stderr), the request itself timed out: read `config get <robot>` (`--overrides` for an override)
+  to see whether it was written before you repeat it.
+- `applied` and `ready` need WireGuard SSH to the robot. `add`, `edit`, `off`, `on` and `remove`,
+  and every write that touches a HelmChart, check the robot before anything is written: if it
+  cannot be reached, nothing is written (exit 1). A `set`, `unset`, `delete`, `try`, `untry` or
+  `reset` that touches no HelmChart (`--image` on a workload, for example) is written first, and
+  the wait then fails with exit 1: read `config get <robot> --overrides` before you write again.
+  Use `--wait=published` when the robot may be unreachable.
 - `published` is not "it runs". Follow it with `tnctl inspect pod` / `inspect logs` / `inspect
   release` when it matters.
 
@@ -256,10 +272,10 @@ Branch on the exit code, never on the message text.
 |---|---|---|
 | 0 | ok, including a noop (already off, already identical) | read `warnings` in `-o json` |
 | 1 | other: the robot could not be reached before an `applied`/`ready` write, or the wait was interrupted | the change is or is not written: read the message |
-| 2 | usage: bad argument, ambiguous resource, `--dry-run` with `--wait`, `off` without its `--confirm`, removing a Namespace without `--yes` | fix the command |
+| 2 | usage: bad argument, ambiguous resource, `--dry-run` with `--wait`, `off` without its `--confirm`, removing a Namespace without `--yes` | fix the command; for a missing `--confirm`/`--yes`, nothing was written: hand the impact and the command to the person |
 | 3 | not found: no such robot, device, resource, application or tried revision | check names with `config get` |
-| 4 | the wait ran out; the change **is** written | `config wait` again, inspect |
-| 5 | the platform refused: invalid values or manifest, unknown revision, the override is `invalid`, `no-target` or `not-applicable`, the device is disabled | fix the input; retrying changes nothing |
+| 4 | the wait ran out (the change **is** written), or the request itself timed out (it may not be) | read `config get` first; then `config wait` or repeat |
+| 5 | the platform refused: invalid values or manifest, unknown revision, the device is disabled; or, from `--wait`/`config wait`, the controller reports the stored override as `invalid`, `no-target` or `not-applicable` | fix the input; retrying unchanged changes nothing. When it came from a wait, the override **is** stored: `config reset <robot> <resource>` (or `untry`) it, then write the fixed one |
 | 6 | not logged in, token rejected, or not allowed (401/403): no write access, a bot at Read only, a bot command refused | a person logs in, or the bot's creator raises the access. Do not work around it |
 | 7 | applied but unhealthy: a helm Job failed, a pod crashes or cannot pull its image | inspect the logs, then change or `reset` |
 | 8 | conflict: someone changed the same overrides (retry once, immediately); the local item exists (use `--replace`); the item is not local; `off`/`on` refused; the confirmation text changed | retry only a concurrent change |
@@ -271,12 +287,12 @@ Messages you will meet, with what they mean:
 |---|---|---|
 | `The overrides of <robot> were changed by someone else just now. Try again.` | 8 | retry once, immediately |
 | `<id> is a <Kind>: values and version apply to HelmCharts. Use --image ...` | 2 or 5 | use `--image`, or `image.tag` |
-| `Version <v> is not in the chart repository's index ...` | 5 | pick a version the index lists |
+| `Version <v> is not in the chart repository's index ...` (a warning) | 0: the override **is** written | `unset` the version, or set one the index lists |
 | `<id> is not part of the configuration of <robot>. Check the kind, namespace and name.` | 3 | use the id from `config get`, not the identity |
-| `<id> belongs to the platform and cannot be overridden.` | 5 | use `off`, or leave it |
+| `<id> belongs to the platform and cannot be overridden.` | 5 | leave it: a platform item can be neither overridden nor turned off |
 | `At most 64 resources can be overridden on one device. Reset some first.` | 5 | `reset` one first |
 | `This would make the <robot>'s Device N KiB. At most 1228 KiB (1.2 MiB) fits ...` | 5 | remove something first |
-| `Turning off <id> deletes data on the robot (<reasons>). Run it again with --confirm <text>` | 2 | repeat with that `--confirm` text |
+| `Turning off <id> deletes data on the robot (<reasons>). Run it again with --confirm <text>` | 2 | nothing was written: show the person the impact; run it with that `--confirm` only after they agree |
 | `Busy checking other manifests, try again` (HTTP 503) | 1 | if `-o json` gives `error.retryAfter`, wait that long and retry once; without it, report and stop |
 | `Too many changes. Try again in N seconds.` | 9 | wait `retryAfter`, then once |
 | `The portal may not change this device. Ask a platform administrator.` | 6 | a person with more rights, or an admin |
@@ -297,16 +313,21 @@ In bot mode everything here works the same, with these differences. Read `.bot.a
 
 - At access `none` every call is refused (exit 6): the bot's creator has turned its access Off.
 - Only `--wait=published` works: `applied` and `ready` read the robot over a device shell, which a bot
-  never has. A bare `--wait` means `ready`, so it is refused too, with exit 6 **before anything is
-  written**: `a TeknoirBot cannot run commands on devices: --wait=ready needs a device shell; use
-  --wait=published`. `config wait` defaults to `--for ready`: always pass `--for published`.
+  never has. A bare `--wait` means `ready` (`applied` for `off`), so it is refused too, with exit 6
+  **before anything is written** (`a TeknoirBot cannot run commands on devices: --wait=<level> needs a
+  device shell; use --wait=published`). `config wait` defaults to `--for ready`: always pass `--for
+  published`.
 - A 401 means the bot's key was not accepted: a person must re-create the bot. Never run `tnctl login`
   from a bot and never type a Teknoir password into its computer.
 - After a write, check it with `tnctl config get`, `tnctl inspect pod`, `tnctl inspect logs` and
   `tnctl inspect release` (inspect needs `creator`).
-- Local items: a bot may add only a short list of kinds and only if the item passes the platform's
-  item filter; the rest are refused with exit 6 and the reason. The list and every refusal text are
-  in [references/local-items.md](references/local-items.md).
+- Local items: a bot may add only Pod, Service, ConfigMap, Secret, PersistentVolumeClaim, Deployment,
+  StatefulSet, DaemonSet, ReplicaSet, Job, CronJob, Ingress, NetworkPolicy, PodDisruptionBudget and
+  HorizontalPodAutoscaler (`autoscaling/v2`), and only if the item passes the Pod Security Standards
+  baseline and the platform's item filter. The other kinds a person may add (HelmChart,
+  HelmChartConfig, Namespace, ServiceAccount, LimitRange, ResourceQuota) are refused for a bot with
+  exit 6 and the reason; RBAC kinds and CRDs are refused for everyone, with exit 5. Every refusal text is in
+  [references/local-items.md](references/local-items.md).
 - A bot cannot create namespaces, HelmCharts or ServiceAccounts for a robot, cannot disable a robot or
   a device, and cannot change its own computer's configuration. When a task needs one of those, give
   the person the exact command.
@@ -318,8 +339,11 @@ In bot mode everything here works the same, with these differences. Read `.bot.a
 - Never print or pass on a device login, a bot key, a token or a password. Never read
   `$TNCTL_BOT_KEY_FILE`. `promote` returns the override values as they were typed, a secret included:
   treat its output as sensitive, and ask before you run it.
-- Read before you write: dry run, then the write with `--note`, then a wait.
-- A `delete`, an `off` and a `remove` of a Namespace destroy data on the robot. Say so before you run
-  one, and use `--dry-run` first.
+- Read before you write: dry run, then the write (with `--note` where the command has it), then a wait.
+- These delete data on the robot: `off` (a HelmChart's release with its PVCs, a PVC item, everything in
+  a Namespace), `remove` of a local item (a HelmChart's release is uninstalled, a PVC is deleted; only
+  a Namespace asks for `--yes`, the others ask nothing), and a `try`, `untry` or `reset` that leaves an
+  item out of the configuration. Run `--dry-run` (or `config diff` where there is none) first, show the
+  person what goes, and run it only after they agree.
 - Never turn a robot's Shell on, and never call an inspect route with a bare `tnctl api`: use
   `tnctl inspect`, which sends `enable=false`.

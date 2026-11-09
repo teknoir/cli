@@ -103,9 +103,10 @@ cannot create a namespace: its items go to an existing one, usually `default`.
 |---|---|
 | kind outside the list | `an item of kind <Kind> (<apiVersion>): a TeknoirBot may add only workloads, Services, ConfigMaps, Secrets, PersistentVolumeClaims, Ingresses, NetworkPolicies, PodDisruptionBudgets and HorizontalPodAutoscalers` |
 | a namespace of the agent or k3s | `an item in the namespace <ns>: it holds the robot's agent and k3s` |
-| Secret type `kubernetes.io/service-account-token`, or the annotation `kubernetes.io/service-account.name` | `the Secret type kubernetes.io/service-account-token: it carries a service account token` |
-| a PVC, a StatefulSet `volumeClaimTemplates` or an ephemeral volume with `volumeName` | `spec.volumeName: the claim would bind a volume that already exists` |
-| the same with `dataSource` or `dataSourceRef` | `spec.dataSource: the claim would be filled from another volume` |
+| Secret type `kubernetes.io/service-account-token` | `the Secret type kubernetes.io/service-account-token: it carries a service account token` |
+| the Secret annotation `kubernetes.io/service-account.name` | `the annotation kubernetes.io/service-account.name: it carries a service account token` |
+| a PVC, a StatefulSet `volumeClaimTemplates` or an ephemeral volume with `volumeName` | `<claim>.volumeName: the claim would bind a volume that already exists` |
+| the same with `dataSource` or `dataSourceRef` | `<claim>.dataSource: the claim would be filled from another volume` (or `<claim>.dataSourceRef: …`) |
 | a Service with `externalIPs` | `spec.externalIPs: the Service would take an address on the robot's network` |
 | a Service of type `LoadBalancer` or `NodePort` | `spec.type <type>: the Service would open a port on the robot's own addresses (k3s ServiceLB)` |
 | a Service with a `nodePort` | `spec.ports[<i>].nodePort: the Service would open a port on the robot's own addresses` |
@@ -114,10 +115,10 @@ cannot create a namespace: its items go to an existing one, usually `default`.
 | the Secrets `teknoir-registry-secret`, `artifact-registry-secret`, `k3s-serving` in a volume, a projected source, `env.secretKeyRef` or `envFrom.secretRef` | `the Secret <name> in <where>: it holds the robot's registry or cluster credentials` |
 | a `serviceAccountName` or `serviceAccount` other than `default` | `<field> <name>: a pod may run only as the default service account` |
 | `seccompProfile.type: Unconfined` | `seccompProfile Unconfined` (in a container: `... in <label>`) |
-| an AppArmor profile other than `RuntimeDefault` or `Localhost`, or the AppArmor annotation outside `runtime/default` and `localhost/<profile>` | `appArmorProfile <type>` (`... in <label>`) |
+| an AppArmor profile other than `RuntimeDefault` or `Localhost`, or the AppArmor annotation outside `runtime/default` and `localhost/<profile>` | `appArmorProfile <type>` (`... in <label>`); for the annotation: `the AppArmor annotation <key> <value>: only runtime/default or localhost/<profile> may be used` |
 | `seLinuxOptions.user` or `role` set, or `type` outside `container_t`, `container_init_t`, `container_kvm_t`, `container_engine_t` | `seLinuxOptions.<field> ...` |
 | Windows `hostProcess` | `windowsOptions.hostProcess` |
-| a sysctl outside the safe set (`kernel.shm_rmid_forced`, `net.ipv4.ip_local_port_range`, `ip_unprivileged_port_start`, `tcp_syncookies`, `ping_group_range`, `ip_local_reserved_ports`, `tcp_keepalive_time`, `tcp_fin_timeout`, `tcp_keepalive_intvl`, `tcp_keepalive_probes`) | `sysctl <name>: only the sysctls the Pod Security Standards call safe may be set` |
+| a sysctl outside the safe set (`kernel.shm_rmid_forced`, `net.ipv4.ip_local_port_range`, `net.ipv4.ip_unprivileged_port_start`, `net.ipv4.tcp_syncookies`, `net.ipv4.ping_group_range`, `net.ipv4.ip_local_reserved_ports`, `net.ipv4.tcp_keepalive_time`, `net.ipv4.tcp_fin_timeout`, `net.ipv4.tcp_keepalive_intvl`, `net.ipv4.tcp_keepalive_probes`) | `sysctl <name>: only the sysctls the Pod Security Standards call safe may be set` |
 | `privileged: true` | `privileged <label>` |
 | `allowPrivilegeEscalation: true` | `allowPrivilegeEscalation in <label>` |
 | a capability outside AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, MKNOD, NET_BIND_SERVICE, SETFCAP, SETGID, SETPCAP, SETUID, SYS_CHROOT (`CAP_` prefix allowed) | `capability <cap> in <label>` |
@@ -128,5 +129,7 @@ cannot create a namespace: its items go to an existing one, usually `default`.
 `<label>` is `container "<name>"`, `init container "<name>"`, `ephemeral container "<name>"` or
 `<kind> without a name`. The pod spec is read from where the kind keeps it (`spec` for a Pod,
 `spec.template.spec` for a workload, `spec.jobTemplate.spec.template.spec` for a CronJob).
+`<claim>` is `spec`, `spec.volumeClaimTemplates[<i>].spec` or
+`volumes[<i>].ephemeral.volumeClaimTemplate.spec`.
 
 A person is not limited to that list; the platform's own validation still applies to them.

@@ -18,9 +18,10 @@ Lowest first; a higher layer wins:
 
 Fleets are applied in ascending `priority`, then by name; the one that sorts last wins.
 
-A **TeknoirBot's own computer** gets no git layer at all: no type, no fleet, no robot applications.
-Its applications are pruned, and a write to it through the fleet API is refused. Overrides that target
-it report `no-target`.
+A **TeknoirBot's own computer** gets no git layer at all: no type, no fleet, no robot applications. A
+write to it through the fleet API is refused (exit 8, `<name> is the computer of TeknoirBot <bot>;
+its configuration is managed by the platform.`). An override stored there anyway reports `no-target`
+(an application) or `not-applicable` (a platform or local item).
 
 An **application** is `{repo_url, revision?, path, node_role?}`. The same application listed in
 several layers is kept once, in the highest layer. `node_role` adds a `nodeSelector` and tolerations
@@ -81,16 +82,16 @@ resolved.
 | `invalid` | the override cannot be applied (bad YAML, wrong kind for the field, unknown revision); the message says why |
 | `not-applicable` | the key is a local item or belongs to the platform: overrides apply to items rendered from git |
 | `off` | the resource is off on this robot |
-| `pending` | tnctl's own state, shown while the controller has not evaluated the write yet |
+| `pending` | the fleet API's state while the controller has not evaluated the latest overrides revision |
 
 The target is `Kind/namespace/name`, or `app:<repo_url>#<path>` for an application override.
 
 ### Warnings on the effective view
 
 - `The override <key> is ignored: the key must be Kind/namespace/name.`
-- `The override <key> is not applied: it belongs to the platform.`
-- `The override <key> is ignored: no layer provides it.`
-- `The override <key> is not applied: there is no container <names>; it has: <names>.`
+- `The override of <key> is not applied: it belongs to the platform.`
+- `The override of <key> is not applied: no layer provides it.`
+- `The override of <key> is not applied: there is no container <names>; it has: <names>.`
 
 ### Message from the controller itself
 
@@ -107,7 +108,7 @@ The target is `Kind/namespace/name`, or `app:<repo_url>#<path>` for an applicati
 | `winner` | this copy is the one applied |
 | `merged` | a lower HelmChart copy whose values are part of the merged result |
 | `overridden` | a higher layer replaces this resource entirely |
-| `pending` | not yet in the Device's rendered configuration; the controller has not reconciled yet |
+| `pending` | not in the Device's rendered configuration: the controller has not reconciled yet, or the merge failed. If it stays, read `configuration.warnings` |
 | `off` | turned off on this robot: the row stays, the resource is not in the configuration |
 
 `deviations[]` lists the resources where the robot's configuration differs from its type, with a
@@ -123,5 +124,6 @@ is what `config get` shows as `Published:`; the fleet API exposes it as
 `published: {hash, lastChange, message}`.
 
 The robot's agent applies the items and keeps only `apiVersion`, `kind`, `metadata`, `data`,
-`binaryData`, `type`, `spec` and `status` of each. A field outside that list is reported and dropped
-when you add such an item.
+`binaryData`, `type`, `spec` and `status` of each. `config add` refuses an item with any other
+top-level field (exit 5, `'<field>' is dropped by the robot's agent ...`); a Secret's `stringData` is
+converted to `data`.
