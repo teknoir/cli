@@ -232,20 +232,21 @@ def response_message(response):
         body = response.read(65536).decode("utf-8", "replace").strip()
     except (OSError, http.client.HTTPException):
         return "(no message)"
+    text = body
     try:
         doc = json.loads(body)
     except ValueError:
-        return body[:300] or "(no message)"
+        doc = None
     if isinstance(doc, dict):
         for key in ("message", "error"):
             value = doc.get(key)
-            if isinstance(value, str) and value:
-                return value
             if isinstance(value, dict):
-                inner = value.get("message")
-                if isinstance(inner, str) and inner:
-                    return inner
-    return body[:300] or "(no message)"
+                value = value.get("message")
+            if isinstance(value, str) and value:
+                text = value
+                break
+    # One log line per answer, however the body was shaped: the relay's log is the operator's only clue.
+    return " ".join(text.split())[:300] or "(no message)"
 
 
 def sse_open(api, namespace, topics, key_file, idle_timeout):
@@ -291,6 +292,8 @@ def sse_open(api, namespace, topics, key_file, idle_timeout):
     if status == 404:
         message = response_message(response)
         connection.close()
+        if not re.fullmatch(r"device \S+ not found", message):
+            message += " (this platform has no stream route yet, or --api is not its bot API)"
         raise Fatal(1, f"HTTP 404 from the stream route: {message}")
     if status in (429, 503):
         seconds = retry_after_seconds(response.getheader("Retry-After"))
@@ -371,7 +374,7 @@ def handle_event(name, data, sink):
     if name == "dropped":
         count = doc.get("count", 0)
         reason = doc.get("reason") or "unknown reason"
-        reason = DROPPED_REASONS.get(reason, reason)
+        reason = DROPPED_REASONS.get(reason, reason) if isinstance(reason, str) else reason
         print(f"relay: the platform dropped {count} message(s): {reason}",
               file=sys.stderr, flush=True)
         return

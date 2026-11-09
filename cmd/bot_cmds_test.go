@@ -836,19 +836,54 @@ func TestMqttStreamReconnectWaitsOutA503(t *testing.T) {
 	}
 }
 
-// A 503 that says live MQTT is not configured is final: --reconnect does not try again.
-func TestMqttStreamReconnectStopsOnNotConfigured(t *testing.T) {
-	noBotMode(t)
-	oldUnit := mqttRetryAfterUnit
-	mqttRetryAfterUnit = time.Millisecond
-	t.Cleanup(func() { mqttRetryAfterUnit = oldUnit })
+// mqttStreamEnvFor is a CLI environment whose fleet asks srv for the stream.
+func mqttStreamEnvFor(t *testing.T, srv *httptest.Server) *cliEnv {
+	t.Helper()
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
+			"teknoir.cloud", "teknoir-demo", nil
+	}
+	return e
+}
 
-	requests := 0
+// write503 writes the platform's temporary 503; retryAfter "" means none.
+func write503(w http.ResponseWriter, retryAfter, message string) {
+	if retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = io.WriteString(w, `{"error":{"name":"ServiceUnavailableError","message":"`+message+`"}}`)
+}
+
+// final503 runs mqtt stream against a server whose first answer is a 503 with the given Retry-After
+// ("" for none) and message. Every later request gets 500 "unexpected second request", and the
+// backoff and the Retry-After unit are 1 ms: a build that wrongly retries fails at once with
+// "N requests, want 1" instead of looping until go test's -timeout.
+func final503(t *testing.T, retryAfter, message string, reconnect bool) (errs string, requests int, err error) {
+	t.Helper()
+	noBotMode(t)
+	oldUnit, oldDelay := mqttRetryAfterUnit, mqttReconnectDelay
+	mqttRetryAfterUnit, mqttReconnectDelay = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { mqttRetryAfterUnit, mqttReconnectDelay = oldUnit, oldDelay })
+
+	var mu sync.Mutex
+	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		w.Header().Set("Retry-After", "300")
+		mu.Lock()
+		n++
+		first := n == 1
+		mu.Unlock()
+		if !first {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"name":"Error","message":"unexpected second request"}}`)
+			return
+		}
+		if retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, `{"error":{"name":"ServiceUnavailableError","message":"The stream is off: live MQTT is not configured for teamspace teknoir-demo."}}`)
+		_, _ = io.WriteString(w, `{"error":{"name":"ServiceUnavailableError","message":"`+message+`"}}`)
 	}))
 	defer srv.Close()
 	e, _ := testEnv(t, newFakePlatform(t), nil)
@@ -856,73 +891,427 @@ func TestMqttStreamReconnectStopsOnNotConfigured(t *testing.T) {
 		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
 			"teknoir.cloud", "teknoir-demo", nil
 	}
-	_, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#", "--reconnect")
-	if err == nil || exitCodeOf(err) == 0 ||
-		!strings.Contains(err.Error(), "The stream is off: live MQTT is not configured for teamspace teknoir-demo.") {
-		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+	args := []string{"mqtt", "stream", "/devices/+/state/#"}
+	if reconnect {
+		args = append(args, "--reconnect")
 	}
+	_, errs, err = runCLI(t, e, args...)
+	mu.Lock()
+	defer mu.Unlock()
+	return errs, n, err
+}
+
+// A 503 that says live MQTT is not configured is final: --reconnect does not try again.
+func TestMqttStreamReconnectStopsOnNotConfigured(t *testing.T) {
+	const msg = "The stream is off: live MQTT is not configured for teamspace teknoir-demo."
+	errs, requests, err := final503(t, "300", msg, true)
 	if requests != 1 {
 		t.Errorf("%d requests, want 1", requests)
+	}
+	if err == nil || exitCodeOf(err) == 0 || !strings.Contains(err.Error(), msg) {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
 	}
 }
 
 // Without --reconnect a temporary 503 ends the command with the server's message.
 func TestMqttStreamNoReconnectKeepsA503Final(t *testing.T) {
-	noBotMode(t)
-	oldUnit := mqttRetryAfterUnit
-	mqttRetryAfterUnit = time.Millisecond
-	t.Cleanup(func() { mqttRetryAfterUnit = oldUnit })
-
-	requests := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		w.Header().Set("Retry-After", "5")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, `{"error":{"name":"ServiceUnavailableError","message":"The portal is restarting. Connect again in a few seconds."}}`)
-	}))
-	defer srv.Close()
-	e, _ := testEnv(t, newFakePlatform(t), nil)
-	e.fleet = func() (*api.Fleet, string, string, error) {
-		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
-			"teknoir.cloud", "teknoir-demo", nil
-	}
-	_, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#")
-	if err == nil || exitCodeOf(err) == 0 || !strings.Contains(err.Error(), "The portal is restarting. Connect again in a few seconds.") {
-		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
-	}
+	const msg = "The portal is restarting. Connect again in a few seconds."
+	errs, requests, err := final503(t, "5", msg, false)
 	if requests != 1 {
 		t.Errorf("%d requests, want 1", requests)
+	}
+	if err == nil || exitCodeOf(err) == 0 || !strings.Contains(err.Error(), msg) {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
 	}
 	if strings.Contains(errs, "connecting again") {
 		t.Errorf("stderr %q: it reconnected without --reconnect", errs)
 	}
 }
 
-// A 503 without Retry-After says nothing about when to try again: --reconnect does not retry it.
-func TestMqttStreamReconnectDoesNotRetryA503WithoutRetryAfter(t *testing.T) {
+// The pause is the Retry-After, really slept: not skipped, not the backoff.
+func TestMqttStreamReconnectSleepsTheRetryAfter(t *testing.T) {
+	noBotMode(t)
+	oldUnit, oldDelay := mqttRetryAfterUnit, mqttReconnectDelay
+	mqttRetryAfterUnit, mqttReconnectDelay = 20*time.Millisecond, time.Hour
+	t.Cleanup(func() { mqttRetryAfterUnit, mqttReconnectDelay = oldUnit, oldDelay })
+
+	var mu sync.Mutex
+	var at []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		at = append(at, time.Now())
+		n := len(at)
+		mu.Unlock()
+		if n == 1 {
+			write503(w, "5", "The portal is restarting. Connect again in a few seconds.")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+	}))
+	defer srv.Close()
+	out, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1", "--seconds", "5", "--reconnect")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if out != "/devices/d1/state/x hello\n" {
+		t.Errorf("stdout %q, stderr %q", out, errs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) != 2 {
+		t.Fatalf("%d requests, want 2", len(at))
+	}
+	if gap := at[1].Sub(at[0]); gap < 100*time.Millisecond {
+		t.Errorf("reconnected after %s, want at least the Retry-After of 100ms", gap)
+	}
+}
+
+// A Retry-After far in the future (an HTTP date, which saturates at 292 years) waits the cap:
+// the pause must not overflow, and the message must not be lost to the backoff.
+func TestMqttStreamReconnectCapsAHugeRetryAfter(t *testing.T) {
+	noBotMode(t)
+	oldMax, oldDelay := mqttRetryAfterMax, mqttReconnectDelay
+	mqttRetryAfterMax, mqttReconnectDelay = 20*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { mqttRetryAfterMax, mqttReconnectDelay = oldMax, oldDelay })
+
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		if n == 1 {
+			write503(w, "Fri, 31 Dec 9999 23:59:59 GMT", "The portal is restarting. Connect again in a few seconds.")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+	}))
+	defer srv.Close()
+	_, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1", "--reconnect", "--seconds", "5")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if want := "The portal is restarting. Connect again in a few seconds.; connecting again in 20ms"; !strings.Contains(errs, want) {
+		t.Errorf("stderr %q, want it to contain %q", errs, want)
+	}
+	if strings.Contains(errs, "the stream ended") {
+		t.Errorf("stderr %q: the 503 was reported as a clean end", errs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 2 {
+		t.Errorf("%d requests, want 2", requests)
+	}
+}
+
+// A temporary 503 whose Retry-After exceeds mqttRetryAfterMax is waited out for mqttRetryAfterMax:
+// the text shows the capped wait and the pause is the capped one.
+func TestMqttStreamReconnectCapsRetryAfter(t *testing.T) {
+	noBotMode(t)
+	oldUnit, oldMax := mqttRetryAfterUnit, mqttRetryAfterMax
+	mqttRetryAfterUnit, mqttRetryAfterMax = time.Hour, 10*time.Millisecond
+	t.Cleanup(func() { mqttRetryAfterUnit, mqttRetryAfterMax = oldUnit, oldMax })
+
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		if n == 1 {
+			write503(w, "10", "The MQTT broker of teamspace teknoir-demo cannot be reached right now.")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+	}))
+	defer srv.Close()
+	out, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1", "--seconds", "5", "--reconnect")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if want := "cannot be reached right now.; connecting again in 10ms\n"; !strings.Contains(errs, want) {
+		t.Errorf("stderr %q, want it to contain %q", errs, want)
+	}
+	if want := "/devices/d1/state/x hello\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 2 {
+		t.Errorf("%d requests, want 2", requests)
+	}
+}
+
+// A Retry-After wait neither resets nor doubles the backoff of the clean-end/network path.
+func TestMqttStreamRetryAfterLeavesTheBackoffAlone(t *testing.T) {
+	noBotMode(t)
+	oldDelay, oldMax, oldUnit := mqttReconnectDelay, mqttReconnectMax, mqttRetryAfterUnit
+	mqttReconnectDelay, mqttReconnectMax, mqttRetryAfterUnit = 10*time.Millisecond, time.Second, time.Millisecond
+	t.Cleanup(func() { mqttReconnectDelay, mqttReconnectMax, mqttRetryAfterUnit = oldDelay, oldMax, oldUnit })
+
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		switch n {
+		case 2:
+			write503(w, "5", "The portal is restarting. Connect again in a few seconds.")
+			return
+		case 4:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream") // 1 and 3: a clean end with nothing in it
+	}))
+	defer srv.Close()
+	_, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1", "--seconds", "10", "--reconnect")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	want := "tnctl: the stream ended; connecting again in 10ms\n" +
+		"tnctl: The portal is restarting. Connect again in a few seconds.; connecting again in 5ms\n" +
+		"tnctl: the stream ended; connecting again in 20ms\n"
+	if errs != want {
+		t.Errorf("stderr\n%q\nwant\n%q", errs, want)
+	}
+}
+
+// A 429 (too many streams) is final with --reconnect too, with the rate-limit exit code.
+func TestMqttStreamReconnectDoesNotRetryA429(t *testing.T) {
 	noBotMode(t)
 	oldUnit := mqttRetryAfterUnit
 	mqttRetryAfterUnit = time.Millisecond
 	t.Cleanup(func() { mqttRetryAfterUnit = oldUnit })
 
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		if n > 1 {
+			// A retry would get a stream, so a wrong retry ends the command with 0.
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+			return
+		}
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"name":"TooManyRequestsError","message":"You already have 4 live MQTT streams open. Close one before you open another."}}`)
+	}))
+	defer srv.Close()
+	_, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1", "--reconnect")
+	if err == nil || exitCodeOf(err) != codeRateLimit ||
+		!strings.Contains(err.Error(), "You already have 4 live MQTT streams open. Close one before you open another.") {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if strings.Contains(errs, "connecting again") {
+		t.Errorf("stderr %q: it retried a 429", errs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Errorf("%d requests, want 1", requests)
+	}
+}
+
+// --seconds that runs out during a Retry-After wait is a clean stop (exit 0); the wait is capped at 60 s.
+func TestMqttStreamSecondsEndsARetryAfterWaitCleanly(t *testing.T) {
+	noBotMode(t)
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		if n > 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+			return
+		}
+		write503(w, "300", "The MQTT broker of teamspace teknoir-demo cannot be reached right now.")
+	}))
+	defer srv.Close()
+	_, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--seconds", "1", "--reconnect")
+	if err != nil {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if !strings.Contains(errs, "cannot be reached right now.; connecting again in 1m0s\n") {
+		t.Errorf("stderr %q", errs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Errorf("%d requests, want 1", requests)
+	}
+}
+
+// The gateway's own 502, 503 or 504 while the portal's pod is being replaced is the one refusal
+// --reconnect retries: it says nothing about the request.
+func TestMqttStreamReconnectRetriesAGatewayAnswer(t *testing.T) {
+	noBotMode(t)
+	oldDelay := mqttReconnectDelay
+	mqttReconnectDelay = time.Millisecond
+	t.Cleanup(func() { mqttReconnectDelay = oldDelay })
+
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"502", http.StatusBadGateway},
+		{"503", http.StatusServiceUnavailable},
+		{"504", http.StatusGatewayTimeout},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var mu sync.Mutex
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				requests++
+				n := requests
+				mu.Unlock()
+				if n == 1 {
+					w.Header().Set("Content-Type", "text/plain")
+					w.WriteHeader(c.status)
+					_, _ = io.WriteString(w, "no healthy upstream")
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+			}))
+			defer srv.Close()
+			out, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1", "--reconnect", "--seconds", "5")
+			if err != nil {
+				t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+			}
+			if want := "/devices/d1/state/x hello\n"; out != want {
+				t.Errorf("stdout %q, want %q", out, want)
+			}
+			if want := "tnctl: no healthy upstream; connecting again in 1ms"; !strings.Contains(errs, want) {
+				t.Errorf("stderr %q, want it to contain %q", errs, want)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if requests != 2 {
+				t.Errorf("%d requests, want 2", requests)
+			}
+		})
+	}
+}
+
+// A portal restart: the stream ends cleanly, the gateway answers 503 with no Retry-After until the
+// new pod is ready (backstage-api is one replica with strategy Recreate, so that lasts a minute or
+// more), and the stream comes back. --reconnect rides it out.
+func TestMqttStreamReconnectSurvivesAPortalRestart(t *testing.T) {
+	noBotMode(t)
+	oldDelay := mqttReconnectDelay
+	mqttReconnectDelay = time.Millisecond
+	t.Cleanup(func() { mqttReconnectDelay = oldDelay })
+
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		switch n {
+		case 1:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "before"))
+		case 2:
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, "no healthy upstream")
+		default:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "after"))
+		}
+	}))
+	defer srv.Close()
+	out, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "2", "--reconnect", "--seconds", "5")
+	if err != nil {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if want := "/devices/d1/state/x before\n/devices/d1/state/x after\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 3 {
+		t.Errorf("%d requests, want 3", requests)
+	}
+}
+
+// Without --reconnect the gateway's 503 ends the command with its message, after one request.
+func TestMqttStreamNoReconnectKeepsAGateway503Final(t *testing.T) {
+	noBotMode(t)
+	oldDelay := mqttReconnectDelay
+	mqttReconnectDelay = time.Millisecond
+	t.Cleanup(func() { mqttReconnectDelay = oldDelay })
+
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
+		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, `{"error":{"name":"ServiceUnavailableError","message":"The portal is restarting. Connect again in a few seconds."}}`)
+		_, _ = io.WriteString(w, "no healthy upstream")
 	}))
 	defer srv.Close()
-	e, _ := testEnv(t, newFakePlatform(t), nil)
-	e.fleet = func() (*api.Fleet, string, string, error) {
-		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
-			"teknoir.cloud", "teknoir-demo", nil
-	}
-	_, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#", "--reconnect")
-	if err == nil || exitCodeOf(err) == 0 {
+	_, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#")
+	if err == nil || exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "no healthy upstream") {
 		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
 	}
 	if requests != 1 {
 		t.Errorf("%d requests, want 1", requests)
+	}
+}
+
+// The exit code of each refusal the stream route answers, with --reconnect: the docs' table.
+func TestMqttStreamRefusalExitCodes(t *testing.T) {
+	noBotMode(t)
+	cases := []struct {
+		name, retryAfter, body string
+		status, want           int
+	}{
+		{"too many", "30", `{"error":{"name":"TooManyRequestsError","message":"You already have 4 live MQTT streams open. Close one before you open another."}}`, 429, codeRateLimit},
+		{"not found", "", `{"error":{"name":"NotFoundError","message":"device x not found"}}`, 404, codeNotFound},
+		{"bad topics", "", `{"error":{"name":"InputError","message":"Give 1 to 8 topic parameters."}}`, 400, codeRejected},
+		{"not configured", "300", `{"error":{"name":"ServiceUnavailableError","message":"The stream is off: live MQTT is not configured on this portal."}}`, 503, codeError},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hits := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				if c.retryAfter != "" {
+					w.Header().Set("Retry-After", c.retryAfter)
+				}
+				w.WriteHeader(c.status)
+				_, _ = io.WriteString(w, c.body)
+			}))
+			defer srv.Close()
+			// --seconds bounds the run should a regression retry a refusal.
+			_, _, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--reconnect", "--seconds", "2")
+			if got := exitCodeOf(err); got != c.want {
+				t.Errorf("exit %d, want %d (%v)", got, c.want, err)
+			}
+			if hits != 1 {
+				t.Errorf("%d requests, want 1", hits)
+			}
+		})
 	}
 }
 

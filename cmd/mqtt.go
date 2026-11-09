@@ -167,11 +167,11 @@ func streamEndedError(e *api.StreamError) error {
 }
 
 // runMqttStream follows the topics until --count, --seconds or Ctrl-C stops it. With --reconnect it
-// connects again after the stream ended or the network failed: never after a refused request (a
-// non-2xx answer), an error event, or a 503 that says live MQTT is not configured. A 503 that the
-// platform marks as temporary waits its Retry-After instead of the backoff. Without --reconnect only
-// a clean end of the stream, --count or --seconds ends the command with 0; a network failure is an
-// error.
+// connects again after the stream ended, the network failed, or the gateway answered 502, 503 or 504
+// while the portal's pod is being replaced: never after a refused request (400, 401, 403, 404, 429,
+// 500), an error event, or a 503 that says live MQTT is not configured. A 503 that the platform marks
+// as temporary waits its Retry-After instead of the backoff. Without --reconnect only a clean end of
+// the stream, --count or --seconds ends the command with 0; a network failure is an error.
 func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFlags, p *mqttPrinter) error {
 	// The key is read once before the loop: a missing key answers at once, with or without
 	// --reconnect, and no request is sent.
@@ -212,7 +212,17 @@ func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFl
 			// The connection worked: the next wait starts at the first delay again.
 			delay = mqttReconnectDelay
 		}
-		fmt.Fprintf(p.errw, "tnctl: the stream ended; connecting again in %s\n", delay)
+		// The gateway's own answer while the portal's pod is being replaced (a 503 that never
+		// reached it, a 502 or 504 for one that did) is the reason, not a silent end.
+		msg := "the stream ended"
+		var ae *api.Error
+		if errors.As(err, &ae) {
+			msg = ae.Message
+			if msg == "" {
+				msg = fmt.Sprintf("HTTP %d", ae.Status)
+			}
+		}
+		_, _ = fmt.Fprintf(p.errw, "tnctl: %s; connecting again in %s\n", msg, delay)
 		if err := realSleep(ctx, delay); err != nil {
 			return nil // stopped while waiting to reconnect
 		}
@@ -225,18 +235,34 @@ func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFl
 
 // runMqttStreamOnce is one connection. done says the run is over (the limit was reached or a problem
 // no reconnect cures: its error is returned). retry says --reconnect may connect again; err then is
-// the network failure, or nil for a clean end of the stream. wait is a pause the platform asked for
-// (a 503 with Retry-After, 0: use the backoff).
+// the network failure, the gateway's 502/503/504, or nil for a clean end of the stream. wait is a
+// pause the platform asked for (a 503 with Retry-After, 0: use the backoff).
 func runMqttStreamOnce(ctx context.Context, fl *api.Fleet, topics []string, f mqttFlags, p *mqttPrinter) (done, retry bool, wait time.Duration, err error) {
 	sub, err := fl.MqttStream(ctx, topics)
 	if err != nil {
 		var ae *api.Error
 		if errors.As(err, &ae) {
-			if ae.Status == http.StatusServiceUnavailable && ae.RetryAfter > 0 &&
-				!strings.Contains(ae.Message, "live MQTT is not configured") {
+			if ae.Status == http.StatusServiceUnavailable &&
+				strings.Contains(ae.Message, "live MQTT is not configured") {
+				// Nothing in the teamspace serves live MQTT: connecting again does not help.
+				return true, false, 0, classify(err)
+			}
+			if ae.Status == http.StatusServiceUnavailable && ae.RetryAfter > 0 {
 				// The platform says it is temporary (a portal restart, a broker it cannot reach):
 				// --reconnect waits as long as its Retry-After says and connects again.
-				return false, true, time.Duration(ae.RetryAfter) * mqttRetryAfterUnit, classify(err)
+				// Capped in whole units before the multiplication: a huge Retry-After (or an HTTP
+				// date that saturates at 292 years) must not overflow time.Duration.
+				wait = mqttRetryAfterMax
+				if n := time.Duration(ae.RetryAfter); n < mqttRetryAfterMax/mqttRetryAfterUnit {
+					wait = n * mqttRetryAfterUnit
+				}
+				return false, true, wait, classify(err)
+			}
+			switch ae.Status {
+			case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+				// The gateway's own answer while the portal's pod is being replaced: it never
+				// reached the platform, so --reconnect uses the backoff.
+				return false, true, 0, classify(err)
 			}
 			// A refused request or a rejected key is not retried: it says nothing about the network.
 			return true, false, 0, classify(err)

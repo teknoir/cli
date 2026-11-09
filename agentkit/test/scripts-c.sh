@@ -252,7 +252,11 @@ BINARY = (
 )
 DROPPED = 'event: dropped\ndata: {"count":7,"reason":"rate"}\n\n'
 SLOW_DROPPED = 'event: dropped\ndata: {"count":3,"reason":"slow"}\n\n'
+SIZE_DROPPED = 'event: dropped\ndata: {"count":2,"reason":"size"}\n\n'
+ODD_DROPPED = 'event: dropped\ndata: {"count":1,"reason":["x"]}\n\n'
 ERROR = 'event: error\ndata: {"code":"access_lost","message":"the caller lost access"}\n\n'
+BROKER_CLOSED = ('event: error\ndata: {"code":"broker_closed","message":"The MQTT broker of '
+                 'teamspace teknoir-demo closed the connection."}\n\n')
 
 
 def record(path, text):
@@ -324,9 +328,32 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if mode == "nostream":
-            body = (b'{"error":{"name":"NotFoundError","message":"Device x is not in teamspace '
-                    b'teknoir-demo."}}')
+        if mode == "brokerdown":
+            body = (b'{"error":{"name":"ServiceUnavailableError","message":"The MQTT broker of '
+                    b'teamspace teknoir-demo cannot be reached right now."}}')
+            self.send_response(503)
+            self.send_header("Retry-After", "0")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if mode in ("htmlbusy", "longbusy"):
+            if mode == "htmlbusy":
+                body = (b"<html>\r\n<head><title>503 Service Temporarily Unavailable</title></head>\r\n"
+                        b"<body>\r\n<center><h1>503 Service Temporarily Unavailable</h1></center>\r\n"
+                        b"</body>\r\n</html>\r\n")
+            else:
+                body = b'{"error":{"name":"ServiceUnavailableError","message":"' + b"m" * 5000 + b'"}}'
+            self.send_response(503)
+            self.send_header("Retry-After", "0")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if mode in ("nostream", "noroute"):
+            body = (b'{"error":{"name":"NotFoundError","message":"device x not found"}}'
+                    if mode == "nostream" else
+                    b'{"error":{"name":"NotFoundError","message":"Not found."}}')
             self.send_response(404)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -338,6 +365,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(b": keepalive\n\n")
+        if mode == "brokerclosed":
+            self.wfile.write(MESSAGE.encode())
+            self.wfile.write(BROKER_CLOSED.encode())
+            self.wfile.flush()
+            return
         if mode == "error":
             self.wfile.write(MESSAGE.encode())
             self.wfile.write(ERROR.encode())
@@ -353,9 +385,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(30)
             return
-        if mode == "dropslow":  # the dropped reason the platform reports for a slow reader
+        if mode == "dropslow":  # the dropped reasons the platform reports, and one it never sends
             self.wfile.write(MESSAGE.encode())
             self.wfile.write(SLOW_DROPPED.encode())
+            self.wfile.write(SIZE_DROPPED.encode())
+            self.wfile.write(ODD_DROPPED.encode())
+            self.wfile.write(MESSAGE.encode())
             self.wfile.flush()
             time.sleep(30)
             return
@@ -517,6 +552,7 @@ check_contains "relay --sse: prints a base64 message decoded" "$out" "in/devices
 check_contains "relay --sse: one stderr line for dropped" "$err" "dropped 7 message(s)"
 dropped_lines="$(grep -c 'dropped' "$err" 2>/dev/null || true)"
 check_eq "relay --sse: exactly one dropped line" 1 "$dropped_lines"
+check_contains "relay --sse: the rate reason is spelled out" "$err" "dropped 7 message(s): too many messages too fast"
 check_eq "relay --sse: the topic query values are the --topic values" \
   "$(printf '/devices/+/state/#\n/devices/d1/events/alerts')" \
   "$("$PYTHON" -c 'import sys, urllib.parse
@@ -608,6 +644,7 @@ if [ "$connections" -le 4 ]; then
 else
   fail "relay --sse: Retry-After: 0 made $connections connections in 3 s"
 fi
+check_contains "relay --sse: a 429 prints the server's message" "$err" "(HTTP 429): busy"
 
 start_server retryinf
 err="$work/sse-retryinf.err"
@@ -646,6 +683,45 @@ else
   fail "relay --sse: a portal restart made $connections connections in 3 s"
 fi
 check_contains "relay --sse: a portal restart prints the server's message" "$err" "The portal is restarting"
+check_absent "relay --sse: a portal restart waits its Retry-After, not the backoff" "$err" "connecting again in 2.0s"
+
+start_server restarting
+err="$work/sse-restarting2.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err" &
+relay_pid=$!
+second=no
+for _ in $(seq 1 100); do
+  if [ "$(grep -c . "$work/count")" -ge 2 ]; then second=yes; break; fi
+  sleep 0.1
+done
+kill "$relay_pid" 2>/dev/null || true
+wait "$relay_pid" 2>/dev/null || true
+stop_server
+check_eq "relay --sse: a portal restart connects again" yes "$second"
+
+start_server htmlbusy
+err="$work/sse-htmlbusy.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+stop_server
+check_eq "relay --sse: a multi-line 503 body stays on one stderr line per retry" 0 \
+  "$(grep -vc '^relay: ' "$err")"
+
+start_server longbusy
+err="$work/sse-longbusy.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+stop_server
+longest="$(awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' "$err")"
+if [ "$longest" -gt 0 ] && [ "$longest" -le 400 ]; then
+  ok "relay --sse: a long 503 message is capped ($longest characters)"
+else
+  fail "relay --sse: a long 503 message gives a $longest-character stderr line"
+fi
 
 start_server nostream
 err="$work/sse-404.err"
@@ -655,8 +731,41 @@ PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 20 \
 rc=$?
 stop_server
 check_eq "relay --sse: HTTP 404 exits 1" 1 "$rc"
-check_contains "relay --sse: 404 prints the server's message" "$err" "Device x is not in teamspace teknoir-demo."
+check_contains "relay --sse: 404 prints the server's message" "$err" "HTTP 404 from the stream route: device x not found"
+check_absent "relay --sse: a device 404 gets no route hint" "$err" "no stream route"
 check_eq "relay --sse: 404 gets one request" 1 "$(grep -c . "$work/count")"
+
+start_server brokerclosed
+err="$work/sse-brokerclosed.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 5 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+rc=$?
+stop_server
+check_eq "relay --sse: broker_closed exits 1 (the one pod restart)" 1 "$rc"
+check_contains "relay --sse: broker_closed prints the server's message" "$err" "closed the connection"
+
+start_server brokerdown
+err="$work/sse-brokerdown.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+rc=$?
+stop_server
+check_eq "relay --sse: a broker that is down keeps the relay running" 124 "$rc"
+check_contains "relay --sse: a broker that is down prints the server's message" "$err" "cannot be reached right now"
+check_absent "SKILL.md: an EMQX restart is not a CrashLoopBackOff by design" "$mqtt/SKILL.md" "CrashLoopBackOff until the broker is back"
+
+start_server noroute
+err="$work/sse-noroute.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 20 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+rc=$?
+stop_server
+check_eq "relay --sse: the router's catch-all 404 exits 1" 1 "$rc"
+check_contains "relay --sse: the catch-all 404 says the platform may have no stream route" "$err" "Not found. (this platform has no stream route yet"
+check_eq "relay --sse: the catch-all 404 gets one request" 1 "$(grep -c . "$work/count")"
 
 start_server dropslow
 err="$work/sse-dropslow.err"
@@ -666,6 +775,8 @@ PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
 stop_server
 check_contains "relay --sse: a dropped event with reason slow names the slow reader" \
   "$err" "dropped 3 message(s): the reader was too slow"
+check_contains "relay --sse: the size reason is spelled out" "$err" "dropped 2 message(s): the messages were too large"
+check_absent "relay --sse: a non-string dropped reason gives no traceback" "$err" "Traceback"
 
 start_server cuterror
 err="$work/sse-cuterror.err"
