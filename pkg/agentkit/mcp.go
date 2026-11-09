@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -382,8 +383,27 @@ func jsonEqual(a, b []byte) bool {
 
 // ---------- Codex: TOML ----------
 
-// tomlEntryBlock is the codex config entry of the MCP server.
-const tomlEntryBlock = "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"
+// codexEnvVars are the variables the kit's Codex entry passes to `tnctl mcp`. Codex starts a stdio MCP
+// server with a cleared environment but for a few defaults, so without them `tnctl mcp` misses bot mode
+// (TEKNOIRBOT_API, TNCTL_BOT_KEY_FILE, TEKNOIRBOT_NAMESPACE and TEKNOIR_DOMAIN, cmd/botmode.go) and the
+// teamspace and domain a person targets (TNCTL_NAMESPACE, and TNCTL_DOMAIN through viper's TNCTL prefix).
+var codexEnvVars = []string{
+	"TEKNOIRBOT_API", "TNCTL_BOT_KEY_FILE", "TEKNOIRBOT_NAMESPACE", "TEKNOIR_DOMAIN",
+	"TNCTL_NAMESPACE", "TNCTL_DOMAIN",
+}
+
+// tomlEntryBlock is the codex config entry of the MCP server, with the environment variables of
+// codexEnvVars.
+var tomlEntryBlock = "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\nenv_vars = " + tomlEnvVars() + "\n"
+
+// tomlEnvVars is codexEnvVars as a TOML array of strings.
+func tomlEnvVars() string {
+	quoted := make([]string, len(codexEnvVars))
+	for i, v := range codexEnvVars {
+		quoted[i] = strconv.Quote(v)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
 
 // codexReplace is the verb of a refusal that asks the user to replace an entry that is there already.
 const codexReplace = "replace mcp_servers.teknoir with"
@@ -573,20 +593,14 @@ func tomlServer(parsed map[string]any) (map[string]any, bool) {
 	return srv, ok
 }
 
-// tomlServerIsOurs reports whether the table is exactly the kit's entry.
+// tomlServerIsOurs reports whether the table is exactly the kit's entry: an entry of an older tnctl
+// (without env_vars) is not, and `--force` replaces it.
 func tomlServerIsOurs(srv map[string]any) bool {
-	if len(srv) != 2 {
+	kit, err := tomlKitEntry()
+	if err != nil {
 		return false
 	}
-	if cmd, ok := srv["command"].(string); !ok || cmd != "tnctl" {
-		return false
-	}
-	args, ok := srv["args"].([]any)
-	if !ok || len(args) != 1 {
-		return false
-	}
-	a, ok := args[0].(string)
-	return ok && a == "mcp"
+	return reflect.DeepEqual(srv, kit)
 }
 
 // tomlKitEntry is the kit's own table, parsed, for the edit invariant.

@@ -4,6 +4,7 @@ model = "gpt-5-codex"
 [mcp_servers.teknoir]
 command = "tnctl"
 args = ["mcp"]
+env_vars = ["TEKNOIRBOT_API", "TNCTL_BOT_KEY_FILE", "TEKNOIRBOT_NAMESPACE", "TEKNOIR_DOMAIN", "TNCTL_NAMESPACE", "TNCTL_DOMAIN"]
 
 [mcp_servers.github]
 command = "npx"

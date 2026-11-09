@@ -700,12 +700,11 @@ func codexConfig(t *testing.T, body string) (*Options, string) {
 	return o, path
 }
 
-const codexOurs = `model = "gpt-5"
+// codexEnvLine is the kit entry's env_vars line, as the editor writes it.
+var codexEnvLine = "env_vars = " + tomlEnvVars()
 
-[mcp_servers.teknoir]
-command = "tnctl"
-args = ["mcp"]
-`
+// codexOurs is the kit's own table, as the installer writes it.
+var codexOurs = "model = \"gpt-5\"\n\n[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n" + codexEnvLine + "\n"
 
 // An array table right after ours ends it: uninstall leaves it, and so does --force.
 func TestCodexArrayTableAfterOurs(t *testing.T) {
@@ -765,7 +764,7 @@ func TestCodexInvariantRefused(t *testing.T) {
 		{
 			// A header the range scanner does not see ("a]b") would go with the table.
 			name: "uninstall would cut a header",
-			body: "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n\n[\"a]b\"]\nc = 2\n",
+			body: "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n" + codexEnvLine + "\n\n[\"a]b\"]\nc = 2\n",
 			run:  Uninstall,
 			want: "remove [mcp_servers.teknoir]",
 		},
@@ -889,7 +888,7 @@ func TestManifestKeyShapeRefused(t *testing.T) {
 
 // An [mcp_servers] left empty by the uninstall goes too, and the rest of the file stays.
 func TestCodexEmptyParentTable(t *testing.T) {
-	o, path := codexConfig(t, "[mcp_servers]\n\n[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n")
+	o, path := codexConfig(t, "[mcp_servers]\n\n[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"+codexEnvLine+"\n")
 	res, err := Uninstall(o)
 	if err != nil {
 		t.Fatalf("uninstall: %v", err)
@@ -940,7 +939,7 @@ func TestCodexDottedKeysRefused(t *testing.T) {
 		why  string
 		o    func(o *Options)
 	}{
-		{"uninstall", "[mcp_servers]\nteknoir.command = \"tnctl\"\nteknoir.args = [\"mcp\"]\n", Uninstall, "edit it by hand: remove [mcp_servers.teknoir]", nil},
+		{"uninstall", "[mcp_servers]\nteknoir.command = \"tnctl\"\nteknoir.args = [\"mcp\"]\nteknoir." + codexEnvLine + "\n", Uninstall, "edit it by hand: remove [mcp_servers.teknoir]", nil},
 		{"force", "[mcp_servers]\nteknoir.command = \"/other/tnctl\"\nteknoir.args = [\"mcp\"]\n", Install, "edit it by hand: replace mcp_servers.teknoir with [mcp_servers.teknoir]",
 			func(o *Options) { o.Force = true }},
 	} {
@@ -2134,7 +2133,7 @@ func TestAgentsMDSymlinkGitAndCase(t *testing.T) {
 func TestCodexUnparsableEditSaysRemove(t *testing.T) {
 	// The first [mcp_servers.teknoir] line is inside a multi-line string, so cutting the "table" there
 	// leaves an unterminated string.
-	body := "[notes]\ntext = \"\"\"\n[mcp_servers.teknoir]\nfoo\"\"\"\n[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"
+	body := "[notes]\ntext = \"\"\"\n[mcp_servers.teknoir]\nfoo\"\"\"\n[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n" + codexEnvLine + "\n"
 	o, path := codexConfig(t, body)
 	before := snapshotTree(t, filepath.Dir(path))
 	_, err := Uninstall(o)
@@ -2292,7 +2291,7 @@ func TestAgentsMDUninstallRefusalSaysRemove(t *testing.T) {
 // A long run of # lines inside a multi-line string after a fake header costs a few parses, not one per line:
 // a cloned repository's config.toml must not stall uninstall for minutes.
 func TestCodexTailScanNotQuadratic(t *testing.T) {
-	body := "[mcp_servers]\nteknoir = { command = \"tnctl\", args = [\"mcp\"] }\n\n[notes]\ns = \"\"\"\n[mcp_servers.teknoir]\n" +
+	body := "[mcp_servers]\nteknoir = { command = \"tnctl\", args = [\"mcp\"], " + codexEnvLine + " }\n\n[notes]\ns = \"\"\"\n[mcp_servers.teknoir]\n" +
 		strings.Repeat("#a\n", 64000) + "#\"\"\"\n"
 	o, path := codexConfig(t, body)
 	start := time.Now()

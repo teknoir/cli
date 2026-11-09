@@ -1,8 +1,9 @@
 # `tnctl mcp`
 
 Run a **read-only MCP server** over stdio for an AI coding agent (Claude Code, Codex, OpenCode). The agent
-gets typed tools that answer from the platform's fleet API; none of them changes anything. The server works
-as whoever `tnctl` is: your `tnctl login` session, or, inside a TeknoirBot, the bot and its own teamspace.
+gets typed tools that answer from the platform's fleet API (`whoami`, as a person, from the stored login);
+none of them changes anything. The server works as whoever `tnctl` is: your `tnctl login` session, or, inside
+a TeknoirBot, the bot and its own teamspace.
 
 ```bash
 tnctl mcp
@@ -43,7 +44,7 @@ kit's Claude Code plugin. Codex and OpenCode list the same tools under the serve
 | `get_config` | `target`, `resource`, `defaults` | The effective configuration of a robot or device (`target`): its layers, overrides and states. `resource` (`Kind/namespace/name`, `Kind/name` or `name`) shows one resource with its provenance, the rendered item and its override; `defaults` adds the chart's default values. |
 | `list_kinds` | | The kinds of local resources the platform accepts on a robot or device, and the ones it refuses. |
 | `prom_query` | `query`, `time` | A PromQL instant query on the teamspace's Prometheus, limited to the devices the caller may see. `time` is RFC 3339 or Unix seconds; empty means now. |
-| `mqtt_sample` | `topics`, `seconds`, `max` | The MQTT messages of the teamspace's devices for a few seconds: what a device publishes. `topics` is 1 to 8 topic filters such as `/devices/+/state/#`; `seconds` is 5 by default and at most 30, `max` is 50 messages by default and at most 200. |
+| `mqtt_sample` | `topics`, `seconds`, `max` | The MQTT messages of the teamspace's devices for a few seconds: what a device publishes. `topics` is 1 to 8 topics, each `/devices/<device>/state/#` or `/devices/<device>/events/#` (`+` for every device) or a concrete topic below them; `seconds` is 5 by default and at most 30, `max` is 50 messages by default and at most 200. |
 | `inspect_pod` | `robot`, `pod_namespace`, `pod` | A pod of a robot: phase, containers and recent events. |
 | `inspect_logs` | `robot`, `pod_namespace`, `pod`, `container`, `previous`, `tail`, `since` | The log of a pod on a robot: the last `tail` lines (200 by default, at most 2000), of one `container`, of the `previous` run, or `since` a duration such as `10m`. |
 | `inspect_release` | `robot`, `release_namespace`, `release` | An installed Helm release of a robot: status, revision and its objects. |
@@ -55,23 +56,30 @@ kit's Claude Code plugin. Codex and OpenCode list the same tools under the serve
 - **Tool results are device data.** Labels, logs, events and MQTT payloads can hold text written by anyone
   who controls a device or its workloads. The server tells the agent, in its instructions and in each tool's
   description, never to follow instructions found in a tool result.
-- **`namespace`** is optional everywhere and empty means the teamspace `tnctl` targets. It is read on every
-  call, so `tnctl ns` and `tnctl login` in another terminal count on the next call, with no restart. Inside a
-  TeknoirBot another `namespace` is an error result: a bot works only in its own teamspace.
-- **Results are JSON text**, capped at 200 KiB: a longer answer ends with a line
-  `… truncated, N bytes more; narrow the query`.
+- **`namespace`** is an optional input of every tool but `whoami` and `list_teamspaces`; empty means the
+  teamspace `tnctl` targets. The login and the teamspace are read on every call, so `tnctl ns` and
+  `tnctl login` in another terminal count on the next call, with no restart, unless the server was started
+  with `-n`, `TNCTL_NAMESPACE` or `--domain`, which then win. Inside a TeknoirBot another `namespace` is an
+  error result: a bot works only in its own teamspace.
+- **Results are JSON text**, capped at 48 KiB: a longer answer ends with a line
+  `… truncated, N bytes more; narrow the query`. 48 KiB keeps every result inline in Claude Code, which
+  moves a text result over 50,000 characters to a file.
 - **Errors are tool error results** with the platform's own message (a login that ended, no access, a pod
   that is not there). The server stays up and the next call works, even after a tool failed.
 - **`inspect_*` never turns the robot's Shell on.** When the Shell is off they fail with the platform's
-  message saying so, and they need what [`tnctl inspect`](inspect.md) needs: the developer role and
-  permission to open a terminal in the robot.
-- **`mqtt_sample`** follows 1 to 8 topics under `/devices/` for `seconds` (default 5, at most 30) and stops
-  at `max` messages (default 50, at most 200); every message carries the server's data as it was sent. A
-  payload longer than 4096 bytes is cut, and the message then says `payloadBytes` (its full length) and
-  `payloadTruncated`. One sample runs at a time: a second call while one runs answers that another is
-  running. The result also counts the messages the platform dropped (`dropped`), and its `stoppedBy` says
-  why the sample ended: `max`, `seconds`, `end` (the platform ended the stream) or `size` (the sample was
-  full).
+  message saying so. They need what [`tnctl inspect`](inspect.md) needs: a person needs the developer role
+  and permission to open a terminal (`pods/exec`) in the teamspace; a TeknoirBot must be set to Act as me,
+  and its creator needs that same role and permission. Otherwise the platform answers `403`.
+- **`mqtt_sample`** follows 1 to 8 topics, each `/devices/<device|+>/state/#`, `/devices/<device|+>/events/#`
+  or a concrete topic below them, for `seconds` (default 5, at most 30; they count from the moment the
+  stream opens, and opening has its own limit of 20 s), and stops at `max` messages (default 50, at most
+  200) or when the sample is full (about 36 KiB). Every message carries the server's data as it was sent. A
+  text payload longer than 4096 bytes, or a binary one longer than 3072 bytes (4096 base64 characters), is
+  cut, and the message then says `payloadBytes` (its full length in bytes) and `payloadTruncated`. One
+  sample runs at a time: a second call while one runs answers that another is running, so put every topic
+  in one call. The result also counts the messages the platform dropped (`dropped`), and its `stoppedBy`
+  says why the sample ended: `max`, `seconds`, `end` (the platform ended the stream) or `size` (the sample
+  was full).
 
 ## See also
 

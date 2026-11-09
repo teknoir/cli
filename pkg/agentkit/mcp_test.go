@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -253,7 +254,7 @@ func jsonUnmarshal(t *testing.T, s string, v any) error {
 func TestMCPCodexQuotedHeader(t *testing.T) {
 	o, _, project := mcpOpts(t, AgentCodex, ScopeProject)
 	path := filepath.Join(project, ".codex", "config.toml")
-	body := "model = \"gpt-5-codex\"\n\n[mcp_servers.\"teknoir\"]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"
+	body := "model = \"gpt-5-codex\"\n\n[mcp_servers.\"teknoir\"]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n" + codexEnvLine + "\n"
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +296,7 @@ func TestMCPCodexMissingFile(t *testing.T) {
 	if _, err := Install(o); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := readFile(t, path), "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"; got != want {
+	if got, want := readFile(t, path), tomlEntryBlock; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 	// Uninstall removes the entry and leaves the (now empty) file.
@@ -304,5 +305,67 @@ func TestMCPCodexMissingFile(t *testing.T) {
 	}
 	if got := readFile(t, path); strings.Contains(got, "teknoir") {
 		t.Errorf("uninstall left the entry:\n%s", got)
+	}
+}
+
+// Codex starts a stdio MCP server with a cleared environment, so the kit's entry must pass the
+// variables tnctl reads: bot mode's, and the ones of the teamspace and domain a person targets.
+func TestMCPCodexEntryPassesTheEnvironment(t *testing.T) {
+	o, _, project := mcpOpts(t, AgentCodex, ScopeProject)
+	path := filepath.Join(project, ".codex", "config.toml")
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := tomlParse(readFile(t, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, ok := tomlServer(parsed)
+	if !ok {
+		t.Fatalf("the entry is not a table: %v", srv)
+	}
+	got, ok := srv["env_vars"].([]any)
+	if !ok {
+		t.Fatalf("env_vars %v, want an array", srv["env_vars"])
+	}
+	var names []string
+	for _, v := range got {
+		s, _ := v.(string)
+		names = append(names, s)
+	}
+	want := []string{"TEKNOIRBOT_API", "TNCTL_BOT_KEY_FILE", "TEKNOIRBOT_NAMESPACE", "TEKNOIR_DOMAIN", "TNCTL_NAMESPACE", "TNCTL_DOMAIN"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("env_vars %v, want %v", names, want)
+	}
+}
+
+// An entry the kit wrote before env_vars is a differing entry: a plain run keeps it and says so, and
+// --force replaces it with the current one.
+func TestMCPCodexOldEntryDiffers(t *testing.T) {
+	o, _, project := mcpOpts(t, AgentCodex, ScopeProject)
+	path := filepath.Join(project, ".codex", "config.toml")
+	old := "model = \"gpt-5\"\n\n[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Install(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != old {
+		t.Errorf("the old entry was replaced without --force:\n%s", got)
+	}
+	if !hasAction(res, ActionSkip, path) || len(res.Warnings) == 0 || !strings.Contains(res.Warnings[0], "different") {
+		t.Errorf("the old entry was not reported as differing: %v %v", actionsOf(res), res.Warnings)
+	}
+	o.Force = true
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); !strings.Contains(got, "env_vars") {
+		t.Errorf("--force did not replace the old entry:\n%s", got)
 	}
 }

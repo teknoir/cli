@@ -13,6 +13,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/teknoir/cli/pkg/api"
+	"github.com/teknoir/cli/pkg/config"
 )
 
 // mcpToolNames are the tools of the server. Names are part of the contract.
@@ -308,6 +310,18 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 			}
 		}
 	}
+	// The description is what an agent reads: every stop of the sample, the payload cut and the one
+	// sample at a time must be in it.
+	for _, tool := range tools.Tools {
+		if tool.Name != "mqtt_sample" {
+			continue
+		}
+		for _, want := range []string{"when the sample is full", "stoppedBy", "payloadTruncated", "One sample runs at a time"} {
+			if !strings.Contains(tool.Description, want) {
+				t.Errorf("the mqtt_sample description lacks %q: %q", want, tool.Description)
+			}
+		}
+	}
 	for _, tool := range tools.Tools {
 		if strings.HasPrefix(tool.Name, "inspect_") && !strings.HasSuffix(tool.Description, mcpInspectNote+" "+mcpUntrustedNote) {
 			t.Errorf("%s: the description lacks the Shell and access note: %q", tool.Name, tool.Description)
@@ -315,6 +329,15 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 	}
 	if got := cs.InitializeResult().Instructions; got != mcpInstructions {
 		t.Errorf("instructions %q", got)
+	}
+}
+
+// The bot half of the note names the creator's own terminal access: the platform checks pods/exec on
+// the creator, not only that it may change things.
+func TestMCPInspectNoteNamesTheCreatorsTerminalAccess(t *testing.T) {
+	bot := mcpInspectNote[strings.Index(mcpInspectNote, "TeknoirBot"):]
+	if !strings.Contains(bot, "Act as me") || !strings.Contains(bot, "who has both") {
+		t.Errorf("the bot half %q does not say the creator needs pods/exec", bot)
 	}
 }
 
@@ -603,6 +626,37 @@ func TestMCPSeesALoginMadeWhileItRuns(t *testing.T) {
 	}
 }
 
+// list_teamspaces reads the login again on every call, as the teamspace tools do: a tnctl login to
+// another domain made while the server runs counts on the next call.
+func TestMCPListTeamspacesSeesADomainChangedWhileItRuns(t *testing.T) {
+	noBotMode(t)
+	useLogin(t, map[string]any{"email": "a@b.c"}, "teknoir-demo")
+	initConfig()
+	p := newFakePlatform(t)
+	p.on("GET", "/api/device/fleet/teamspaces", 200, `[]`)
+	e, _ := testEnv(t, p, nil)
+	fake := e.domainFleet
+	e.domainFleet = func() (*api.Fleet, string, error) { // the domain defaultEnv.domainFleet would use
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, "", err
+		}
+		if cfg.Domain != "other.example" {
+			return nil, "", fmt.Errorf("domain %q, want other.example", cfg.Domain)
+		}
+		return fake()
+	}
+	cs := mcpClient(t, newMCPServer(e))
+	b, _ := json.Marshal(map[string]any{"domain": "other.example", "auths": map[string]any{
+		"other_example": map[string]any{"access_token": testJWT(t, map[string]any{"email": "a@b.c"}), "namespace": "x"}}})
+	if err := os.WriteFile(cfgFile, b, 0o600); err != nil { // tnctl login --domain other.example
+		t.Fatal(err)
+	}
+	if res := mcpCall(t, cs, "list_teamspaces", nil); res.IsError {
+		t.Errorf("after the login to other.example: %s", mcpText(t, res))
+	}
+}
+
 // ---------- (g) input refusals ----------
 
 func TestMCPRefusesBadInput(t *testing.T) {
@@ -763,10 +817,10 @@ func TestMCPTruncatesALongResultAtANewline(t *testing.T) {
 		t.Error("structured content: the uncut answer is sent again")
 	}
 	full := mcpIndented(t, body)
-	const limit = 200 << 10
+	const limit = 48 << 10
 	kept := strings.LastIndex(full[:limit], "\n")
-	if kept < 100<<10 {
-		t.Fatalf("the fixture has no newline in the last 100 KiB")
+	if kept < 24<<10 {
+		t.Fatalf("the fixture has no newline in the last 24 KiB")
 	}
 	want := full[:kept] + fmt.Sprintf("\n… truncated, %d bytes more; narrow the query", len(full)-kept)
 	if text != want {
@@ -776,7 +830,7 @@ func TestMCPTruncatesALongResultAtANewline(t *testing.T) {
 
 func TestMCPTruncatesASingleLongLineAtARuneBoundary(t *testing.T) {
 	noBotMode(t)
-	const limit = 200 << 10
+	const limit = 48 << 10
 	body := fmt.Sprintf(`{"text":%q}`, strings.Repeat("ü", 150<<10))
 	p := newFakePlatform(t)
 	p.on("GET", "/robots/vs/inspect/pods/default/p/logs", 200, body)
@@ -807,7 +861,7 @@ func TestMCPTruncatesASingleLongLineAtARuneBoundary(t *testing.T) {
 	if got, want := more, len(full)-kept; got != want {
 		t.Errorf("note says %d bytes more, %d are gone", got, want)
 	}
-	if kept < 100<<10 || kept > limit || kept < limit-utf8.UTFMax {
+	if kept < 24<<10 || kept > limit || kept < limit-utf8.UTFMax {
 		t.Errorf("kept %d of %d bytes", kept, len(full))
 	}
 }
@@ -820,14 +874,14 @@ func TestMCPSmallResultHasNoTruncationLine(t *testing.T) {
 	}
 }
 
-// The cut prefers the last newline before the cap only when it keeps at least 100 KiB; the cap is
-// 200 KiB. Each case puts the indented answer's last newline before the cap at nl.
+// The cut prefers the last newline before the cap only when it keeps at least 24 KiB; the cap is
+// 48 KiB. Each case puts the indented answer's last newline before the cap at nl.
 func TestMCPTruncationNewlineThreshold(t *testing.T) {
 	noBotMode(t)
 	for _, c := range []struct{ nl, kept int }{
-		{100 << 10, 100 << 10},   // exactly 100 KiB kept: cut at the newline
-		{100<<10 - 1, 200 << 10}, // one byte less: the line is cut at the cap
-		{150 << 10, 150 << 10},
+		{24 << 10, 24 << 10},   // exactly 24 KiB kept: cut at the newline
+		{24<<10 - 1, 48 << 10}, // one byte less: the line is cut at the cap
+		{36 << 10, 36 << 10},
 	} {
 		body := fmt.Sprintf(`{"a":%q,"b":%q}`, strings.Repeat("x", c.nl-12), strings.Repeat("y", 150<<10))
 		p := newFakePlatform(t)
@@ -836,7 +890,7 @@ func TestMCPTruncationNewlineThreshold(t *testing.T) {
 		cs := mcpClient(t, newMCPServer(e))
 		text := mcpText(t, mcpCall(t, cs, "get_overview", nil))
 		full := mcpIndented(t, body)
-		if got := strings.LastIndex(full[:200<<10], "\n"); got != c.nl {
+		if got := strings.LastIndex(full[:48<<10], "\n"); got != c.nl {
 			t.Fatalf("fixture: last newline before the cap at %d, want %d", got, c.nl)
 		}
 		want := full[:c.kept] + fmt.Sprintf("\n… truncated, %d bytes more; narrow the query", len(full)-c.kept)
@@ -1163,15 +1217,36 @@ func mcpSampleFast(t *testing.T) {
 	t.Cleanup(func() { mcpSampleUnit = old })
 }
 
+// mcpSampleOpenFast shortens the bound on opening the stream, so a test need not wait 20 s.
+func mcpSampleOpenFast(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := mcpSampleOpenMax
+	mcpSampleOpenMax = d
+	t.Cleanup(func() { mcpSampleOpenMax = old })
+}
+
 // mcpSSE serves the MQTT stream of the teamspace: write sends what arrives, and with hold the
 // request stays open until the client ends it. ended receives one value per request that ended; the
 // headers are flushed before write, so a test can cancel the call once the server holds it.
 func mcpSSE(t *testing.T, write func(w http.ResponseWriter), hold bool) (*httptest.Server, chan struct{}) {
 	t.Helper()
+	return mcpSSEAfter(t, 0, write, hold)
+}
+
+// mcpSSEAfter is mcpSSE whose platform waits before its headers, as it does while it reads the
+// broker login, connects and subscribes. A status over 0 is answered instead of the stream.
+func mcpSSEAfter(t *testing.T, before time.Duration, write func(w http.ResponseWriter), hold bool) (*httptest.Server, chan struct{}) {
+	t.Helper()
 	ended := make(chan struct{}, 8)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/fleet/teknoir-demo/mqtt/stream" {
 			http.NotFound(w, r)
+			return
+		}
+		select {
+		case <-time.After(before):
+		case <-r.Context().Done():
+			ended <- struct{}{}
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1188,6 +1263,26 @@ func mcpSSE(t *testing.T, write func(w http.ResponseWriter), hold bool) (*httpte
 		if hold {
 			<-r.Context().Done()
 		}
+		ended <- struct{}{}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, ended
+}
+
+// mcpSSERefuse answers every stream request with status and body, after before.
+func mcpSSERefuse(t *testing.T, before time.Duration, status int, body string) (*httptest.Server, chan struct{}) {
+	t.Helper()
+	ended := make(chan struct{}, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(before):
+		case <-r.Context().Done():
+			ended <- struct{}{}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
 		ended <- struct{}{}
 	}))
 	t.Cleanup(srv.Close)
@@ -1343,6 +1438,34 @@ func TestMCPMqttSampleCountsDropped(t *testing.T) {
 	if got.Dropped != 5 {
 		t.Errorf("dropped %d, want 5", got.Dropped)
 	}
+	if len(got.Messages) != 0 {
+		t.Errorf("%d messages, want none: the event named other was not ignored", len(got.Messages))
+	}
+}
+
+func TestMCPMqttSampleDefaults(t *testing.T) {
+	t.Run("max 50", func(t *testing.T) {
+		srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
+			for i := 0; i < 60; i++ {
+				_, _ = io.WriteString(w, mcpSSEMsg(fmt.Sprintf("/devices/d1/state/x%d", i), "m"))
+			}
+		}, false)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+		got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)))
+		if len(got.Messages) != 50 || got.StoppedBy != "max" {
+			t.Errorf("%d messages, stopped by %q, want 50 and max", len(got.Messages), got.StoppedBy)
+		}
+	})
+	t.Run("seconds 5", func(t *testing.T) {
+		mcpSampleFast(t) // 5 seconds are 500 ms
+		srv, _ := mcpSSE(t, nil, true)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+		start := time.Now()
+		got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"seconds": 0})))
+		if d := time.Since(start); d < 500*time.Millisecond || d > 2*time.Second || got.StoppedBy != "seconds" {
+			t.Errorf("stopped by %q after %s, want seconds after 500 ms (5 x 100 ms)", got.StoppedBy, d)
+		}
+	})
 }
 
 func TestMCPMqttSampleStreamErrorIsAnErrorResult(t *testing.T) {
@@ -1358,18 +1481,29 @@ func TestMCPMqttSampleStreamErrorIsAnErrorResult(t *testing.T) {
 			t.Errorf("%+v %q", res, mcpText(t, res))
 		}
 		mcpWaitEnded(t, ended)
-	})
 
-	t.Run("data that is not JSON", func(t *testing.T) {
-		srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
-			_, _ = io.WriteString(w, "event: error\ndata: not-json\n\n")
-		}, false)
-		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
-
-		if res := mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)); !res.IsError {
-			t.Errorf("a damaged error event was a success: %q", mcpText(t, res))
+		// The sample that failed gave its slot back: the next call reaches the platform again.
+		res2 := mcpCall(t, cs, "mqtt_sample", sampleArgs(nil))
+		if !res2.IsError || !strings.Contains(mcpText(t, res2), msg) {
+			t.Errorf("after an error event the slot was not released: %q", mcpText(t, res2))
 		}
+		mcpWaitEnded(t, ended)
 	})
+}
+
+// A damaged error or message event is an error result with the parser's text: no panic (addTool
+// would hide it behind its own error result) and no message skipped in silence.
+func TestMCPMqttSampleBadEvents(t *testing.T) {
+	for _, c := range []struct{ event, want string }{
+		{"event: error\ndata: not-json\n\n", "unexpected error event from the MQTT stream"},
+		{"event: message\ndata: not-json\n\n", "unexpected message from the MQTT stream"},
+	} {
+		srv, _ := mcpSSE(t, func(w http.ResponseWriter) { _, _ = io.WriteString(w, c.event) }, false)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+		if res := mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)); !res.IsError || !strings.Contains(mcpText(t, res), c.want) {
+			t.Errorf("%q: %v %q, want an error result with %q", c.event, res.IsError, mcpText(t, res), c.want)
+		}
+	}
 }
 
 func TestMCPMqttSampleKeepsTheServersFields(t *testing.T) {
@@ -1407,7 +1541,8 @@ func TestMCPMqttSampleKeepsTheServersFields(t *testing.T) {
 
 func TestMCPMqttSampleCutsALongPayload(t *testing.T) {
 	t.Run("text", func(t *testing.T) {
-		long := strings.Repeat("ü", (100<<10)/2) // 102400 bytes
+		// 102401 bytes; byte 4096 is the second byte of a "ü", so the cut must step back one byte.
+		long := "a" + strings.Repeat("ü", (100<<10)/2)
 		srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
 			_, _ = io.WriteString(w, mcpSSEMsg("/devices/d1/state/x", long))
 		}, false)
@@ -1422,11 +1557,11 @@ func TestMCPMqttSampleCutsALongPayload(t *testing.T) {
 		if err := json.Unmarshal(fields["payload"], &payload); err != nil {
 			t.Fatalf("payload %q: %v", fields["payload"], err)
 		}
-		if len(payload) > 4096 || !utf8.ValidString(payload) {
-			t.Errorf("payload is %d bytes (valid %v), want at most 4096 at a rune boundary",
-				len(payload), utf8.ValidString(payload))
+		if len(payload) != 4095 || !utf8.ValidString(payload) || strings.ContainsRune(payload, utf8.RuneError) {
+			t.Errorf("payload is %d bytes (valid %v, U+FFFD %v), want 4095: cut where a rune starts",
+				len(payload), utf8.ValidString(payload), strings.ContainsRune(payload, utf8.RuneError))
 		}
-		if got, want := string(fields["payloadBytes"]), "102400"; got != want {
+		if got, want := string(fields["payloadBytes"]), "102401"; got != want {
 			t.Errorf("payloadBytes %s, want %s", got, want)
 		}
 		if got := string(fields["payloadTruncated"]); got != "true" {
@@ -1460,6 +1595,40 @@ func TestMCPMqttSampleCutsALongPayload(t *testing.T) {
 			t.Errorf("payloadBytes %s, want %s", got, want)
 		}
 	})
+}
+
+// TestMCPMqttSampleSizeCountsEscapes writes the data as the platform's JSON.stringify does: <, >, &
+// and U+2028 as they are. json.Marshal escapes each to six bytes in the result, so the size stop must
+// count the escaped form, or the result outgrows mcpMaxResult and is cut into JSON that does not parse.
+func TestMCPMqttSampleSizeCountsEscapes(t *testing.T) {
+	for _, c := range []struct{ name, payload string }{
+		{"lt", strings.Repeat("<", 4096)},
+		{"amp", strings.Repeat("&", 4000)},
+		{"u2028", strings.Repeat("\u2028", 1365)},
+		{"html", strings.Repeat("<a>&</a>", 512)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mcpSampleFast(t)
+			srv, ended := mcpSSE(t, func(w http.ResponseWriter) {
+				for i := 0; i < 200; i++ {
+					_, _ = io.WriteString(w, "event: message\ndata: {\"topic\":\"/devices/d1/state/x"+strconv.Itoa(i)+
+						"\",\"payload\":\""+c.payload+"\",\"retain\":false,\"ts\":\"t\"}\n\n")
+				}
+			}, true)
+			cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+			res := mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"max": 200, "seconds": 30}))
+			text := mcpText(t, res)
+			var got mcpSampleOut
+			err := json.Unmarshal([]byte(text), &got)
+			if res.IsError || err != nil || got.StoppedBy != "size" || strings.Contains(text, "truncated") {
+				tail := text[max(0, len(text)-80):]
+				t.Errorf("%d bytes (JSON error %v), %d messages, stopped by %q, ends %q; want size and no truncated line",
+					len(text), err, len(got.Messages), got.StoppedBy, tail)
+			}
+			mcpWaitEnded(t, ended)
+		})
+	}
 }
 
 func TestMCPMqttSampleStopsAtTheSizeCap(t *testing.T) {
@@ -1548,14 +1717,15 @@ func TestMCPMqttSampleRunsOneAtATime(t *testing.T) {
 	}, true)
 	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
 
-	first := make(chan *mcp.CallToolResult, 1)
-	go func() {
+	type firstRes struct {
+		res *mcp.CallToolResult
+		err error
+	}
+	first := make(chan firstRes, 1)
+	go func() { // it only sends: the test goroutine reports
 		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "mqtt_sample",
 			Arguments: sampleArgs(map[string]any{"seconds": 30})})
-		if err != nil {
-			t.Errorf("the first sample: %v", err)
-		}
-		first <- res
+		first <- firstRes{res, err}
 	}()
 	select {
 	case <-started:
@@ -1563,12 +1733,15 @@ func TestMCPMqttSampleRunsOneAtATime(t *testing.T) {
 		t.Fatal("the first sample did not start")
 	}
 	res := mcpCall(t, cs, "mqtt_sample", sampleArgs(nil))
-	if want := "another mqtt_sample is running; try again when it ends"; !res.IsError || mcpText(t, res) != want {
+	if want := "another mqtt_sample is running; put all topics (up to 8) in one call, or try again when it ends"; !res.IsError || mcpText(t, res) != want {
 		t.Errorf("%+v %q, want %q", res, mcpText(t, res), want)
 	}
 	select {
-	case res := <-first:
-		if got, _ := mcpSampleOf(t, res); got.StoppedBy != "seconds" {
+	case r := <-first:
+		if r.err != nil {
+			t.Fatalf("the first sample: %v", r.err)
+		}
+		if got, _ := mcpSampleOf(t, r.res); got.StoppedBy != "seconds" {
 			t.Errorf("the first sample stopped by %q", got.StoppedBy)
 		}
 	case <-time.After(5 * time.Second):
@@ -1645,10 +1818,72 @@ func TestMCPMqttSampleInBotMode(t *testing.T) {
 	if n != 0 {
 		t.Errorf("%d requests for another teamspace", n)
 	}
+
+	// The refusal gave the slot back: a sample of the bot's own teamspace runs.
+	got, _ = mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(nil)))
+	if got.StoppedBy != "end" || len(got.Messages) != 1 {
+		t.Errorf("after the refusal: %d messages, stopped by %q, want 1 and end", len(got.Messages), got.StoppedBy)
+	}
+	p2.mu.Lock()
+	n = *conns2
+	p2.mu.Unlock()
+	if n != 1 {
+		t.Errorf("%d requests, want 1", n)
+	}
 }
 
-func TestMCPMqttSampleEndsWhenTheServerStops(t *testing.T) {
+// The listening time starts when the stream opens: a platform that never opens it is an error after
+// the open bound, not an empty success.
+func TestMCPMqttSampleOpenBound(t *testing.T) {
 	mcpSampleFast(t)
+	mcpSampleOpenFast(t, 2*mcpSampleUnit)
+	srv, _ := mcpSSEAfter(t, 3*mcpSampleUnit, nil, true)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	res := mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"seconds": 30}))
+	if !res.IsError || !strings.Contains(mcpText(t, res), "did not open the MQTT stream") {
+		t.Errorf("%v %q, want an error result saying the stream did not open", res.IsError, mcpText(t, res))
+	}
+}
+
+// A platform that answers 503 after its own waiting time is an error result with its message, even
+// when the call's `seconds` would have run out before that: `seconds` counts from the open, not from
+// the call.
+func TestMCPMqttSamplePlatformRefusalIsNotAnEmptySuccess(t *testing.T) {
+	mcpSampleFast(t)
+	const msg = "The MQTT broker cannot be reached right now."
+	srv, _ := mcpSSERefuse(t, 3*mcpSampleUnit, http.StatusServiceUnavailable,
+		`{"error":{"name":"ServiceUnavailable","message":"`+msg+`"}}`)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	res := mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"seconds": 1}))
+	if !res.IsError || !strings.Contains(mcpText(t, res), msg) {
+		t.Errorf("%v %q, want an error result with %q", res.IsError, mcpText(t, res), msg)
+	}
+}
+
+// The platform's own waiting time before its headers is not listening time: a stream that opens
+// after it still listens for all of `seconds`.
+func TestMCPMqttSampleListensFromTheOpen(t *testing.T) {
+	mcpSampleFast(t)
+	srv, ended := mcpSSEAfter(t, 3*mcpSampleUnit, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, mcpSSEMsg("/devices/d1/state/x", "one"))
+	}, true)
+	cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+
+	start := time.Now()
+	got, _ := mcpSampleOf(t, mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"seconds": 1})))
+	if len(got.Messages) != 1 || got.StoppedBy != "seconds" {
+		t.Errorf("%d messages, stopped by %q, want 1 and seconds", len(got.Messages), got.StoppedBy)
+	}
+	if d := time.Since(start); d < 3*mcpSampleUnit {
+		t.Errorf("the sample ended after %s, before the stream opened", d)
+	}
+	mcpWaitEnded(t, ended)
+}
+
+// The sample lasts the real 30 seconds: only the receiving middleware can end it within the guard.
+func TestMCPMqttSampleEndsWhenTheServerStops(t *testing.T) {
 	started := make(chan struct{}, 1)
 	srv, ended := mcpSSE(t, func(http.ResponseWriter) { started <- struct{}{} }, true)
 	e := mcpSampleEnv(t, srv)

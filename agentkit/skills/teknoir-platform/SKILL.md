@@ -202,7 +202,8 @@ read-only and all scoped to your identity:
 `list_robot_types`, `list_fleets`, `get_overview`, `get_problems`, `get_config`, `list_kinds`,
 `prom_query`, `inspect_pod`, `inspect_logs`, `inspect_release`, `mqtt_sample`.
 
-The three `inspect_*` tools never turn a Shell on and fail with `terminal_off` when it is off.
+The three `inspect_*` tools never turn a Shell on; when it is off they fail with the platform's
+own message saying so (the result names no error code).
 `mqtt_sample` collects a few messages and stops.
 
 The server writes nothing. Every write goes through `tnctl`, so that the TeknoirBot's permission rules

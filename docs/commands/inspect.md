@@ -18,8 +18,10 @@ The Shell of vision-station-01 is off; ask a person to turn it on.
 
 and `tnctl` prints exactly that (exit 5). Turn it on in the platform's UI (or with `tnctl exec`) and ask again.
 
-As a person the command needs the same access as opening a terminal in the robot; a viewer or someone without
-`pods/exec` gets the platform's `403` (exit 6). Inside a TeknoirBot it needs no access of its own.
+As a person the command needs the same access as opening a terminal in the robot: the developer role and
+`pods/exec` in the teamspace; a viewer or someone without `pods/exec` gets the platform's `403` (exit 6). Inside
+a TeknoirBot the bot must be set to Act as me, and its creator needs that same access; otherwise it gets the
+same `403` (exit 6).
 
 ## `inspect pod`
 

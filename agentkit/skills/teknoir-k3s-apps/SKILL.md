@@ -137,8 +137,9 @@ volume and the containerd copy of every image all live on it, plus your home at
   on their own machine (see People on a laptop).
 - **Commit to git.** The agent may clone, commit locally and show the change (`git diff`,
   `git log -p`), but never pushes. Never ask for, paste or store a git or registry token on the
-  bot's computer: its home persists, and its creator and teamspace admins open it. Give the person
-  the repository, the branch, the diff and the exact `git` commands to push from their own machine.
+  bot's computer: its home persists, and its creator (and teamspace admins, unless it acts as its
+  creator) open it. Give the person the repository, the branch, the diff and the exact `git`
+  commands to push from their own machine.
 - **Add a Deployment to a device's own configuration** with `tnctl config` (`teknoir-config`). A
   bot may add a local item of a workload kind to a device it can see (only Pod, Service,
   ConfigMap, Secret, PVC, Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, CronJob, Ingress,

@@ -112,7 +112,9 @@ Defaults are 10 seconds and 50 messages, at most 60 seconds and 500 messages.
 When the agent has the Teknoir tool server registered (the `teknoir` server of `tnctl mcp`), the
 `mqtt_sample` tool takes `topics` (1 to 8), `seconds` (default 5, at most 30) and `max` (default
 50, at most 200) and returns `{"messages":[...],"dropped":N,"stoppedBy":...}`. It is the same read
-as the command, with no shell. Prefer the command when you need to process the output.
+as the command, with no shell, but a payload over 4096 bytes (a binary one over 3072) is cut
+(`payloadTruncated`, `payloadBytes`) and a sample stops when it is full (`stoppedBy: "size"`).
+Prefer the command when you need whole payloads or to process the output.
 
 ## Payload formats
 

@@ -51,7 +51,7 @@ and the objects of an installed Helm release. It is read-only.
 
 tnctl asks the platform not to turn the robot's Shell on: when the Shell is off it answers "The Shell
 of <robot> is off; ask a person to turn it on." As a person it needs the same access as opening a
-terminal in it; inside a TeknoirBot it needs no access of its own.`,
+terminal in it; inside a TeknoirBot the bot must be set to Act as me by a creator who has that access.`,
 		Example: `  tnctl inspect pod vision-station-01 default/whoami-7d9f-x2k4p
   tnctl inspect logs vision-station-01 default/whoami-7d9f-x2k4p --tail 50
   tnctl inspect logs vision-station-01 default/notebook-0 -c notebook --previous

@@ -50,7 +50,11 @@ With no `--agent` every agent is installed for, in the user scope.
 
 - `--mcp` registers the read-only `teknoir` MCP server ([`tnctl mcp`](mcp.md)) in the agent's config
   file, merging into what is there: every other server and key survives. A `teknoir` entry that differs is kept and
-  warned about unless `--force` replaces it.
+  warned about unless `--force` replaces it. Codex starts an MCP server with a cleared environment, so the
+  kit's Codex entry names the variables `tnctl` reads in `env_vars` (bot mode's `TEKNOIRBOT_API`,
+  `TNCTL_BOT_KEY_FILE`, `TEKNOIRBOT_NAMESPACE` and `TEKNOIR_DOMAIN`, and `TNCTL_NAMESPACE` and
+  `TNCTL_DOMAIN`); an install from an older `tnctl` has no `env_vars` line, so `tnctl agent install --mcp
+  --force` updates it.
 - `--hooks` installs the guard hook for Claude Code and adds a `PreToolUse` entry for `Bash` and the
   `teknoir` MCP tools (`mcp__teknoir__*`, or `mcp__plugin_teknoir_teknoir__*` when the server comes from
   the kit's plugin) to `~/.claude/settings.json` (project: `.claude/settings.json`), keeping the other
@@ -87,7 +91,7 @@ if it is unchanged, and kept (and reported) if you changed it.
 | Agent | `--user` | `--project` | Entry |
 |---|---|---|---|
 | Claude Code | `~/.claude.json`, key `mcpServers` | `.mcp.json`, key `mcpServers` | `{"type":"stdio","command":"tnctl","args":["mcp"]}` |
-| Codex | `~/.codex/config.toml` | `.codex/config.toml` | `[mcp_servers.teknoir]`, `command = "tnctl"`, `args = ["mcp"]` |
+| Codex | `~/.codex/config.toml` | `.codex/config.toml` | `[mcp_servers.teknoir]`, `command = "tnctl"`, `args = ["mcp"]`, `env_vars = [...]` |
 | OpenCode | `~/.config/opencode/opencode.jsonc` if it exists, else `opencode.json` | `opencode.jsonc` if it exists, else `opencode.json` | under `mcp.servers`: `{"type":"local","command":["tnctl","mcp"]}` |
 
 JSON files keep every foreign key and value as JSON; `tnctl` writes them with 2-space indent, so an
