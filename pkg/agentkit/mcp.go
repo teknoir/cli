@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -729,16 +730,18 @@ func tomlTableRange(text, name string) (int, int, bool) {
 		end--
 	}
 	// The run only starts where the text above it is complete TOML: lines that start with # inside a
-	// multi-line string of the table are the table's, not comments of the user's.
-	for ; end < len(lines); end++ {
-		if strings.TrimSpace(text[offs[end]:]) == "" {
-			break
-		}
-		if _, err := tomlParse(text[:offs[end]]); err == nil {
-			return offs[startLine], offs[end], true
-		}
+	// multi-line string of the table are the table's, not comments of the user's. Both callers have
+	// parsed the whole text and every line from end on is blank or a comment, so once the text above one
+	// parses, the text above each later one does too: the first is found by bisection, and a long run of
+	// such lines costs a few parses, not one per line.
+	k := end + sort.Search(len(lines)-end, func(i int) bool {
+		_, err := tomlParse(text[:offs[end+i]])
+		return err == nil
+	})
+	if k == len(lines) || strings.TrimSpace(text[offs[k]:]) == "" {
+		return offs[startLine], len(text), true
 	}
-	return offs[startLine], len(text), true
+	return offs[startLine], offs[k], true
 }
 
 // separatorLine reports whether a line is blank or holds only a comment: it belongs to the table below

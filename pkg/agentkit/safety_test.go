@@ -2073,3 +2073,138 @@ func TestAgentsMDUninstallRefusalSaysRemove(t *testing.T) {
 		t.Errorf("the uninstall refusal of AGENTS.md does not say remove: %q", re.Reason)
 	}
 }
+
+// ---------- round 3 review (b381106) ----------
+
+// A long run of # lines inside a multi-line string after a fake header costs a few parses, not one per line:
+// a cloned repository's config.toml must not stall uninstall for minutes.
+func TestCodexTailScanNotQuadratic(t *testing.T) {
+	body := "[mcp_servers]\nteknoir = { command = \"tnctl\", args = [\"mcp\"] }\n\n[notes]\ns = \"\"\"\n[mcp_servers.teknoir]\n" +
+		strings.Repeat("#a\n", 64000) + "#\"\"\"\n"
+	o, path := codexConfig(t, body)
+	start := time.Now()
+	re := refusalOf(t, "a fake header in a long string", func() (*Result, error) { return Uninstall(o) })
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("uninstall took %v", d)
+	}
+	if !strings.Contains(re.Reason, "the edit would not parse") {
+		t.Errorf("the reason: %q", re.Reason)
+	}
+	if got := readFile(t, path); got != body {
+		t.Errorf("the file changed")
+	}
+}
+
+// A kit file the manifest records, below a skill directory that became a dangling link, is Changed
+// (install refuses it), not Missing.
+func TestListBlockedManifestFileChanged(t *testing.T) {
+	o, _, project := testOpts(t)
+	o.Scope, o.Agents = ScopeProject, []Agent{AgentClaude}
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(project, ".claude", "skills")
+	dir := filepath.Join(root, "teknoir-platform")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, "missing", dir)
+	res, err := List(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *RootStatus
+	for i := range res.Roots {
+		if res.Roots[i].Root == root {
+			found = &res.Roots[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no status for %s: %+v", root, res.Roots)
+	}
+	if !slices.Contains(found.Changed, skillRel) || slices.Contains(found.Missing, skillRel) {
+		t.Errorf("a recorded kit file below a blocked directory is not Changed: %+v", *found)
+	}
+}
+
+// R6: --force over a teknoir entry that is not a table at all says what to replace.
+func TestCodexForceNonTableEntryRefusalReplaces(t *testing.T) {
+	for _, body := range []string{
+		"[mcp_servers]\nteknoir = \"tnctl mcp\"\n",
+		"[[mcp_servers.teknoir]]\ncommand = \"/x\"\n",
+	} {
+		o, path := codexConfig(t, body)
+		o.Force = true
+		re := refusalOf(t, "a non-table entry under --force", func() (*Result, error) { return Install(o) })
+		if !strings.Contains(re.Reason, "edit it by hand: replace mcp_servers.teknoir with [mcp_servers.teknoir]") ||
+			strings.Contains(re.Reason, "add [mcp_servers") || strings.HasSuffix(re.Reason, "\n") {
+			t.Errorf("the reason for %q: %q", body, re.Reason)
+		}
+		if got := readFile(t, path); got != body {
+			t.Errorf("the file changed: %q", got)
+		}
+	}
+}
+
+// R6: foreignTarget's Lstat error branch (a file where the Codex directory belongs) is verb-neutral, and
+// the uninstall refusal says remove.
+func TestForeignTargetLstatErrorVerb(t *testing.T) {
+	o, home, _ := mcpOpts(t, AgentCodex, ScopeUser)
+	writeAt(t, filepath.Join(home, ".codex"), "not a directory\n", 0o644)
+	re := refusalOf(t, "a file where .codex belongs", func() (*Result, error) { return Install(o) })
+	if !strings.Contains(re.Reason, "edit it by hand: add [mcp_servers.teknoir]") {
+		t.Errorf("the install reason: %q", re.Reason)
+	}
+	re = refusalOf(t, "a file where .codex belongs", func() (*Result, error) { return Uninstall(o) })
+	if !strings.Contains(re.Reason, "edit it by hand: remove [mcp_servers.teknoir]") || strings.Contains(re.Reason, "add [mcp_servers") {
+		t.Errorf("the uninstall reason: %q", re.Reason)
+	}
+}
+
+// The uninstall refusal of a project-scope symlinked Codex config says remove, and the link's target is
+// not written.
+func TestCodexSymlinkUninstallSaysRemove(t *testing.T) {
+	o, _, project := mcpOpts(t, AgentCodex, ScopeProject)
+	cfg := filepath.Join(t.TempDir(), "config.toml")
+	writeAt(t, cfg, codexOurs, 0o644)
+	mustSymlink(t, cfg, filepath.Join(project, ".codex", "config.toml"))
+	re := refusalOf(t, "a symlinked config.toml", func() (*Result, error) { return Uninstall(o) })
+	if !strings.Contains(re.Reason, "edit it by hand: remove [mcp_servers.teknoir]") || strings.Contains(re.Reason, "add [mcp_servers") {
+		t.Errorf("the uninstall reason: %q", re.Reason)
+	}
+	if got := readFile(t, cfg); got != codexOurs {
+		t.Errorf("the link's target was written: %q", got)
+	}
+}
+
+// list does not read a config file that is not a regular file (a link to a directory here, standing in
+// for a device or a FIFO, which the suite must never open).
+func TestListConfigNotRegular(t *testing.T) {
+	o, home, _ := mcpOpts(t, AgentCodex, ScopeUser)
+	if err := os.MkdirAll(filepath.Join(home, "elsewhere"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, filepath.Join(home, "elsewhere"), filepath.Join(home, ".codex", "config.toml"))
+	res, err := List(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.MCP) != 1 || res.MCP[0].Registered || res.MCP[0].Note != "not a regular file" {
+		t.Errorf("mcp statuses %+v", res.MCP)
+	}
+}
+
+// In user scope a symlinked config file is still read by list (dotfiles, stow, home-manager).
+func TestListUserSymlinkFollowed(t *testing.T) {
+	o, home, _ := mcpOpts(t, AgentCodex, ScopeUser)
+	cfg := filepath.Join(t.TempDir(), "config.toml")
+	writeAt(t, cfg, codexOurs, 0o644)
+	mustSymlink(t, cfg, filepath.Join(home, ".codex", "config.toml"))
+	res, err := List(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.MCP) != 1 || !res.MCP[0].Registered {
+		t.Errorf("a user-scope symlinked config is not read: %+v", res.MCP)
+	}
+}
