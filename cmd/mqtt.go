@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -18,10 +19,13 @@ import (
 )
 
 // mqttReconnectDelay and mqttReconnectMax bound the pause between two connects of --reconnect: it
-// starts at 1 s and doubles to 30 s.
+// starts at 1 s and doubles to 30 s. A 503 the platform marks as temporary (Retry-After) replaces
+// that pause, at most mqttRetryAfterMax; mqttRetryAfterUnit is the seam that makes those tests fast.
 var (
 	mqttReconnectDelay = time.Second
 	mqttReconnectMax   = 30 * time.Second
+	mqttRetryAfterMax  = 60 * time.Second
+	mqttRetryAfterUnit = time.Second
 )
 
 type mqttFlags struct {
@@ -58,7 +62,8 @@ says so on stderr; when it reports an error the command prints it and exits non-
 
 --count stops after N messages and --seconds after S seconds (exit 0); Ctrl-C stops cleanly as
 well. --reconnect connects again after the stream ends or the network fails, waiting 1 s and
-doubling to 30 s; it does not reconnect after an error the platform reports or a refused request.`,
+doubling to 30 s, and waits out a temporary 503 for its Retry-After; it does not reconnect after
+an error the platform reports or a refused request.`,
 		Example: `  tnctl mqtt stream /devices/+/state/#
   tnctl mqtt stream /devices/vision-01/events/# --count 5 --json
   tnctl mqtt stream /devices/+/state/# --seconds 60 --reconnect`,
@@ -144,6 +149,8 @@ func (p *mqttPrinter) dropped(d *api.StreamDropped) {
 		reason = "too many messages too fast"
 	case "size":
 		reason = "the messages were too large"
+	case "slow":
+		reason = "the reader was too slow"
 	case "":
 		reason = "unknown reason"
 	}
@@ -161,8 +168,10 @@ func streamEndedError(e *api.StreamError) error {
 
 // runMqttStream follows the topics until --count, --seconds or Ctrl-C stops it. With --reconnect it
 // connects again after the stream ended or the network failed: never after a refused request (a
-// non-2xx answer) or an error event. Without it only a clean end of the stream, --count or --seconds
-// ends the command with 0; a network failure is an error.
+// non-2xx answer), an error event, or a 503 that says live MQTT is not configured. A 503 that the
+// platform marks as temporary waits its Retry-After instead of the backoff. Without --reconnect only
+// a clean end of the stream, --count or --seconds ends the command with 0; a network failure is an
+// error.
 func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFlags, p *mqttPrinter) error {
 	// The key is read once before the loop: a missing key answers at once, with or without
 	// --reconnect, and no request is sent.
@@ -172,7 +181,7 @@ func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFl
 	delay := mqttReconnectDelay
 	for {
 		before := p.events
-		done, retry, err := runMqttStreamOnce(ctx, fl, topics, f, p)
+		done, retry, wait, err := runMqttStreamOnce(ctx, fl, topics, f, p)
 		if done {
 			return err
 		}
@@ -181,6 +190,23 @@ func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFl
 		}
 		if !f.reconnect || !retry {
 			return err
+		}
+		if wait > 0 {
+			// The platform said how long to wait (a portal restart, a broker it cannot reach):
+			// use that instead of the backoff, and leave the backoff as it is.
+			if wait > mqttRetryAfterMax {
+				wait = mqttRetryAfterMax
+			}
+			msg := "the platform asked the stream to wait"
+			var ae *api.Error
+			if errors.As(err, &ae) && ae.Message != "" {
+				msg = ae.Message
+			}
+			_, _ = fmt.Fprintf(p.errw, "tnctl: %s; connecting again in %s\n", msg, wait)
+			if err := realSleep(ctx, wait); err != nil {
+				return nil // stopped while waiting to reconnect
+			}
+			continue
 		}
 		if p.events > before {
 			// The connection worked: the next wait starts at the first delay again.
@@ -199,49 +225,56 @@ func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFl
 
 // runMqttStreamOnce is one connection. done says the run is over (the limit was reached or a problem
 // no reconnect cures: its error is returned). retry says --reconnect may connect again; err then is
-// the network failure, or nil for a clean end of the stream.
-func runMqttStreamOnce(ctx context.Context, fl *api.Fleet, topics []string, f mqttFlags, p *mqttPrinter) (done, retry bool, err error) {
+// the network failure, or nil for a clean end of the stream. wait is a pause the platform asked for
+// (a 503 with Retry-After, 0: use the backoff).
+func runMqttStreamOnce(ctx context.Context, fl *api.Fleet, topics []string, f mqttFlags, p *mqttPrinter) (done, retry bool, wait time.Duration, err error) {
 	sub, err := fl.MqttStream(ctx, topics)
 	if err != nil {
 		var ae *api.Error
 		if errors.As(err, &ae) {
+			if ae.Status == http.StatusServiceUnavailable && ae.RetryAfter > 0 &&
+				!strings.Contains(ae.Message, "live MQTT is not configured") {
+				// The platform says it is temporary (a portal restart, a broker it cannot reach):
+				// --reconnect waits as long as its Retry-After says and connects again.
+				return false, true, time.Duration(ae.RetryAfter) * mqttRetryAfterUnit, classify(err)
+			}
 			// A refused request or a rejected key is not retried: it says nothing about the network.
-			return true, false, classify(err)
+			return true, false, 0, classify(err)
 		}
 		if errors.Is(err, api.ErrBotKey) || errors.Is(err, api.ErrBotAPIInsecure) ||
 			errors.Is(err, auth.ErrNotLoggedIn) || errors.Is(err, auth.ErrSessionExpired) {
 			// The token was read again for this connection and could not be: a missing or emptied bot
 			// key, or a person's login that ended. Connecting again would not help.
-			return true, false, classify(err)
+			return true, false, 0, classify(err)
 		}
 		if ctx.Err() != nil {
-			return true, false, nil
+			return true, false, 0, nil
 		}
-		return false, true, classify(err) // a network failure: --reconnect may try again
+		return false, true, 0, classify(err) // a network failure: --reconnect may try again
 	}
 	defer sub.Close()
 	for {
 		ev, rerr := sub.Next()
 		if rerr != nil {
 			if ctx.Err() != nil {
-				return true, false, nil // --seconds ran out, or Ctrl-C
+				return true, false, 0, nil // --seconds ran out, or Ctrl-C
 			}
 			if errors.Is(rerr, io.EOF) {
-				return false, true, nil // the server ended the stream cleanly
+				return false, true, 0, nil // the server ended the stream cleanly
 			}
-			return false, true, classify(rerr) // a network failure, or a stream event past the limit
+			return false, true, 0, classify(rerr) // a network failure, or a stream event past the limit
 		}
 		switch ev.Name {
 		case api.StreamEventMessage:
 			m, perr := api.ParseStreamMessage(ev.Data)
 			if perr != nil {
-				return true, false, perr
+				return true, false, 0, perr
 			}
 			if werr := p.message(m, ev.Data); werr != nil {
-				return true, false, werr
+				return true, false, 0, werr
 			}
 			if f.count > 0 && p.messages >= f.count {
-				return true, false, nil
+				return true, false, 0, nil
 			}
 		case api.StreamEventDropped:
 			if d, derr := api.ParseStreamDropped(ev.Data); derr == nil {
@@ -250,9 +283,9 @@ func runMqttStreamOnce(ctx context.Context, fl *api.Fleet, topics []string, f mq
 		case api.StreamEventError:
 			e, eerr := api.ParseStreamError(ev.Data)
 			if eerr != nil {
-				return true, false, eerr
+				return true, false, 0, eerr
 			}
-			return true, false, streamEndedError(e)
+			return true, false, 0, streamEndedError(e)
 		}
 	}
 }

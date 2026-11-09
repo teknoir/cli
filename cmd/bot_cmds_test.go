@@ -650,6 +650,29 @@ func TestMqttStreamOutput(t *testing.T) {
 	}
 }
 
+// A dropped event with the reason slow says the reader did not keep up.
+func TestMqttStreamDroppedSlowReason(t *testing.T) {
+	noBotMode(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, ": keepalive\n\n")
+		_, _ = io.WriteString(w, "event: dropped\ndata: {\"count\":3,\"reason\":\"slow\"}\n\n")
+	}))
+	defer srv.Close()
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
+			"teknoir.cloud", "teknoir-demo", nil
+	}
+	_, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errs, "tnctl: the platform dropped 3 message(s): the reader was too slow") {
+		t.Errorf("stderr %q", errs)
+	}
+}
+
 func TestMqttStreamCountAndSeconds(t *testing.T) {
 	noBotMode(t)
 	makeEnv := func(reply func(w http.ResponseWriter)) *cliEnv {
@@ -763,6 +786,143 @@ func TestMqttStreamDoesNotReconnectAfterARefusedRequest(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Errorf("%d connections, want 1", hits)
+	}
+}
+
+// A 503 the platform marks as temporary (a portal restart) is waited out for its Retry-After.
+func TestMqttStreamReconnectWaitsOutA503(t *testing.T) {
+	noBotMode(t)
+	oldUnit := mqttRetryAfterUnit
+	mqttRetryAfterUnit = time.Millisecond
+	t.Cleanup(func() { mqttRetryAfterUnit = oldUnit })
+
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		if n == 1 {
+			w.Header().Set("Retry-After", "5")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"name":"ServiceUnavailableError","message":"The portal is restarting. Connect again in a few seconds."}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+	}))
+	defer srv.Close()
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
+			"teknoir.cloud", "teknoir-demo", nil
+	}
+	out, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#", "--count", "1", "--reconnect")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if want := "/devices/d1/state/x hello\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if want := "The portal is restarting. Connect again in a few seconds.; connecting again in 5ms"; !strings.Contains(errs, want) {
+		t.Errorf("stderr %q, want it to contain %q", errs, want)
+	}
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+	if got != 2 {
+		t.Errorf("%d requests, want 2", got)
+	}
+}
+
+// A 503 that says live MQTT is not configured is final: --reconnect does not try again.
+func TestMqttStreamReconnectStopsOnNotConfigured(t *testing.T) {
+	noBotMode(t)
+	oldUnit := mqttRetryAfterUnit
+	mqttRetryAfterUnit = time.Millisecond
+	t.Cleanup(func() { mqttRetryAfterUnit = oldUnit })
+
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Retry-After", "300")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"name":"ServiceUnavailableError","message":"The stream is off: live MQTT is not configured for teamspace teknoir-demo."}}`)
+	}))
+	defer srv.Close()
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
+			"teknoir.cloud", "teknoir-demo", nil
+	}
+	_, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#", "--reconnect")
+	if err == nil || exitCodeOf(err) == 0 ||
+		!strings.Contains(err.Error(), "The stream is off: live MQTT is not configured for teamspace teknoir-demo.") {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if requests != 1 {
+		t.Errorf("%d requests, want 1", requests)
+	}
+}
+
+// Without --reconnect a temporary 503 ends the command with the server's message.
+func TestMqttStreamNoReconnectKeepsA503Final(t *testing.T) {
+	noBotMode(t)
+	oldUnit := mqttRetryAfterUnit
+	mqttRetryAfterUnit = time.Millisecond
+	t.Cleanup(func() { mqttRetryAfterUnit = oldUnit })
+
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"name":"ServiceUnavailableError","message":"The portal is restarting. Connect again in a few seconds."}}`)
+	}))
+	defer srv.Close()
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
+			"teknoir.cloud", "teknoir-demo", nil
+	}
+	_, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#")
+	if err == nil || exitCodeOf(err) == 0 || !strings.Contains(err.Error(), "The portal is restarting. Connect again in a few seconds.") {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if requests != 1 {
+		t.Errorf("%d requests, want 1", requests)
+	}
+	if strings.Contains(errs, "connecting again") {
+		t.Errorf("stderr %q: it reconnected without --reconnect", errs)
+	}
+}
+
+// A 503 without Retry-After says nothing about when to try again: --reconnect does not retry it.
+func TestMqttStreamReconnectDoesNotRetryA503WithoutRetryAfter(t *testing.T) {
+	noBotMode(t)
+	oldUnit := mqttRetryAfterUnit
+	mqttRetryAfterUnit = time.Millisecond
+	t.Cleanup(func() { mqttRetryAfterUnit = oldUnit })
+
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"name":"ServiceUnavailableError","message":"The portal is restarting. Connect again in a few seconds."}}`)
+	}))
+	defer srv.Close()
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
+			"teknoir.cloud", "teknoir-demo", nil
+	}
+	_, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#", "--reconnect")
+	if err == nil || exitCodeOf(err) == 0 {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if requests != 1 {
+		t.Errorf("%d requests, want 1", requests)
 	}
 }
 

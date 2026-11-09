@@ -73,12 +73,16 @@ tnctl mqtt stream /devices/+/state/# /devices/+/events/alerts --seconds 60 --rec
   not UTF-8 arrives as `payloadBase64`.
 - Without `--json` each message is one line, `<topic> <payload>`, and a binary payload shows as
   `<base64:N bytes>`.
-- `--count N` and `--seconds S` stop cleanly (exit 0). Dropped messages are reported on stderr:
-  the platform forwards at most 200 messages per second per stream and skips a message over
-  256 KiB.
-- `--reconnect` connects again after the stream ends or the network fails (1 s doubling to 30 s).
-  It does **not** retry a refused request (a bad topic, no access) or an error the platform
-  reports (`access_lost`, `broker_closed`). Run a long stream under a supervisor (Kubernetes, or
+- `--count N` and `--seconds S` stop cleanly (exit 0). Dropped messages are reported on stderr,
+  with why: `rate` (the platform forwards at most 200 messages per second per stream), `size`
+  (a message over 256 KiB) or `slow` (the reader did not keep up). A message over 1 MiB never
+  arrives: the broker drops it, and no dropped report counts it.
+- `--reconnect` connects again after the stream ends or the network fails (1 s doubling to 30 s),
+  and waits out a temporary 503 (a portal restart, the broker not reachable) for as long as its
+  `Retry-After` says, at most 60 s. It does **not** retry a refused request (a bad topic, no
+  access) or an error the platform reports (`access_lost`, `broker_closed`). The platform ends
+  every stream cleanly after 60 minutes and when the portal restarts, so a long-running reader
+  always uses `--reconnect` or the relay. Run a long stream under a supervisor (Kubernetes, or
   a shell loop) so that an error ends and restarts the whole pipeline.
 - Four streams at once per caller (per bot for a bot). `ts` is when the platform received the
   message; a payload's own timestamp is when the device produced it, and the two differ after a
@@ -204,8 +208,9 @@ producer that republishes the same event.
 - Never feed your own output back in: an input set that includes `/devices/tb-<bot>/events/#`
   matches your own output once TOE forwards it. Filter the bot's own device out, always.
 - Sample before you process, and keep the input set narrow.
-- Do not block the reader. The stream drops and counts; a stalled stdin backs up into tnctl and
-  the server's rate bucket drops silently. Use bounded queues and count your own drops.
+- Do not block the reader. The stream drops and counts; a stalled stdin backs up into tnctl, and
+  the platform then drops messages and reports them as `dropped` with the reason `slow`. Use
+  bounded queues and count your own drops.
 - Publish state as an event, not as `toe/state/...`: fleet-metrics renders state label values
   **unescaped**, so a `"`, a `\` or a newline in a label value breaks the whole teamspace's
   Prometheus scrape. If you must publish state, use numbers only and label values from
@@ -300,7 +305,10 @@ env:
 
 The relay keeps reconnecting by itself, except after the platform ends the stream with an error
 (`access_lost`, `broker_closed`); Kubernetes then restarts the pod, which is what you want — access
-may come back.
+may come back. So an EMQX restart (`broker_closed`) restarts the relay pod too, and a few in a row
+show as CrashLoopBackOff until the broker is back: that is by design. The relay also stops at once
+when the portal has no live MQTT (`live MQTT is not configured`); ask an admin, restarting does not
+help.
 
 The copy in `apps` is as sensitive as the key itself and stays inside the bot's own computer.
 Never `kubectl get` or `kubectl describe` that Secret with `-o yaml`, `-o json` or `-o jsonpath`;

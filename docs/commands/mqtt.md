@@ -40,8 +40,8 @@ sent it (compacted, so a field this tnctl does not know survives):
 `{"topic":"/devices/d1/state/x","payload":"hello","retain":false,"ts":"2026-11-08T10:00:00Z"}`.
 
 Messages the platform had to drop are reported on stderr, with why (`rate`: too many messages too fast, `size`:
-the messages were too large). An error the platform reports ends the stream: it is printed and the exit code is
-non-zero.
+the messages were too large, `slow`: the reader did not keep up). An error the platform reports ends the stream: it
+is printed and the exit code is non-zero.
 
 | Flag | Description |
 | --- | --- |
@@ -51,9 +51,11 @@ non-zero.
 | `--reconnect` | Connect again when the stream ends or the network fails. |
 
 Ctrl-C stops cleanly as well. `--reconnect` waits 1 s, then doubles the pause up to 30 s, and says so on stderr
-each time; after a connection that delivered messages the wait starts at 1 s again. It does **not** reconnect
-after a refused request (a non-2xx answer: a bad topic, no access), a missing key, or an error the platform
-reported: those are not network failures.
+each time; after a connection that delivered messages the wait starts at 1 s again. It also waits out a `503` the
+platform marks as temporary — a portal restart, a broker that cannot be reached — for as long as its `Retry-After`
+says (at most 60 s), instead of the 1 s-to-30 s pause. It does **not** reconnect after a refused request (a non-2xx
+answer: a bad topic, no access), a `429` (too many streams), `live MQTT is not configured`, a missing key, or an
+error the platform reported: those are not network failures.
 
 Without `--reconnect` the command exits **0 only** for a clean end of the stream (the platform ended a `200`
 answer), `--count` or `--seconds`; a network failure — a refused connection, a DNS error, a reset — is an error:

@@ -251,6 +251,7 @@ BINARY = (
     '"retain":false,"ts":"2026-11-09T10:00:01.000Z"}\n\n'
 )
 DROPPED = 'event: dropped\ndata: {"count":7,"reason":"rate"}\n\n'
+SLOW_DROPPED = 'event: dropped\ndata: {"count":3,"reason":"slow"}\n\n'
 ERROR = 'event: error\ndata: {"code":"access_lost","message":"the caller lost access"}\n\n'
 
 
@@ -305,6 +306,32 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if mode == "notconfigured":
+            body = (b'{"error":{"name":"ServiceUnavailableError","message":"The stream is off: '
+                    b'live MQTT is not configured on this portal."}}')
+            self.send_response(503)
+            self.send_header("Retry-After", "300")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if mode == "restarting":
+            body = (b'{"error":{"name":"ServiceUnavailableError","message":"The portal is '
+                    b'restarting. Connect again in a few seconds."}}')
+            self.send_response(503)
+            self.send_header("Retry-After", "0")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if mode == "nostream":
+            body = (b'{"error":{"name":"NotFoundError","message":"Device x is not in teamspace '
+                    b'teknoir-demo."}}')
+            self.send_response(404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -323,6 +350,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if mode == "bigline":  # one 1.5 MiB comment line: only the line cap catches it
             self.wfile.write(b": " + b"x" * (3 << 19) + b"\n\n")
+            self.wfile.flush()
+            time.sleep(30)
+            return
+        if mode == "dropslow":  # the dropped reason the platform reports for a slow reader
+            self.wfile.write(MESSAGE.encode())
+            self.wfile.write(SLOW_DROPPED.encode())
             self.wfile.flush()
             time.sleep(30)
             return
@@ -586,6 +619,53 @@ stop_server
 check_eq "relay --sse: Retry-After: inf keeps the relay running" 124 "$rc"
 check_absent "relay --sse: Retry-After: inf gives no traceback" "$err" "Traceback"
 check_contains "relay --sse: Retry-After is capped at 300 s" "$err" "in 300"
+
+start_server notconfigured
+err="$work/sse-notconfigured.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 5 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+rc=$?
+stop_server
+check_eq "relay --sse: a platform without live MQTT exits 1 at once" 1 "$rc"
+check_contains "relay --sse: a platform without live MQTT says so" "$err" "live MQTT is not configured"
+check_eq "relay --sse: a platform without live MQTT gets one request" 1 "$(grep -c . "$work/count")"
+
+start_server restarting
+err="$work/sse-restarting.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+rc=$?
+stop_server
+connections="$(grep -c . "$work/count")"
+check_eq "relay --sse: a portal restart keeps the relay running" 124 "$rc"
+if [ "$connections" -le 4 ]; then
+  ok "relay --sse: a portal restart is retried after its Retry-After ($connections connections in 3 s)"
+else
+  fail "relay --sse: a portal restart made $connections connections in 3 s"
+fi
+check_contains "relay --sse: a portal restart prints the server's message" "$err" "The portal is restarting"
+
+start_server nostream
+err="$work/sse-404.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 20 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+rc=$?
+stop_server
+check_eq "relay --sse: HTTP 404 exits 1" 1 "$rc"
+check_contains "relay --sse: 404 prints the server's message" "$err" "Device x is not in teamspace teknoir-demo."
+check_eq "relay --sse: 404 gets one request" 1 "$(grep -c . "$work/count")"
+
+start_server dropslow
+err="$work/sse-dropslow.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+stop_server
+check_contains "relay --sse: a dropped event with reason slow names the slow reader" \
+  "$err" "dropped 3 message(s): the reader was too slow"
 
 start_server cuterror
 err="$work/sse-cuterror.err"
