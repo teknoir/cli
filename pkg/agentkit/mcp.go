@@ -225,15 +225,18 @@ func (p *op) withClaudeConfigLock(path string, fn func() error) error {
 		if !errors.Is(err, fs.ErrExist) {
 			return err // a missing config directory is handled before the loop; anything else is an error
 		}
-		fi, serr := os.Stat(lock)
+		// Lstat, not Stat: mkdir's EEXIST is about the name, so a dangling symlink there is seen and aged
+		// instead of looking released forever.
+		fi, serr := os.Lstat(lock)
 		switch {
-		case errors.Is(serr, fs.ErrNotExist):
-			continue // released between our mkdir and stat: try again at once
+		case errors.Is(serr, fs.ErrNotExist) && !time.Now().After(deadline):
+			continue // released between our mkdir and lstat: try again at once
 		case serr == nil && time.Since(fi.ModTime()) > claudeConfigLockStale:
 			// Left behind by a process that died. Another taker may have seen the same stale lock: remove
-			// it only if it is still the same directory, then wait before the mkdir, so a second taker's
-			// remove finds nothing instead of the new lock.
-			if again, aerr := os.Stat(lock); aerr == nil && os.SameFile(fi, again) {
+			// it only if it is still the same stale directory (same file and same mtime: ext4 reuses the
+			// inode number of a removed directory, and Windows compares whatever is at the path now), then
+			// wait before the mkdir, so a second taker's remove finds nothing instead of the new lock.
+			if again, aerr := os.Lstat(lock); aerr == nil && os.SameFile(fi, again) && again.ModTime().Equal(fi.ModTime()) {
 				if rerr := os.Remove(lock); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
 					return rerr
 				}

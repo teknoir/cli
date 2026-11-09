@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -99,8 +100,8 @@ func (p *op) mergeSettings(path string, remove bool) error {
 	groups := parseHookGroups(entries)
 	legacy := p.absGuardPath()
 	registered, upgraded, changed, removed := false, false, false, false
-	var moved []string
-	dups := 0
+	var moved []string // the matchers a handler of ours was moved from, each once
+	nMoved, dups := 0, 0
 	for _, g := range groups {
 		if g.opaque {
 			continue
@@ -122,7 +123,10 @@ func (p *op) mergeSettings(path string, remove bool) error {
 				gChanged, changed, removed = true, true, true
 			case !ours:
 				// Ours does not belong in a group of another matcher: it would run twice over.
-				moved = append(moved, g.matcher())
+				nMoved++
+				if m := g.matcher(); !slices.Contains(moved, m) {
+					moved = append(moved, m)
+				}
 				gChanged, changed = true, true
 			case registered:
 				// A second handler of this run's command: one is enough.
@@ -174,7 +178,7 @@ func (p *op) mergeSettings(path string, remove bool) error {
 	case upgraded:
 		p.r.act(ActionUpgrade, path, string(AgentClaude), "PreToolUse entry: quoted guard command")
 	case changed:
-		p.r.act(ActionUpgrade, path, string(AgentClaude), fmt.Sprintf("PreToolUse entry: removed %d other handler(s) of the guard", len(moved)+dups))
+		p.r.act(ActionUpgrade, path, string(AgentClaude), fmt.Sprintf("PreToolUse entry: removed %d other handler(s) of the guard", nMoved+dups))
 	default:
 		p.r.act(ActionAlreadyRegister, path, string(AgentClaude), "PreToolUse entry")
 	}

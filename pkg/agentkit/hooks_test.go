@@ -443,7 +443,10 @@ func TestHooksUpgradeLegacyEntry(t *testing.T) {
 	if n := len(preToolUseRaw(t, path)); n != 2 {
 		t.Errorf("%d groups, want the foreign one and ours: %v", n, preToolUseRaw(t, path))
 	}
-	// The legacy matcher is the one the kit itself used: the upgrade is not reported as a move.
+	// The legacy matcher is the one the kit itself used: the note names the move, but no warning does.
+	if note := noteOf(res, ActionRegister, path); !strings.Contains(note, fmt.Sprintf("moved from matcher %q", legacyGuardMatcher)) {
+		t.Errorf("the note %q does not name the move from the legacy matcher", note)
+	}
 	for _, w := range res.Warnings {
 		if strings.Contains(w, legacyGuardMatcher) {
 			t.Errorf("a warning names the legacy matcher: %q", w)
@@ -627,6 +630,53 @@ func TestHooksReportsMovedHandlers(t *testing.T) {
 		}
 		if got := readFile(t, path); got != after {
 			t.Errorf("a further install changed settings.json:\n%s", got)
+		}
+	})
+	t.Run("same matcher twice", func(t *testing.T) {
+		t.Parallel()
+		o, home, _ := testOpts(t)
+		o.Agents, o.Hooks = []Agent{AgentClaude}, true
+		guard := filepath.Join(home, ".claude", "hooks", guardName)
+		ours := jsonString(t, shellQuote(guard))
+		path := settingsPath(t, home)
+		g := `{"matcher":"Bash","hooks":[{"type":"command","command":` + ours + `}]}`
+		writeSettings(t, path, `{"hooks":{"PreToolUse":[`+g+`,`+g+`]}}`)
+
+		dry, res := both(t, o, path)
+		for _, r := range []*Result{dry, res} {
+			n := 0
+			for _, w := range r.Warnings {
+				if strings.Contains(w, `under matcher "Bash"`) {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Errorf("%d warnings name the matcher, want 1: %v", n, r.Warnings)
+			}
+			if note := noteOf(r, ActionRegister, path); !strings.HasSuffix(note, `moved from matcher "Bash")`) {
+				t.Errorf("the note %q", note)
+			}
+		}
+	})
+	t.Run("kit group and the same matcher twice", func(t *testing.T) {
+		t.Parallel()
+		o, home, _ := testOpts(t)
+		o.Agents, o.Hooks = []Agent{AgentClaude}, true
+		guard := filepath.Join(home, ".claude", "hooks", guardName)
+		ours := jsonString(t, shellQuote(guard))
+		path := settingsPath(t, home)
+		kit := `{"matcher":"` + guardMatcher + `","hooks":[{"type":"command","command":` + ours + `}]}`
+		g := `{"matcher":"Bash","hooks":[{"type":"command","command":` + ours + `}]}`
+		writeSettings(t, path, `{"hooks":{"PreToolUse":[`+kit+`,`+g+`,`+g+`]}}`)
+
+		dry, res := both(t, o, path)
+		for _, r := range []*Result{dry, res} {
+			if note := noteOf(r, ActionUpgrade, path); !strings.Contains(note, "removed 2 other handler(s)") {
+				t.Errorf("the note %q, actions %v", note, actionsOf(r))
+			}
+		}
+		if got := guardHandlers(t, path, shellQuote(guard)); len(got) != 1 {
+			t.Errorf("%d handlers run the guard, want 1: %v", len(got), preToolUseRaw(t, path))
 		}
 	})
 }

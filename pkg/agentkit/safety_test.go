@@ -2002,57 +2002,84 @@ func TestClaudeConfigLockNoDir(t *testing.T) {
 // Two takers that both see the same stale lock must not both hold it: the second's remove would delete
 // the fresh lock the first just made.
 func TestClaudeConfigLockStaleRace(t *testing.T) {
+	// The rounds run as parallel subtests: each has its own directories and lock, and the waits of the
+	// stale branch (50 to 200 ms) would otherwise add up to seconds.
 	for round := 0; round < 20; round++ {
-		o, home, _ := testOpts(t)
-		path := filepath.Join(home, ".claude.json")
-		o.ClaudeConfigFile = path
-		o.lockTimeout = 3 * time.Second
-		lock := path + ".lock"
-		if err := os.Mkdir(lock, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		old := time.Now().Add(-20 * time.Second)
-		if err := os.Chtimes(lock, old, old); err != nil {
-			t.Fatal(err)
-		}
-		var holders, most atomic.Int32
-		fn := func() error {
-			n := holders.Add(1)
-			for {
-				seen := most.Load()
-				if n <= seen || most.CompareAndSwap(seen, n) {
-					break
+		t.Run(fmt.Sprint(round), func(t *testing.T) {
+			t.Parallel()
+			o, home, _ := testOpts(t)
+			path := filepath.Join(home, ".claude.json")
+			o.ClaudeConfigFile = path
+			o.lockTimeout = 3 * time.Second
+			lock := path + ".lock"
+			if err := os.Mkdir(lock, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().Add(-20 * time.Second)
+			if err := os.Chtimes(lock, old, old); err != nil {
+				t.Fatal(err)
+			}
+			var holders, most atomic.Int32
+			fn := func() error {
+				n := holders.Add(1)
+				for {
+					seen := most.Load()
+					if n <= seen || most.CompareAndSwap(seen, n) {
+						break
+					}
+				}
+				time.Sleep(2 * time.Millisecond)
+				holders.Add(-1)
+				return nil
+			}
+			var wg sync.WaitGroup
+			ready := make(chan struct{})
+			errs := make([]error, 2)
+			for i := range errs {
+				oo := *o
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-ready
+					errs[i] = newOp(&oo).withClaudeConfigLock(path, fn)
+				}()
+			}
+			close(ready)
+			wg.Wait()
+			for i, err := range errs {
+				if err != nil {
+					t.Fatalf("round %d, taker %d: %v", round, i, err)
 				}
 			}
-			time.Sleep(2 * time.Millisecond)
-			holders.Add(-1)
-			return nil
-		}
-		var wg sync.WaitGroup
-		ready := make(chan struct{})
-		errs := make([]error, 2)
-		for i := range errs {
-			oo := *o
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				<-ready
-				errs[i] = newOp(&oo).withClaudeConfigLock(path, fn)
-			}()
-		}
-		close(ready)
-		wg.Wait()
-		for i, err := range errs {
-			if err != nil {
-				t.Fatalf("round %d, taker %d: %v", round, i, err)
+			if got := most.Load(); got != 1 {
+				t.Fatalf("round %d: %d holders at once", round, got)
 			}
+			if _, err := os.Stat(lock); !os.IsNotExist(err) {
+				t.Fatalf("round %d: the lock was left behind: %v", round, err)
+			}
+		})
+	}
+}
+
+// A dangling symlink at the lock name is a lock Claude Code did not take: the mkdir fails on the name,
+// so it is aged by the link's own mtime instead of looking released forever (a spin at full CPU).
+func TestClaudeConfigLockDanglingLink(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.MCP = []Agent{AgentClaude}, true
+	o.lockTimeout = 200 * time.Millisecond
+	lock := filepath.Join(home, ".claude.json.lock")
+	mustSymlink(t, filepath.Join(home, "nowhere"), lock)
+	done := make(chan error, 1)
+	go func() { _, err := Install(o); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "Claude Code holds") {
+			t.Fatalf("err %v, want the lock error", err)
 		}
-		if got := most.Load(); got != 1 {
-			t.Fatalf("round %d: %d holders at once", round, got)
-		}
-		if _, err := os.Stat(lock); !os.IsNotExist(err) {
-			t.Fatalf("round %d: the lock was left behind: %v", round, err)
-		}
+	case <-time.After(5 * time.Second):
+		_ = os.Remove(lock)
+		<-done
+		t.Fatal("spins on a dangling lock link")
 	}
 }
 
