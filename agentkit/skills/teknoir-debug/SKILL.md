@@ -101,7 +101,8 @@ tnctl inspect release <robot> <namespace>/<release> -n <teamspace> -o json
 
 - Pod names come from step 2 (`problems[].pods[]` and `problems[].namespace`), from the device's
   `state.apps` (each with its `namespace`), or from Prometheus: `pod_running{device_id="<device>"}`
-  lists every pod with `name` and `namespace`.
+  lists every pod with `name` and `namespace`. Inspect refuses a pod in `kube-system` or
+  `teknoir-desktop` (the remote desktop, which `state.apps` lists too) unless a problem names it.
 - `inspect pod` also carries the recent events (`-o json`: `events[]`), so you usually do not need a
   separate event source. `eventsTruncated` says the list was cut.
 - `--previous` is the log of the container instance before a restart: that is where a crash-loop's
@@ -241,7 +242,7 @@ exit code. The Code column gives the platform's name for reference.
 | `not_started` | 409 | 8 | "The container has not started yet.": an image pull or volume wait, so there is no log | do not retry; read the events with `inspect pod` |
 | `invalid` | 400 | 5 | the platform refused a parameter | fix the command; do not retry |
 | `forbidden` | 403 | 6 | the robot refused the read | report it; do not retry |
-| `not_found` | 404 | 3 | not a pod or release of this robot, or the pod is in `kube-system` and in no problem | use the names from step 2 |
+| `not_found` | 404 | 3 | not a pod or release of this robot, or the pod is in `kube-system` or `teknoir-desktop` (the remote desktop) and in no problem | use the names from step 2 |
 | `no_previous` | 404 | 3 | the container never restarted, so there is no previous log | drop `--previous` |
 | `no_write` | 403 | 6 | the person needs the developer role in the teamspace | a teamspace admin |
 | `no_exec` | 403 | 6 | the person may not open a terminal on devices here (`pods/exec`) | a teamspace admin |

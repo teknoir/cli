@@ -57,7 +57,7 @@ list of summaries: the same fields without `spec`, `configuration` and `bootstra
 | `deviceOwner` | Another robot, when this robot runs on that robot's device. |
 | `spec` | `{type, device, nodes, serverAddress, applications}`: the robot's settings. A PATCH takes `nodes`, `serverAddress` and `applications` as top-level fields (not under `spec`); `type` and `device` cannot be changed, and a PATCH ignores them without an error. |
 | `configuration` | The configuration view the `teknoir-config` skill reads. |
-| `bootstrap` | `{device, prepare[], steps[], blockers[]}` — the secret-free onboarding plan. |
+| `bootstrap` | `{device, prepare[], steps[], blockers[]}` — the secret-free onboarding plan. `prepare` names the teamspace with -n (tnctl v0.2.0-rc.2 or later). |
 
 ```json
 {
