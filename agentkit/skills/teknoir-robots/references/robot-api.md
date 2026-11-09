@@ -31,8 +31,9 @@ them after the create.
 }
 ```
 
-The answer is the robot detail, HTTP 201. Because the device does not exist at that moment, the phase
-is `WaitingForDevice` with `Device N does not exist yet. The platform creates it within a minute.`
+The answer is the robot detail, HTTP 201. Without `device`, the phase is `WaitingForDevice` with
+`Device N does not exist yet. The platform creates it within a minute.`; with an adopted `device`, it
+is that device's phase.
 
 ## The robot answer
 
@@ -53,7 +54,7 @@ list of summaries: the same fields without `spec`, `configuration` and `bootstra
 | `org` | `{unit, path[{id,name}]}` when it is placed in a unit. |
 | `disabled` | `{state: disabling\|disabled\|enabling, at, by, reason, sessionsClosed, message, error}` when it is in the disable cycle. |
 | `deviceOwner` | Another robot, when this robot runs on that robot's device. |
-| `spec` | `{type, device, nodes, serverAddress, applications}` — what you PATCH. |
+| `spec` | `{type, device, nodes, serverAddress, applications}`: the robot's settings. A PATCH takes `nodes`, `serverAddress` and `applications` as top-level fields (not under `spec`); `type` and `device` cannot be changed, and a PATCH ignores them without an error. |
 | `configuration` | The configuration view the `teknoir-config` skill reads. |
 | `bootstrap` | `{device, prepare[], steps[], blockers[]}` — the secret-free onboarding plan. |
 
@@ -69,7 +70,7 @@ list of summaries: the same fields without `spec`, `configuration` and `bootstra
   "nodes": [{"role": "main", "nodeName": "amr-02-main", "joined": false, "ready": false, "k3s": "server"}],
   "bootstrap": {
     "device": "amr-02",
-    "prepare": ["tnctl ns '<teamspace>'", "tnctl bootstrap 'amr-02' --skip-upload --robot 'amr-02' --role 'main'"],
+    "prepare": ["tnctl ns <teamspace>", "tnctl bootstrap amr-02 --skip-upload --robot amr-02 --role main"],
     "steps": [{"role": "main", "nodeName": "amr-02-main", "k3s": "server", "commands": ["sudo bash bootstrap_server_amr-02.sh"], "note": "Run this first and wait until the node is Ready."}],
     "blockers": []
   }
@@ -156,7 +157,7 @@ The answer adds the counts: `robots`, `robotsWithOverrides`, and the robots that
   "selector": {"matchLabels": {"site": "karlstad"}},
   "priority": 10,
   "applications": [
-    {"repo_url": "https://github.com/teknoir/teknoir-demo-gitops", "revision": "main", "path": "common/store.yaml"}
+    {"repo_url": "https://github.com/teknoir/teknoir-demo-gitops", "revision": "main", "path": "common/devstudio.yaml"}
   ]
 }
 ```

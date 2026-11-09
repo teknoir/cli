@@ -1,8 +1,8 @@
 package agentkit
 
-// The Go version of the kit lint that tools/kit-lint.py runs: frontmatter, size, links, scripts and
-// banned text of every skill under skills/. The Python script is the source of truth for the rules;
-// keep the two in step.
+// The kit lint: frontmatter, size, links, scripts and banned text of every skill under skills/.
+// Its 'Bot mode' heading check is stricter than the kit's Python lint on purpose: it requires a real
+// heading outside a fenced code block.
 
 import (
 	"fmt"
@@ -31,7 +31,7 @@ var (
 	// codePathRE finds a backticked path into the skill's own folders.
 	codePathRE = regexp.MustCompile("`((?:scripts|references|templates|assets)/[^`\\s]+)`")
 	// botModeHeadingRE finds a heading that names bot mode.
-	botModeHeadingRE = regexp.MustCompile(`(?im)^#+ .*bot mode`)
+	botModeHeadingRE = regexp.MustCompile(`(?i)^#{1,6}[ \t]+.*\bbot mode\b`)
 	// frontmatterKeys are the only keys a SKILL.md frontmatter may carry.
 	frontmatterKeys = []string{"name", "description", "license", "metadata"}
 )
@@ -42,7 +42,7 @@ type bannedText struct {
 	why string
 }
 
-// bannedTexts mirrors BANNED in tools/kit-lint.py.
+// bannedTexts are the phrases no kit file may contain, each with the reason it is refused.
 var bannedTexts = []bannedText{
 	{regexp.MustCompile(`Claude Code`), "names a product: write 'your agent' or 'the TeknoirBot agent'"},
 	{regexp.MustCompile(`\$\{CLAUDE_SKILL_DIR\}`), "agent-specific variable: use paths relative to the skill directory"},
@@ -153,7 +153,7 @@ func lintSkill(fsys fs.FS, name string) []string {
 	if lines >= 500 {
 		problems = append(problems, fmt.Sprintf("%s: %d lines, must be under 500", label, lines))
 	}
-	if !botModeHeadingRE.MatchString(string(text)) {
+	if !hasBotModeHeading(string(text)) {
 		problems = append(problems, fmt.Sprintf("%s: no 'Bot mode' heading", label))
 	}
 
@@ -190,6 +190,9 @@ func lintSkill(fsys fs.FS, name string) []string {
 				return readErr
 			}
 			for _, target := range skillTargets(text, false) {
+				if external(target) {
+					continue
+				}
 				resolved := path.Join(path.Dir(rel), stripAnchor(target))
 				problems = append(problems, checkLink(fsys, skillDir, fmt.Sprintf("%s/%s", name, rel), resolved)...)
 			}
@@ -249,6 +252,22 @@ func hasKitVersion(metadata any) bool {
 	return ok && version == kitVersion
 }
 
+// hasBotModeHeading reports whether text has a heading that names bot mode, outside a fenced code
+// block.
+func hasBotModeHeading(text string) bool {
+	inFence := false
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence && botModeHeadingRE.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
 // skillTargets returns the markdown link targets of text, and withPaths also its backticked paths into
 // the skill's own folders.
 func skillTargets(text []byte, withPaths bool) []string {
@@ -272,12 +291,16 @@ func skillTargets(text []byte, withPaths bool) []string {
 	return targets
 }
 
+// external reports a link target that is not a file path: an anchor, a web link or a mail link.
+func external(t string) bool {
+	return strings.HasPrefix(t, "#") || strings.HasPrefix(t, "http://") ||
+		strings.HasPrefix(t, "https://") || strings.HasPrefix(t, "mailto:")
+}
+
 // checkLink reports a target that is missing, or that points outside the skill other than to a file of
 // a sibling skill. target is relative to skillDir.
 func checkLink(fsys fs.FS, skillDir, label, target string) []string {
-	if target == "" || strings.HasPrefix(target, "#") ||
-		strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") ||
-		strings.HasPrefix(target, "mailto:") {
+	if target == "" || external(target) {
 		return nil
 	}
 	target = stripAnchor(target)
@@ -379,6 +402,13 @@ metadata:
   teknoir-kit-version: "` + kitVersion + `"
 `
 
+	padTo := func(s string, n int) string { return s + strings.Repeat("p\n", n-strings.Count(s, "\n")) }
+	descOf := func(n int) string {
+		return withFrontmatter(strings.Replace(goodFrontmatter,
+			"description: A test skill whose description says what it does and when to use it, in one sentence long enough to be realistic.",
+			"description: "+strings.Repeat("x", n), 1))
+	}
+
 	tests := []struct {
 		name    string
 		files   map[string]string
@@ -388,7 +418,7 @@ metadata:
 			name: "good skill with a sibling link",
 			files: map[string]string{
 				"skills/a/SKILL.md":           goodSkillMD("a", "See [b](../b/SKILL.md) and [more](references/more.md)."),
-				"skills/a/references/more.md": "More detail; it links back to [the skill](../SKILL.md).\n",
+				"skills/a/references/more.md": "More detail; it links back to [the skill](../SKILL.md), [docs](https://example.com/a#b), [mail](mailto:a@b.c) and [top](#top).\n",
 				"skills/b/SKILL.md":           goodSkillMD("b", ""),
 			},
 		},
@@ -408,15 +438,34 @@ metadata:
 			wantErr: "name must equal the directory",
 		},
 		{
-			name: "description too long",
-			files: map[string]string{"skills/a/SKILL.md": withFrontmatter(strings.Replace(
-				goodFrontmatter, "description: A test skill", "description: A"+strings.Repeat("x", 1024), 1))},
+			name:    "1025-character description",
+			files:   map[string]string{"skills/a/SKILL.md": descOf(1025)},
 			wantErr: "description must be a string of 1-1024",
 		},
 		{
+			name:  "1024-character description",
+			files: map[string]string{"skills/a/SKILL.md": descOf(1024)},
+		},
+		{
 			name:    "500 lines",
-			files:   map[string]string{"skills/a/SKILL.md": goodSkillMD("a", strings.Repeat("padding line\n", 500))},
-			wantErr: "lines, must be under 500",
+			files:   map[string]string{"skills/a/SKILL.md": padTo(withFrontmatter(goodFrontmatter), 500)},
+			wantErr: "500 lines, must be under 500",
+		},
+		{
+			name:  "499 lines",
+			files: map[string]string{"skills/a/SKILL.md": padTo(withFrontmatter(goodFrontmatter), 499)},
+		},
+		{
+			name: "## Robot modes only",
+			files: map[string]string{"skills/a/SKILL.md": strings.Replace(
+				withFrontmatter(goodFrontmatter), "## Bot mode", "## Robot modes only", 1)},
+			wantErr: "no 'Bot mode' heading",
+		},
+		{
+			name: "bot mode only in a fenced comment",
+			files: map[string]string{"skills/a/SKILL.md": strings.Replace(
+				withFrontmatter(goodFrontmatter), "## Bot mode", "```\n# bot mode\n```", 1)},
+			wantErr: "no 'Bot mode' heading",
 		},
 		{
 			name:    "dead link",

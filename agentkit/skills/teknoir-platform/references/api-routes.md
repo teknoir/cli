@@ -55,7 +55,7 @@ may call a route at all.
 
 | Method | Path | What it does | Bot |
 |---|---|---|---|
-| GET | `<teamspace>/robots` | Every robot in scope; `?<label>=<value>` filters. | `read` |
+| GET | `<teamspace>/robots` | Every robot in scope; `?unit=<unit id>` narrows it to one org unit. There is no label filter on this route: use `tnctl robots <key>=<value>`, or filter `.labels` yourself. | `read` |
 | GET | `<teamspace>/robots/<robot>` | One robot: phase, nodes, layers, and its secret-free bootstrap plan. | `read` |
 | POST | `<teamspace>/robots` | Create a robot and the device that backs it (201). | `creator` |
 | PATCH | `<teamspace>/robots/<robot>` | Change `labels`, `nodes`, `serverAddress` or `applications`. | `creator` |
@@ -79,7 +79,7 @@ may call a route at all.
 
 | Method | Path | What it does | Bot |
 |---|---|---|---|
-| GET | `<teamspace>/devices` | Every device in scope; `?<label>=<value>` filters. Never carries keys. | `read` |
+| GET | `<teamspace>/devices` | Every device in scope. `?label=<key>=<value>` filters (repeat it, at most 20; all must match), and `?unit=<unit id>` narrows it to one org unit. Never carries keys. | `read` |
 | GET | `<teamspace>/devices/<device>` | One device: state, tunnel, configuration hash, placement. | `read` |
 | DELETE | `<teamspace>/devices/<device>` | Remove a device that backs no robot. Teamspace admin only. | `never` |
 | POST | `<teamspace>/devices/<device>/disable` | Disable a device: withdraw its MQTT key, close sessions, turn Tunneling off. | `never` |
@@ -115,18 +115,18 @@ document's field name on the wire is `metricId`.
 | GET | `<teamspace>/config/<target>` | The configuration of a robot or device, by layer. | `read` |
 | GET | `<teamspace>/config/<target>/resource` | One rendered resource: `?id=<Kind>/<namespace>/<name>`. | `read` |
 | GET | `<teamspace>/config/<target>/promote` | The override values as they were typed, secrets included, ready to promote into git. | `creator` |
-| PATCH | `<teamspace>/config/<target>/overrides/resource` | Change values of one resource. | `creator` |
-| PUT | `<teamspace>/config/<target>/overrides/resource` | Write the override of one resource. | `creator` |
-| DELETE | `<teamspace>/config/<target>/overrides/resource` | Remove the override of one resource. | `creator` |
+| PATCH | `<teamspace>/config/<target>/overrides/resource` | Change values of one resource. `?id=<Kind>/<namespace>/<name>` (required). | `creator` |
+| PUT | `<teamspace>/config/<target>/overrides/resource` | Write the override of one resource. `?id=<Kind>/<namespace>/<name>` (required). | `creator` |
+| DELETE | `<teamspace>/config/<target>/overrides/resource` | Remove the override of one resource. `?id=<Kind>/<namespace>/<name>` (required). | `creator` |
 | PUT | `<teamspace>/config/<target>/overrides/application` | Pin one application to another revision. | `creator` |
-| DELETE | `<teamspace>/config/<target>/overrides/application` | Remove that pin. | `creator` |
-| PATCH | `<teamspace>/config/<target>/overrides/application/off` | Turn one resource off. | `creator` |
+| DELETE | `<teamspace>/config/<target>/overrides/application` | Remove that pin: `?repo_url=<repo>` (required) `&path=<path>`. | `creator` |
+| PATCH | `<teamspace>/config/<target>/overrides/application/off` | Turn every resource of one application off or on, in one write: `?repo_url=<repo>` (required) `&path=<path>`, body `{"off":true}` or `{"off":false}`. Off deletes what the items own. When data would be deleted, the platform answers 409 and asks for `confirm=<text>`, which only a person gives. Use `tnctl config off <robot> --app <path>` instead; for one resource, `tnctl config off <robot> <resource>`. | `creator` |
 | DELETE | `<teamspace>/config/<target>/overrides` | Reset every override at once. | `never` |
 | GET | `<teamspace>/local-kinds` | The kinds a local item may have. | `read` |
 | GET | `<teamspace>/local-kinds/schema` | The JSON schema the platform checks one kind with: `?apiVersion=<apiVersion>&kind=<Kind>`. | `read` |
-| GET | `<teamspace>/config/<target>/local` | The local items of a robot: `?id=<Kind>/<namespace>/<name>`. | `read` |
+| GET | `<teamspace>/config/<target>/local` | One local item as YAML (`.manifest`), secret values replaced by `<hidden>`: `?id=<Kind>/<namespace>/<name>` (required). `tnctl config get <robot>` lists them all. | `read` |
 | PUT | `<teamspace>/config/<target>/local` | Add or replace a local item. A bot is held to a kind list and a pod-security baseline. | `creator` |
-| DELETE | `<teamspace>/config/<target>/local` | Remove a local item. | `creator` |
+| DELETE | `<teamspace>/config/<target>/local` | Remove a local item: `?id=<Kind>/<namespace>/<name>` (required). | `creator` |
 
 `GET …/promote` returns secrets as typed. Treat its answer as sensitive and never copy it elsewhere.
 

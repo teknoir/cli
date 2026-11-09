@@ -52,8 +52,8 @@ tnctl robot <robot>                           # one robot: type, phase, computer
 tnctl robot <robot> -o json                   # the platform's answer, including the bootstrap plan
 ```
 
-`tnctl robots` shows `Disabled`, `Disabling` or `Enabling` in the phase column when the robot is in
-the disable cycle. An empty teamspace prints `[]` and exits 0.
+`tnctl robots` shows `Disabled`, `Disabling`, `Enabling`, `Not fully disabled` or `Enabling failed` in
+the phase column when the robot is in the disable cycle. An empty teamspace prints `[]` and exits 0.
 
 There is no tnctl subcommand for types or fleets: use `tnctl api GET <teamspace>/types` and
 `…/fleets`.
@@ -76,7 +76,7 @@ tnctl robot add <robot> --type <type> [--device <device>] [--unit <unitId>] [--l
 |---|---|
 | `--type` | Required. The type the robot is created from. List them with `tnctl api GET <teamspace>/types`. |
 | `--device` | Adopt an existing device instead of creating one. It must exist, be visible to you, back no other robot, and not be a bot's computer. |
-| `--unit` | The org unit's **id** (not its name). Without it the platform uses your own unit. |
+| `--unit` | The org unit's **id** (not its name): `.bot.unitId` from `tnctl whoami -o json` for a bot's own unit, otherwise `units[].id` from `tnctl api GET <teamspace>/org`. Without it, an adopted device that is already placed keeps its placement; otherwise a placed bot or a person limited to one unit gets that unit, a person who is not limited gets an unplaced robot, and a person limited to several units is refused (exit 5). |
 | `--label` | A label of the robot, `key=value`. Repeat for several. |
 | `-o json` | Print the robot the platform answered instead of one line. |
 
@@ -85,19 +85,22 @@ there.
 
 **What the platform does next**, within about a minute:
 
-1. Creates the Device — `--device`, or a new one named like the robot — with a board from the type's
-   server role when that role names a known one, and otherwise `generic`.
+1. Without `--device`, creates a Device named like the robot, with a board from the type's server role
+   when that role names a known one, and otherwise `generic`; with `--device`, adopts that existing
+   device.
 2. Adds the robot's labels and applications to the device; an unlabelled device is adopted and keeps
    its applications by handing them to the robot.
 3. Creates the robot's k3s join-token Secret and fills the device's key pair.
-4. Reports the phase. The create answer is `WaitingForDevice` with `Device N does not exist yet. The
-   platform creates it within a minute.`
+4. Reports the phase. For a new device the create answer is `WaitingForDevice` with `Device N does not
+   exist yet. The platform creates it within a minute.`; an adopted device answers with its own phase
+   (often `Registered` or `Online`).
 
 A robot created through the API is never a virtual device. To put a robot on a VM, create the virtual
 device first in the portal and adopt it with `--device`.
 
-**A robot cannot take a TeknoirBot's computer as its device.** It stays `WaitingForDevice` with a
-conflict message; pick another device.
+**A robot cannot take a TeknoirBot's computer as its device.** `tnctl robot add` is refused (exit 8,
+or exit 5 for a `tb-` name); a robot whose device became a bot's computer later shows
+`WaitingForDevice` with a conflict message.
 
 `tnctl robot add` has no flags for node names or the server address. To set them, PATCH after the
 create (see below).
@@ -105,8 +108,10 @@ create (see below).
 ## Changing a robot
 
 ```bash
-tnctl api PATCH <teamspace>/robots/<robot> --data '{"labels":{"site":"karlstad"}}'
+tnctl api PATCH <teamspace>/robots/<robot> --data '{"serverAddress":"192.168.1.20"}'
 ```
+
+For labels, nodes or applications, never send a partial body: use the read-merge-send example below.
 
 The body takes `labels`, `nodes`, `serverAddress` and `applications`, and at least one of them
 (`Nothing to change. Send at least one of labels, nodes, serverAddress or applications.`).
@@ -116,8 +121,10 @@ The body takes `labels`, `nodes`, `serverAddress` and `applications`, and at lea
 - `nodes` is the list of `{role, nodeName}` bindings; every node name must be unique.
 - `applications` is the robot's own configuration layer.
 
-**`labels` and `applications` replace the whole set.** Sending only the new label deletes every other
-label the robot has, and likewise for applications. Read first, merge, then send the full map or list:
+**`labels`, `nodes` and `applications` replace the whole set.** Sending only the new label deletes
+every other label the robot has, and the same holds for node bindings and applications. Read first
+(`.labels`, `.spec.nodes`, `.spec.applications` of `tnctl robot <robot> -o json`), merge, then send the
+full map or list:
 
 ```bash
 # Add the label site=karlstad and keep every existing label.
@@ -140,8 +147,7 @@ repository R is not available to this teamspace. Ask a platform administrator to
 Create with `tnctl api POST` and change with `tnctl api PUT`. Both apply to the whole teamspace, so a
 person limited to org units, and a TeknoirBot that is placed in one, are refused.
 
-A **PUT replaces the whole object.** Read it, edit the JSON, send it back — and the `name` in the body
-must equal the name in the path. A type and a fleet cannot be renamed.
+A **PUT replaces the whole object** (a field you leave out is cleared; a fleet's priority goes back to 0). Start from what the platform has: a type with `tnctl api GET <teamspace>/types/<type> | jq '{name,displayName,description,nodes,capabilities,applications:[.applications[]|{repo_url,revision,path,node_role}]}' > type.json`; a fleet has no single read, so `tnctl api GET <teamspace>/fleets | jq '.[] | select(.name=="<fleet>") | {name,displayName,description,selector,priority,applications:[.applications[]|{repo_url,revision,path,node_role}]}' > fleet.json`. Edit the file and send it with `tnctl api PUT <teamspace>/types/<type> --data @type.json` (or `…/fleets/<fleet> --data @fleet.json`). The `name` in the body, if present, must equal the name in the path; a type and a fleet cannot be renamed.
 
 What the platform checks:
 
@@ -161,12 +167,13 @@ These are a teamspace admin's commands, and a TeknoirBot may never run them.
 tnctl robot disable <robot> --reason "…" --wait      # withdraw MQTT key, close sessions, Tunneling off
 tnctl robot enable <robot> --wait                     # register the key again
 tnctl robot remove <robot> --yes                      # remove the robot
-tnctl device disable|enable|remove <device>           # the same for a device without a robot
+tnctl device disable|enable <device>                  # the same for a device without a robot
+tnctl device remove <device> --yes                    # only a device that backs no robot
 ```
 
 - A disabled robot keeps running its apps but cannot reach the platform.
-- `disable` needs a one-line reason of at most 200 characters; `remove` without `--yes` prints what
-  would go and exits 2, removing nothing.
+- `--reason` is optional: one line of at most 200 characters (exit 2 otherwise); `remove` without
+  `--yes` prints what would go and exits 2, removing nothing.
 - `tnctl device remove` works only for a device that backs no robot; remove the robot instead.
 - `tnctl robot remove` deletes the robot **and its device**, with the device's overrides, local items,
   keys, MQTT access and tunnels. It cannot be undone. Only a device that belongs to another robot
@@ -186,10 +193,11 @@ tnctl ns <teamspace>
 tnctl bootstrap <device> --skip-upload [--robot <robot> --role <role> --agent-role <role> …]
 ```
 
-That writes `bootstrap_server_<device>.sh` and `bootstrap_agent_<device>.sh`, mode 0600, in the
-current directory. They embed the device login, the k3s join token and, if asked, a registry
-credential: **they are secrets**. The person copies each to its computer and runs it with `sudo`, the
-server script first, and waits until the node is Ready before each agent script.
+That writes `bootstrap_server_<device>.sh`, `bootstrap_agent_<device>.sh` and
+`bootstrap_docker_server_<device>.sh`, mode 0600, in the current directory. They embed the device
+login, the k3s join token and, if asked, a registry credential: **they are secrets**. The person copies
+each to its computer and runs it with `sudo`, the server script first, and waits until the node is
+Ready before each agent script.
 
 It fails until the device has its key pair; wait a few minutes after the create and try again.
 
@@ -220,7 +228,7 @@ A virtual device is a KubeVirt VM with its own k3s, created in the portal with *
 API, and a robot created with `tnctl robot add` is never virtual.
 
 To put a robot on a VM: create the virtual device first, then `tnctl robot add <robot> --type <type>
---device <vm>`. The device keeps its own placement.
+--device <vm>`. Without `--unit`, a placed device keeps its placement.
 
 A teamspace has an allowance (a number of devices, vCPU, memory and disk) and each device a maximum
 size. When the VM is not admitted, the portal shows the reason on the device's page; a robot on it
@@ -233,7 +241,7 @@ robot answer. Hand that to a person: only a platform administrator changes the a
 
 | Phase | Meaning | What you do |
 |---|---|---|
-| `WaitingForDevice` | The device does not exist yet, its keys are not filled, or it conflicts with another robot or a bot's computer. | Wait a minute after a create. If it stays, read `phaseMessage` and pick another device. |
+| `WaitingForDevice` | The device does not exist yet, its keys are not filled, or it conflicts with another robot or a bot's computer. | Wait a minute after a create. If it stays, read `phaseMessage`. A robot's device cannot be changed: give a teamspace admin `tnctl robot remove <robot> --yes` and `tnctl robot add <robot> --type <type> --device <other>`. If the device is a TeknoirBot's computer, the remove is refused (exit 5); report that to the person instead. |
 | `Registered` | The device has keys but has never reported. | A person runs the bootstrap. Hand over the plan. |
 | `Online` | The device reported within the last 5 minutes, with no firing alert. | Nothing. |
 | `Degraded` | Online, with firing alerts. | `teknoir-debug`. |
@@ -242,8 +250,10 @@ robot answer. Hand that to a person: only a platform administrator changes the a
 The controller reconciles every 60 seconds, so a phase can lag a minute behind reality, and a robot
 whose metrics cannot be read keeps its previous phase.
 
-A disabled robot is not in any of these: `overview.robots.disabled` counts it, and its
-`phaseMessage` says who disabled it, when and why.
+A disabled robot keeps one of these in `.phase`; check `.disabled` (`state`: `disabling`, `disabled`
+or `enabling`, and `error`). Its `phaseMessage` says who disabled it, when and why,
+`overview.robots.disabled` counts it outside the phases, and `tnctl robots` shows `Disabled`,
+`Disabling`, `Enabling`, `Not fully disabled` or `Enabling failed` in PHASE.
 
 ### Conditions
 
@@ -262,11 +272,16 @@ Conditions are not in the robot answer the API returns: read the phase and `phas
 |---|---|---|
 | `A robot named "N" already exists. Pick another name.` | 8 | The name is taken. Do not retry; pick another. |
 | `Device "D" already backs robot "R". Pick another device or robot name.` | 8 | Pick another device. |
+| `A device named "N" already exists. Pick another robot name, or choose that device to adopt it.` | 8 | Use another name, or adopt it with `--device N`. |
+| `Device "D" belongs to robot "R". Pick another device.` | 8 | Pick another device. |
 | `Device "D" does not exist. Leave the device empty to create a new one.` | 5 | The device is not there or not visible to you. |
 | `The robot type "T" does not exist in this teamspace. Create it first or pick another robot type.` | 5 | Create the type, or use another. |
-| `Device X is the computer of TeknoirBot B and cannot back a robot.` | 5 or 8 | Pick another device. |
+| `X is the computer of TeknoirBot B and cannot back a robot.` | 8 | Pick another device. Do not retry. |
+| `Robot names starting with tb- are kept for the computers of TeknoirBots…` / `Device tb-x has a name kept for the computers of TeknoirBots…` | 5 | Pick another name or device. |
 | `This TeknoirBot may only read (Read only)…` | 6 | A bot at Read only cannot write. Ask the creator. |
-| `you can only place robots in your own units` | 6 | The unit is outside your scope. |
+| `Choose the org unit for this robot: A, B.` | 5 | Pass `--unit <id>`. |
+| `Your account is limited to org units but has none assigned…` | 5 | Ask a teamspace admin to assign a unit. |
+| `You can only place robots in your own units (…) or below them.` | 6 | The unit is outside your scope. |
 
 ### `NotAdmitted`
 
@@ -296,11 +311,12 @@ plan and poll until `Online`.
 **Adopt an existing device.**
 
 ```bash
-tnctl devices                             # the device must exist and back no robot
+tnctl api GET <teamspace>/devices | jq -r '.[] | select((.robot // "") == "" and (.bot // "") == "") | .name'   # devices that back no robot and are no bot's computer
 tnctl robot add vs-02 --type vision --device spare-01
 ```
 
-The robot takes over the device's applications and keeps the device's existing placement.
+The robot takes over the device's applications. A device that is already placed keeps its placement
+unless you pass `--unit`, which moves it; an unplaced device is placed as described under `--unit`.
 
 **Place a robot in an org unit.**
 

@@ -42,9 +42,11 @@ prints it. It is the bot's whole identity on the platform: anyone who copies it 
 - Never read, print, copy, echo, encode or move it — not with `cat`, `head`, `base64`, `xxd`, `cp`,
   `grep`, `jq`, a redirect or a command substitution.
 - Never pass it as an argument or an environment value of another program.
-- The one exception is the `teknoirbot-app-key` helper of the `teknoir-mqtt-streams` skill: it copies
-  the key into a Kubernetes Secret in the `apps` namespace so a pod there can read the platform
-  stream. It never prints the value. Use it; do not do the job by hand.
+- The only exceptions are two helpers of the `teknoir-mqtt-streams` skill. `teknoirbot-app-key` copies
+  the key into a Kubernetes Secret in the `apps` namespace, so that a pod there can read the platform
+  stream. `mqtt-relay.py --sse` reads the key file it is given (`--key-file`, by default
+  `$TNCTL_BOT_KEY_FILE`; in a pod, the mounted Secret). Neither prints the value. Use them; do not do
+  their job by hand.
 - If a command says the key is missing or empty, the bot's computer predates the agent. A person must
   re-create the bot; you cannot fix it.
 
