@@ -1882,6 +1882,29 @@ func TestMCPMqttSampleListensFromTheOpen(t *testing.T) {
 	mcpWaitEnded(t, ended)
 }
 
+// The stream's headers arrive within a millisecond of the open bound: every result is a sample or the
+// open-bound error, never the bound's cancel cause read from the open stream. Statistical: without the
+// fix about one call in 25 fails.
+func TestMCPMqttSampleOpenBoundRace(t *testing.T) {
+	mcpSampleFast(t)
+	old := mcpSampleOpenMax
+	t.Cleanup(func() { mcpSampleOpenMax = old })
+	for i := 0; i < 60; i++ {
+		mcpSampleOpenMax = 30*time.Millisecond + time.Duration(i%11)*150*time.Microsecond
+		before := 30*time.Millisecond + time.Duration(i%7)*200*time.Microsecond
+		srv, _ := mcpSSEAfter(t, before, func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, mcpSSEMsg("/devices/d1/state/x", "one"))
+		}, true)
+		cs := mcpClient(t, newMCPServer(mcpSampleEnv(t, srv)))
+		res := mcpCall(t, cs, "mqtt_sample", sampleArgs(map[string]any{"seconds": 1}))
+		if txt := mcpText(t, res); res.IsError && !strings.Contains(txt, "did not open the MQTT stream within") {
+			t.Fatalf("call %d (bound %s, headers after %s): %q", i, mcpSampleOpenMax, before, txt)
+		}
+		_ = cs.Close()
+		srv.Close()
+	}
+}
+
 // The sample lasts the real 30 seconds: only the receiving middleware can end it within the guard.
 func TestMCPMqttSampleEndsWhenTheServerStops(t *testing.T) {
 	started := make(chan struct{}, 1)

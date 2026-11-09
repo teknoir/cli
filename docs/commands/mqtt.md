@@ -35,8 +35,9 @@ One line per message:
 ```
 
 A payload that is not text shows as `<base64:N bytes>`. A text payload keeps its newlines escaped (`\n`, `\r`),
-so one message is always one line. With `--json`, each message's data is one JSON line, exactly as the platform
-sent it (compacted, so a field this tnctl does not know survives):
+so one message is always one line, and shows any other control character but tab as `\u00XX` (an escape as
+`\u001b`), so a device's message never drives the terminal. With `--json`, each message's data is one JSON line,
+exactly as the platform sent it (compacted, so a field this tnctl does not know survives):
 `{"topic":"/devices/d1/state/x","payload":"hello","retain":false,"ts":"2026-11-08T10:00:00Z"}`.
 
 Messages the platform had to drop are reported on stderr, with why (`rate`: too many messages too fast, `size`:

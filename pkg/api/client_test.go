@@ -356,3 +356,21 @@ func TestParseChallenge(t *testing.T) {
 		t.Errorf("%v", g)
 	}
 }
+
+// The challenge of a 401 is text from the platform too: its control characters never reach the
+// terminal (Go refuses C0 in a header, but a C1 such as U+009B passes).
+func TestRequest_ChallengeDropsControlCharacters(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", "Bearer error=\"invalid_token\", error_description=\"expired\u009b2J\u009b31mx\"")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+	err := Request(context.Background(), "GET", ts.URL+"/a", "t", nil)
+	var ae *Error
+	if !errors.As(err, &ae) || ae.Kind != KindAuth {
+		t.Fatalf("err %v", err)
+	}
+	if want := msgNotLoggedIn + " (expired2J31mx)"; ae.Error() != want {
+		t.Errorf("got %q, want %q", ae.Error(), want)
+	}
+}

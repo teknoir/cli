@@ -393,3 +393,44 @@ func TestMCPCodexUninstallRemovesAnOlderKitEntry(t *testing.T) {
 		t.Errorf("actions %v, warnings %v", actionsOf(res), res.Warnings)
 	}
 }
+
+// Uninstall removes only the kit's entries: a [mcp_servers.teknoir] of the user's that is close to an
+// older kit entry is kept and warned about, and list gives it no note.
+func TestMCPCodexUninstallKeepsAUsersEntry(t *testing.T) {
+	for name, table := range map[string]string{
+		"another command": "command = \"/usr/local/bin/tnctl\"\nargs = [\"mcp\"]\n",
+		"more args":       "command = \"tnctl\"\nargs = [\"mcp\", \"-n\", \"acme\"]\n",
+		"an extra key":    "command = \"tnctl\"\nargs = [\"mcp\"]\nstartup_timeout_sec = 30\n",
+		"an env table":    "command = \"tnctl\"\nargs = [\"mcp\"]\nenv = { TNCTL_NAMESPACE = \"acme\" }\n",
+		"empty env_vars":  "command = \"tnctl\"\nargs = [\"mcp\"]\nenv_vars = []\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			o, _, project := mcpOpts(t, AgentCodex, ScopeProject)
+			path := filepath.Join(project, ".codex", "config.toml")
+			text := "model = \"gpt-5\"\n\n[mcp_servers.teknoir]\n" + table
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ls, err := List(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ls.MCP) != 1 || ls.MCP[0].Registered || ls.MCP[0].Note != "" {
+				t.Errorf("list %+v", ls.MCP)
+			}
+			res, err := Uninstall(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := readFile(t, path); got != text {
+				t.Errorf("the user's entry was changed:\n%s", got)
+			}
+			if !hasAction(res, ActionSkip, path) || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "not the kit's") {
+				t.Errorf("actions %v, warnings %v", actionsOf(res), res.Warnings)
+			}
+		})
+	}
+}

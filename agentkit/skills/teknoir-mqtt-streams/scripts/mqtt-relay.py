@@ -97,6 +97,11 @@ def destination(prefix, topic):
     return prefix + topic.lstrip("/")
 
 
+def printable(text):
+    """Text from the platform on one log line: no control character (ESC, BEL, NUL, C1) drives a terminal."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in str(text)).split())
+
+
 def one_line(payload):
     """A payload on one printed line, like tnctl does."""
     text = payload.decode("utf-8", "replace")
@@ -246,9 +251,7 @@ def response_message(response):
                 text = value
                 break
     # One log line per answer, however the body was shaped: the relay's log is the operator's only clue.
-    # No control character (ESC, BEL, NUL, C1) reaches the log: a body never drives a terminal.
-    text = "".join(ch if ch.isprintable() else " " for ch in text)
-    return " ".join(text.split())[:300] or "(no message)"
+    return printable(text)[:300] or "(no message)"
 
 
 def sse_open(api, namespace, topics, key_file, idle_timeout):
@@ -380,13 +383,13 @@ def handle_event(name, data, sink):
     if name == "dropped":
         count = doc.get("count", 0)
         reason = doc.get("reason") or "unknown reason"
-        reason = DROPPED_REASONS.get(reason, reason) if isinstance(reason, str) else reason
-        print(f"relay: the platform dropped {count} message(s): {reason}",
+        reason = printable(DROPPED_REASONS.get(reason, reason) if isinstance(reason, str) else reason)
+        print(f"relay: the platform dropped {printable(count)} message(s): {reason}",
               file=sys.stderr, flush=True)
         return
     if name == "error":
         message = doc.get("message") or doc.get("code") or "the platform ended the stream"
-        raise Fatal(1, f"the platform ended the stream: {message}")
+        raise Fatal(1, f"the platform ended the stream: {printable(message)}")
     if name != "message":
         return
     topic = doc.get("topic")

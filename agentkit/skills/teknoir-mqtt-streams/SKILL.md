@@ -72,7 +72,7 @@ tnctl mqtt stream /devices/+/state/# /devices/+/events/alerts --seconds 60 --rec
   **string**; a JSON payload needs a second parse (`jq -c '.payload|fromjson?'`). A payload that is
   not UTF-8 arrives as `payloadBase64`.
 - Without `--json` each message is one line, `<topic> <payload>`, and a binary payload shows as
-  `<base64:N bytes>`.
+  `<base64:N bytes>`. Newlines show as `\n`, other control characters but tab as `\u00XX`.
 - `--count N` and `--seconds S` stop cleanly (exit 0) once a stream opened. Dropped messages are
   reported on stderr, with why: `rate` (the platform forwards at most 200 messages per second per
   stream), `size` (a message over 256 KiB) or `slow` (the reader did not keep up). A message over
@@ -84,12 +84,13 @@ tnctl mqtt stream /devices/+/state/# /devices/+/events/alerts --seconds 60 --rec
   most 60 s, instead of the backoff; a `429` that carries `Retry-After` because the bot made more
   than 120 requests in a minute is waited out the same way. It does **not** reconnect after a
   refused request (a bad topic, no access, a device that is not there: `400`, `403`, `404`), a
-  `429` that says too many live streams are open, `live MQTT is not configured`, a missing key, or
-  an error the platform reported on the stream (`access_lost`, `broker_closed`). If no stream
-  opened before `--seconds` ends, with or without `--reconnect`, it exits with the last answer's
-  code, or 4 when no answer came (a platform that cannot reach its broker answers after 10 s): an
-  empty output is then never "the devices were quiet". Run a long stream under a supervisor
-  (Kubernetes, or a shell loop) so that an error ends and restarts the whole pipeline.
+  `429` that says too many live streams are open or that too many bot keys were refused,
+  `live MQTT is not configured`, a missing key, or an error the platform reported on the stream
+  (`access_lost`, `broker_closed`). If no stream opened before `--seconds` ends, with or without
+  `--reconnect`, it exits with the last answer's code, or 4 when no answer came (a platform that
+  cannot reach its broker answers after 10 s): an empty output is then never "the devices were
+  quiet". Run a long stream under a supervisor (Kubernetes, or a shell loop) so that an error ends
+  and restarts the whole pipeline.
   The platform ends every stream cleanly after 60 minutes and when the portal restarts, so a
   long-running reader always uses `--reconnect` or the relay.
 - Four streams at once per caller (per bot for a bot). `ts` is when the platform received the

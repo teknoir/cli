@@ -258,7 +258,11 @@ func (p *op) mcpStatus(a Agent) MCPStatus {
 		srv, found := tomlServer(parsed)
 		st.Registered = found && tomlServerIsOurs(srv)
 		if found && !st.Registered && tomlServerIsKits(srv) {
-			st.Note = "the entry of an older tnctl, without env_vars: run tnctl agent install --mcp --force"
+			fix := "tnctl agent install --agent codex --mcp --force"
+			if p.o.Scope == ScopeProject {
+				fix = "tnctl agent install --project --agent codex --mcp --force"
+			}
+			st.Note = "the entry of an older tnctl, without env_vars: run " + fix
 		}
 	case AgentClaude:
 		st.Registered = p.jsonHasEntry(data, []string{"mcpServers"}, claudeMCPEntry)

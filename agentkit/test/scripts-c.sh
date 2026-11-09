@@ -255,6 +255,9 @@ SLOW_DROPPED = 'event: dropped\ndata: {"count":3,"reason":"slow"}\n\n'
 SIZE_DROPPED = 'event: dropped\ndata: {"count":2,"reason":"size"}\n\n'
 ODD_DROPPED = 'event: dropped\ndata: {"count":1,"reason":["x"]}\n\n'
 ERROR = 'event: error\ndata: {"code":"access_lost","message":"the caller lost access"}\n\n'
+CTL_DROPPED = 'event: dropped\ndata: {"count":"4\\u001b[2J","reason":"x\\u001b[2Jy"}\n\n'
+CTL_ERROR = ('event: error\ndata: {"code":"access_lost","message":"lost\\u001b]0;owned\\u0007 '
+             'access"}\n\n')
 BROKER_CLOSED = ('event: error\ndata: {"code":"broker_closed","message":"The MQTT broker of '
                  'teamspace teknoir-demo closed the connection."}\n\n')
 
@@ -389,6 +392,12 @@ class Handler(BaseHTTPRequestHandler):
         if mode == "error":
             self.wfile.write(MESSAGE.encode())
             self.wfile.write(ERROR.encode())
+            self.wfile.flush()
+            return
+        if mode == "ctlevent":  # a dropped reason and an error message with control characters
+            self.wfile.write(MESSAGE.encode())
+            self.wfile.write(CTL_DROPPED.encode())
+            self.wfile.write(CTL_ERROR.encode())
             self.wfile.flush()
             return
         if mode == "cuterror":  # an error event that the end of the stream cuts off
@@ -748,6 +757,16 @@ PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
 stop_server
 check_contains "relay --sse: a body with control characters is still logged" "$err" "]0;owned"
 check_absent "relay --sse: no ESC from a body reaches the log" "$err" "$(printf '\033')"
+
+start_server ctlevent
+err="$work/sse-ctlevent.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+stop_server
+check_contains "relay --sse: an error message with control characters is still logged" "$err" "lost ]0;owned access"
+check_contains "relay --sse: a dropped reason with control characters is still logged" "$err" "dropped 4 [2J message(s): x [2Jy"
+check_absent "relay --sse: no ESC from an event reaches the log" "$err" "$(printf '\033')"
 
 start_server longbusy
 err="$work/sse-longbusy.err"

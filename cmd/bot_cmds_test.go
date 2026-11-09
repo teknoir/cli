@@ -2137,3 +2137,71 @@ func TestMqttStreamCtrlCWithoutAStreamIsClean(t *testing.T) {
 		t.Errorf("Ctrl-C without a stream: %v, want a clean stop", err)
 	}
 }
+
+// retryReason cleans what it is given itself: an error built in tnctl (a network failure's cause)
+// never went through the API client's cleaning.
+func TestMqttStreamRetryReasonDropsControlCharacters(t *testing.T) {
+	got := retryReason(&api.Error{Status: 502, Message: "a\x1b[2Jb\x07c\u009bd\x00e\tf\ng"})
+	if want := "a[2Jbcde f g"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got := retryReason(&api.Error{Status: 503, Message: "\x1b\x07"}); got != "HTTP 503" {
+		t.Errorf("only control characters: got %q, want %q", got, "HTTP 503")
+	}
+}
+
+// An error event's message reaches the terminal without its control characters.
+func TestMqttStreamErrorEventDropsControlCharacters(t *testing.T) {
+	noBotMode(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		b, _ := json.Marshal(api.StreamError{Code: "access_lost", Message: "lost\x1b]0;owned\x07 access"})
+		_, _ = io.WriteString(w, "event: error\ndata: "+string(b)+"\n\n")
+	}))
+	defer srv.Close()
+	_, _, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "lost]0;owned access") ||
+		strings.ContainsAny(err.Error(), "\x1b\x07") {
+		t.Errorf("exit %d, error %q", exitCodeOf(err), err.Error())
+	}
+}
+
+// A dropped reason tnctl does not know reaches stderr without its control characters.
+func TestMqttStreamDroppedReasonDropsControlCharacters(t *testing.T) {
+	noBotMode(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		b, _ := json.Marshal(api.StreamDropped{Count: 3, Reason: "x\x1b[2Jy"})
+		_, _ = io.WriteString(w, "event: dropped\ndata: "+string(b)+"\n\n")
+		_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+	}))
+	defer srv.Close()
+	_, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "tnctl: the platform dropped 3 message(s): x[2Jy\n"; errs != want {
+		t.Errorf("stderr %q, want %q", errs, want)
+	}
+}
+
+// A device's payload and topic never drive the terminal: control characters show as \u00XX, a tab
+// stays a tab.
+func TestMqttStreamTextPayloadIsEscaped(t *testing.T) {
+	noBotMode(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x\x1b[2J", "hi\x1b]0;owned\x07\tx\u009by"))
+	}))
+	defer srv.Close()
+	out, _, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/devices/d1/state/x\\u001b[2J hi\\u001b]0;owned\\u0007\tx\\u009by\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+}

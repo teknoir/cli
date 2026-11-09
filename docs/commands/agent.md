@@ -55,8 +55,9 @@ With no `--agent` every agent is installed for, in the user scope.
   `TNCTL_BOT_KEY_FILE`, `TEKNOIRBOT_NAMESPACE` and `TEKNOIR_DOMAIN`, `TNCTL_NAMESPACE` and
   `TNCTL_DOMAIN`, and the proxy variables `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` in either case and
   `SSL_CERT_DIR`); an install from an older `tnctl` has no `env_vars` line, so
-  `tnctl agent install --agent codex --mcp --force` updates it (`--force` also overwrites the kit files you
-  changed).
+  `tnctl agent install --agent codex --mcp --force` updates it, and
+  `tnctl agent install --project --agent codex --mcp --force` a project's `.codex/config.toml` (`--force`
+  also overwrites the kit files you changed).
 - `--hooks` installs the guard hook for Claude Code and adds a `PreToolUse` entry for `Bash` and the
   `teknoir` MCP tools (`mcp__teknoir__*`, or `mcp__plugin_teknoir_teknoir__*` when the server comes from
   the kit's plugin) to `~/.claude/settings.json` (project: `.claude/settings.json`), keeping the other

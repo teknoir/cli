@@ -107,8 +107,26 @@ with the last answer's code, or 4 (timeout) when no answer came.`,
 	return c
 }
 
-// mqttPayloadEscaper keeps one message on one line: a text payload shows its newlines escaped.
-var mqttPayloadEscaper = strings.NewReplacer("\r", `\r`, "\n", `\n`)
+// escapeLine keeps one message on one terminal line and drives nothing: \r and \n show escaped,
+// any other control character but tab (ESC, BEL, NUL, DEL, C1 such as U+009B) as \u00XX.
+func escapeLine(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\t':
+			b.WriteRune(r)
+		case unicode.IsControl(r):
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 // mqttPrinter writes what the stream delivers and counts it.
 type mqttPrinter struct {
@@ -141,15 +159,14 @@ func (p *mqttPrinter) message(m *api.StreamMessage, data string) error {
 		}
 		payload = fmt.Sprintf("<base64:%d bytes>", n)
 	}
-	payload = mqttPayloadEscaper.Replace(payload)
-	_, err := fmt.Fprintf(p.out, "%s %s\n", m.Topic, payload)
+	_, err := fmt.Fprintf(p.out, "%s %s\n", escapeLine(m.Topic), escapeLine(payload))
 	return err
 }
 
 // dropped reports messages the platform had to drop.
 func (p *mqttPrinter) dropped(d *api.StreamDropped) {
 	p.events++
-	reason := d.Reason
+	reason := terminalText(d.Reason)
 	switch reason {
 	case "rate":
 		reason = "too many messages too fast"
@@ -165,7 +182,7 @@ func (p *mqttPrinter) dropped(d *api.StreamDropped) {
 
 // streamEndedError ends a stream the platform ended with an error event.
 func streamEndedError(e *api.StreamError) error {
-	msg := e.Message
+	msg := terminalText(e.Message)
 	if msg == "" {
 		msg = "the platform ended the stream"
 	}
@@ -277,18 +294,7 @@ func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFl
 // retryReason is the answer's message for the "connecting again" line: one line (a gateway's text
 // body may have several), at most 300 characters, or "HTTP <status>" when it has none.
 func retryReason(ae *api.Error) string {
-	// Whitespace becomes a space and other control characters (ESC, BEL, NUL, C1 such as U+009B)
-	// are dropped: a body never drives the terminal.
-	msg := strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return ' '
-		}
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, ae.Message)
-	msg = strings.Join(strings.Fields(msg), " ")
+	msg := terminalText(ae.Message)
 	if msg == "" {
 		return fmt.Sprintf("HTTP %d", ae.Status)
 	}
@@ -296,6 +302,21 @@ func retryReason(ae *api.Error) string {
 		msg = string(r[:300]) + "..."
 	}
 	return msg
+}
+
+// terminalText is s on one line for the terminal: whitespace becomes single spaces and other control
+// characters (ESC, BEL, NUL, C1 such as U+009B) are dropped, so text from the platform never drives
+// the terminal.
+func terminalText(s string) string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)), " ")
 }
 
 // retryAfterWait is how long an answer with Retry-After asks --reconnect to wait: that many

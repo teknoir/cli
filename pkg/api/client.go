@@ -221,10 +221,10 @@ func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) 
 		e.Detail = e.Message
 		detail := e.Message
 		if detail == "" {
-			detail = ch["error_description"]
+			detail = cleanMessage(ch["error_description"])
 		}
 		if detail == "" {
-			detail = ch["error"]
+			detail = cleanMessage(ch["error"])
 		}
 		if e.Code == "" {
 			e.Code = ch["error"]
@@ -316,12 +316,18 @@ func stripQuery(u string) string {
 // keeps no control characters but newline and tab: tnctl prints it on a terminal.
 func parseErrorBody(body []byte) (code, message string) {
 	code, message = parseErrorBodyRaw(body)
-	return code, strings.Map(func(r rune) rune {
+	return code, cleanMessage(message)
+}
+
+// cleanMessage drops every control character but newline and tab (ESC, BEL, NUL, C1 such as
+// U+009B) from text the platform sent: tnctl prints it on a terminal.
+func cleanMessage(s string) string {
+	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) && r != '\n' && r != '\t' {
 			return -1
 		}
 		return r
-	}, message)
+	}, s)
 }
 
 func parseErrorBodyRaw(body []byte) (code, message string) {

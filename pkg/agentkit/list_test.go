@@ -208,24 +208,36 @@ func TestListOutdatedAndExtra(t *testing.T) {
 	}
 }
 
-// list says why an older tnctl's Codex entry is not registered, and how to update it.
+// list says why an older tnctl's Codex entry is not registered, and the command that updates it in
+// the scope listed.
 func TestListCodexOlderKitEntry(t *testing.T) {
-	o, _, project := testOpts(t)
-	o.Agents = []Agent{AgentCodex}
-	o.Scope = ScopeProject
-	o.MCP = true
-	path := filepath.Join(project, ".codex", "config.toml")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	res, err := List(o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.MCP) != 1 || res.MCP[0].Registered || !strings.Contains(res.MCP[0].Note, "tnctl agent install --mcp --force") {
-		t.Errorf("mcp %+v", res.MCP)
+	for _, tc := range []struct {
+		scope Scope
+		fix   string
+	}{
+		{ScopeUser, "run tnctl agent install --agent codex --mcp --force"},
+		{ScopeProject, "run tnctl agent install --project --agent codex --mcp --force"},
+	} {
+		o, home, project := testOpts(t)
+		o.Agents = []Agent{AgentCodex}
+		o.Scope = tc.scope
+		o.MCP = true
+		path := filepath.Join(home, ".codex", "config.toml")
+		if tc.scope == ScopeProject {
+			path = filepath.Join(project, ".codex", "config.toml")
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := List(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.MCP) != 1 || res.MCP[0].Registered || !strings.HasSuffix(res.MCP[0].Note, tc.fix) {
+			t.Errorf("%s: mcp %+v, want a note ending %q", tc.scope, res.MCP, tc.fix)
+		}
 	}
 }
