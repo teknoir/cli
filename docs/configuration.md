@@ -14,6 +14,15 @@ Use a different file with the global `--config` flag:
 tnctl --config /path/to/custom.yaml devices
 ```
 
+The file holds your tokens, so `tnctl` keeps it readable by you alone (mode `0600`; a file an older
+`tnctl` created `0644` is tightened on the next save) and replaces it atomically (a file it cannot
+replace, such as one mounted into a container, is rewritten in place). A config file that is a
+symlink stays one: the file it points to is rewritten. A `--config` file without an extension is
+YAML; `.json` and `.toml` work too. Flags and environment variables of one run (`-n`,
+`TNCTL_NAMESPACE`, `--device`, `TNCTL_DEBUG`) are never written into it. A teamspace an older `tnctl`
+kept there from a `-n` run becomes the login's own on the next save. The first run creates it with
+`domain: teknoir.cloud` only; `tnctl login --domain <domain>` stores the domain you log in to.
+
 ### File structure
 
 ```yaml

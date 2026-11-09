@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/spf13/viper"
 )
@@ -36,6 +37,9 @@ var Debug bool
 type Config struct {
 	Domain string                `mapstructure:"domain" yaml:"domain" json:"domain" toml:"domain"`
 	Auths  map[string]AuthConfig `mapstructure:"auths" yaml:"auths" json:"auths" toml:"auths"`
+	// namespaceChosen says SetNamespace chose the teamspace (tnctl ns): Save then keeps that choice
+	// instead of the flag_namespace an older tnctl wrote.
+	namespaceChosen bool
 }
 
 // DefaultConfig returns a Config with default values.
@@ -121,11 +125,27 @@ func (c *Config) Save() error {
 	if fns, ok := m["flag_namespace"].(string); ok && fns != "" && m["namespace"] == fns {
 		delete(m, "namespace")
 	}
+	auths := c.Auths
+	// An older Save also wrote a run's -n or TNCTL_NAMESPACE as flag_namespace, and GetNamespace has
+	// read it since as the teamspace of every run, ahead of the login's own. It is not kept (notSaved),
+	// but the teamspace it chose is: it becomes the login's own, unless this save chose one (tnctl ns),
+	// so a token refresh never switches the teamspace under the user.
+	if fns, ok := m["flag_namespace"].(string); ok && fns != "" && !c.namespaceChosen {
+		key := SanitizeDomain(c.Domain)
+		if a, ok := auths[key]; ok {
+			auths = make(map[string]AuthConfig, len(c.Auths))
+			for k, v := range c.Auths {
+				auths[k] = v
+			}
+			a.Namespace = fns
+			auths[key] = a
+		}
+	}
 	for _, k := range notSaved {
 		delete(m, k)
 	}
 	m["domain"] = c.Domain
-	m["auths"] = c.Auths
+	m["auths"] = auths
 	wv := newFileViper(path)
 	if err := wv.MergeConfigMap(m); err != nil {
 		return err
@@ -153,10 +173,17 @@ func newFileViper(path string) *viper.Viper {
 	v := viper.New()
 	v.SetConfigFile(path)
 	v.SetConfigPermissions(0o600)
-	if filepath.Ext(path) == "" {
-		v.SetConfigType("yaml")
-	}
+	v.SetConfigType(FileType(path))
 	return v
+}
+
+// FileType is the format of the config file named path: its extension, or YAML when it has none (a
+// dotfile such as .tnctlrc has none either: filepath.Ext calls its whole name the extension).
+func FileType(path string) string {
+	if ext := filepath.Ext(path); ext != "" && ext != filepath.Base(path) {
+		return strings.ToLower(ext[1:])
+	}
+	return "yaml"
 }
 
 // writeConfigAtomic writes v next to the config file and renames it into place, so a concurrent
@@ -164,12 +191,29 @@ func newFileViper(path string) *viper.Viper {
 // existing file loses its group and other bits (tnctl created ~/.tnctl.yaml 0644 before). A config
 // that is a symlink (a dotfiles repo) stays one: the file it points to is replaced.
 func writeConfigAtomic(v *viper.Viper, path string) error {
+	// The temp file is named with the configured file's type, never the link target's: viper picks
+	// the encoder from the name, and a target may have another extension or none.
+	ext := "." + FileType(path)
 	if real, err := filepath.EvalSymlinks(path); err == nil {
 		path = real
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".tnctl-*"+filepath.Ext(path))
+	mode := os.FileMode(0o600)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm() & 0o600
+	}
+	// inPlace writes the file itself, not atomically: for a directory tnctl cannot create files in,
+	// and for a file that is a mount point (docker run -v ~/.tnctl.yaml:...), which rename cannot
+	// replace (EBUSY).
+	inPlace := func() error {
+		if err := v.WriteConfigAs(path); err != nil {
+			return err
+		}
+		_ = os.Chmod(path, mode)
+		return nil
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".tnctl-*"+ext)
 	if err != nil {
-		return v.WriteConfigAs(path)
+		return inPlace()
 	}
 	tmp := f.Name()
 	_ = f.Close()
@@ -177,12 +221,14 @@ func writeConfigAtomic(v *viper.Viper, path string) error {
 	if err := v.WriteConfigAs(tmp); err != nil {
 		return err
 	}
-	mode := os.FileMode(0o600)
-	if st, err := os.Stat(path); err == nil {
-		mode = st.Mode().Perm() & 0o600
-	}
 	_ = os.Chmod(tmp, mode)
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		if errors.Is(err, syscall.EBUSY) || errors.Is(err, syscall.EXDEV) {
+			return inPlace()
+		}
+		return err
+	}
+	return nil
 }
 
 // LoadFresh reads the configuration file from disk again, ignoring viper's
@@ -271,6 +317,7 @@ func (c *Config) SetNamespace(ns string) {
 		auth := c.Auths[key]
 		auth.Namespace = ns
 		c.Auths[key] = auth
+		c.namespaceChosen = true
 	}
 }
 

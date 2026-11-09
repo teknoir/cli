@@ -269,8 +269,10 @@ func TestSaveWritesNoFlagOrEnvironment(t *testing.T) {
 	if got := fv.GetString("auths.teknoir_cloud.refresh_token"); got != "r3" {
 		t.Errorf("refresh token %q", got)
 	}
-	if got := fv.GetString("auths.teknoir_online.namespace"); got != "prod-ns" {
-		t.Errorf("other domain's namespace %q", got)
+	// The older tnctl's flag_namespace was the teamspace every run without -n targeted: it moves into
+	// the file's login (the file's domain), so the next run without -n still targets it.
+	if got := fv.GetString("auths.teknoir_online.namespace"); got != "stale" {
+		t.Errorf("the file login's namespace %q, want stale (the older flag_namespace)", got)
 	}
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
 		t.Errorf("mode %v, want 0600: the file holds tokens", fi.Mode().Perm())
@@ -467,16 +469,18 @@ func TestSaveKeepsTheLoginInEveryFormat(t *testing.T) {
 
 // A top-level namespace that tnctl v0.0.1-beta and v0.0.2-beta wrote (tnctl ns) is the teamspace
 // of a login without one of its own: a token refresh keeps it. One that an older Save copied from
-// TNCTL_NAMESPACE (it then also wrote that value as flag_namespace) is removed.
+// TNCTL_NAMESPACE (it then also wrote that value as flag_namespace) is removed. A flag_namespace an
+// older Save wrote was the teamspace of every run: the refresh moves it into the login, so the
+// teamspace does not change under the user.
 func TestSaveKeepsALegacyTopLevelNamespace(t *testing.T) {
 	const login = "domain: teknoir.cloud\nauths:\n  teknoir_cloud:\n    access_token: at\n    refresh_token: rt\n"
 	for name, c := range map[string]struct {
-		top, want string
+		top, want, wantTop string
 	}{
-		"v0.0.2 file":                 {"namespace: legacy-ns\n", "legacy-ns"},
-		"saved by an older tnctl":     {"namespace: legacy-ns\nflag_namespace: \"\"\n", "legacy-ns"},
-		"an older -n of another name": {"namespace: legacy-ns\nflag_namespace: acme\n", "legacy-ns"},
-		"TNCTL_NAMESPACE written":     {"namespace: acme\nflag_namespace: acme\n", "default"},
+		"v0.0.2 file":                 {"namespace: legacy-ns\n", "legacy-ns", "legacy-ns"},
+		"saved by an older tnctl":     {"namespace: legacy-ns\nflag_namespace: \"\"\n", "legacy-ns", "legacy-ns"},
+		"an older -n of another name": {"namespace: legacy-ns\nflag_namespace: acme\n", "acme", "legacy-ns"},
+		"TNCTL_NAMESPACE written":     {"namespace: acme\nflag_namespace: acme\n", "acme", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := useConfig(t, ".tnctl.yaml", login+c.top)
@@ -493,8 +497,8 @@ func TestSaveKeepsALegacyTopLevelNamespace(t *testing.T) {
 			if ns := same.GetNamespace(); ns != c.want {
 				t.Errorf("this process targets %q after the refresh, want %q", ns, c.want)
 			}
-			if got := fv.GetString("namespace"); got != map[bool]string{true: "", false: c.want}[c.want == "default"] {
-				t.Errorf("the file's namespace is %q", got)
+			if got := fv.GetString("namespace"); got != c.wantTop {
+				t.Errorf("the file's namespace is %q, want %q", got, c.wantTop)
 			}
 			if fv.IsSet("flag_namespace") {
 				t.Errorf("the file still holds flag_namespace %q", fv.GetString("flag_namespace"))
@@ -552,5 +556,153 @@ func TestSaveFollowsASymlinkedConfig(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
 		t.Errorf("Save left files next to the link: %d entries", len(entries))
+	}
+}
+
+// An older tnctl's Save wrote --device, TNCTL_DEVICE and TNCTL_DEBUG into the file: the next Save
+// removes them, so a stale device or debug no longer applies to every later run.
+func TestSaveRemovesOldRunKeysFromTheFile(t *testing.T) {
+	path := useConfig(t, ".tnctl.yaml", "domain: teknoir.cloud\nflag_device: cam1\ndevice: cam1\ndebug: true\nauths:\n  teknoir_cloud:\n    access_token: at\n    refresh_token: rt\n")
+	refreshSaveRT(t, "rt2")
+	fv := viper.New()
+	fv.SetConfigFile(path)
+	if err := fv.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"flag_device", "device", "debug"} {
+		if fv.IsSet(k) {
+			t.Errorf("the file still holds %s: %v", k, fv.Get(k))
+		}
+	}
+}
+
+// A file in which an older tnctl saved flag_namespace (a run with -n or TNCTL_NAMESPACE): a save that
+// does not choose a teamspace keeps the one the user worked in, and tnctl ns still switches.
+func TestSaveMovesAnOldFlagNamespaceIntoTheLogin(t *testing.T) {
+	const body = "domain: teknoir.cloud\nflag_device: \"\"\nflag_namespace: acme\nauths:\n  teknoir_cloud:\n    access_token: at\n    refresh_token: rt\n    namespace: teknoir-demo\n"
+	for _, tc := range []struct {
+		name   string
+		choose string
+		want   string
+	}{
+		{"a refresh keeps it", "", "acme"},
+		{"tnctl ns switches", "other", "other"},
+		{"tnctl ns to the login's own teamspace", "teknoir-demo", "teknoir-demo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			path := filepath.Join(t.TempDir(), ".tnctl.yaml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			viper.SetConfigFile(path)
+			if err := viper.ReadInConfig(); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c.GetNamespace(); got != "acme" {
+				t.Fatalf("before: %q, want acme", got)
+			}
+			if tc.choose != "" {
+				c.SetNamespace(tc.choose)
+			}
+			if err := c.Save(); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := os.ReadFile(path)
+			if strings.Contains(string(b), "flag_namespace") {
+				t.Errorf("the file still holds flag_namespace:\n%s", b)
+			}
+			c2, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c2.GetNamespace(); got != tc.want {
+				t.Errorf("after the save the teamspace is %q, want %q\n%s", got, tc.want, b)
+			}
+		})
+	}
+}
+
+// ~/.tnctl.yaml is a symlink into a dotfiles tree whose target has no extension, another
+// extension viper writes, or one it does not know. Save (login, token refresh) must write the target
+// and keep the link.
+func TestSaveThroughALinkToAnyTarget(t *testing.T) {
+	for _, rel := range []string{"dotfiles/tnctl.yaml", "dotfiles/tnctl/config", "dotfiles/tnctl.conf", "dotfiles/tnctl.yml", "dotfiles/.tnctlrc"} {
+		t.Run(rel, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, rel)
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, []byte("domain: teknoir.cloud\ncustom: keep\nauths:\n  teknoir_cloud:\n    access_token: at\n    refresh_token: rt\n    namespace: ns1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(dir, ".tnctl.yaml")
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			viper.SetConfigType("yaml") // initConfig for the default config
+			viper.SetConfigFile(link)
+			if err := viper.ReadInConfig(); err != nil {
+				t.Fatal(err)
+			}
+			refreshSaveRT(t, "rt2")
+			if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("the config is no longer a symlink (%v)", err)
+			}
+			tv := viper.New()
+			tv.SetConfigType("yaml")
+			tv.SetConfigFile(target)
+			if err := tv.ReadInConfig(); err != nil {
+				t.Fatalf("target is not YAML after Save: %v", err)
+			}
+			if tv.GetString("auths.teknoir_cloud.refresh_token") != "rt2" || tv.GetString("auths.teknoir_cloud.namespace") != "ns1" || tv.GetString("custom") != "keep" {
+				t.Error("the target does not hold the saved login and its own keys")
+			}
+			if fi, err := os.Stat(target); err != nil || fi.Mode().Perm() != 0o600 {
+				t.Errorf("target mode %v (%v), want 0600", fi.Mode().Perm(), err)
+			}
+			if entries, _ := os.ReadDir(filepath.Dir(target)); len(entries) != 1 {
+				t.Errorf("Save left files next to the target: %d entries", len(entries))
+			}
+			if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+				t.Errorf("Save left files next to the link: %d entries", len(entries))
+			}
+		})
+	}
+}
+
+// A config in a directory tnctl cannot create files in is written in place; it is still made
+// the user's alone (0600), as the doc comment of writeConfigAtomic says.
+func TestInPlaceSaveMakesTheConfigPrivate(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root creates files in a 0555 directory")
+	}
+	path := useConfig(t, ".tnctl.yaml", "domain: teknoir.cloud\nauths:\n  teknoir_cloud:\n    access_token: at\n    refresh_token: rt\n")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	refreshSaveRT(t, "rt2")
+	fresh, err := LoadFresh()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Auths["teknoir_cloud"].RefreshToken != "rt2" {
+		t.Error("the token was not saved")
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode after an in-place Save: %v (%v), want 0600", fi.Mode().Perm(), err)
 	}
 }
