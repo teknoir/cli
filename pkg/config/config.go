@@ -144,6 +144,22 @@ func LoadFresh() (*Config, error) {
 	return &cfg, nil
 }
 
+// Reload reads the config file into the global viper again and drops what Save set in memory, so a
+// long-running process (tnctl mcp) sees the login and teamspace another tnctl saved since it
+// started. Without a config file, or when it cannot be read, viper keeps what it has.
+func Reload() {
+	viperMu.Lock()
+	defer viperMu.Unlock()
+	if viper.ConfigFileUsed() == "" {
+		return
+	}
+	if err := viper.ReadInConfig(); err != nil {
+		return
+	}
+	viper.Set("domain", nil)
+	viper.Set("auths", nil)
+}
+
 // UpdateDomain switches the active domain.
 func (c *Config) UpdateDomain(newDomain string) {
 	if c.Auths == nil {

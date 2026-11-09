@@ -102,3 +102,65 @@ func TestConfigConcurrentLoadAndSave(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// Run is guarded by viperMu like Save: a reload while a token refresh saves, or another call reads,
+// is no concurrent map read and write either.
+func TestConfigConcurrentReload(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	path := filepath.Join(t.TempDir(), "tnctl.yaml")
+	content := "domain: teknoir.cloud\nauths:\n  teknoir_cloud:\n    access_token: tok\n    namespace: teknoir-demo\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	viper.SetConfigFile(path)
+	if err := viper.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+	base, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			Reload()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if _, err := Load(); err != nil {
+				t.Errorf("Load: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if ns := base.GetNamespace(); ns != "teknoir-demo" {
+				t.Errorf("namespace %q", ns)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			cfg, err := LoadFresh()
+			if err != nil {
+				t.Errorf("LoadFresh: %v", err)
+				return
+			}
+			if err := cfg.Save(); err != nil {
+				t.Errorf("Save: %v", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+}

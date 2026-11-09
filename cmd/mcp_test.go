@@ -158,6 +158,8 @@ func mcpCases() []mcpCase {
 			reqs: []mcpWant{{method: "GET", path: "/problems"}}},
 		{tool: "get_problems", args: map[string]any{"robot": "r1"}, answer: `[]`,
 			reqs: []mcpWant{{method: "GET", path: "/problems", query: "robot=r1"}}},
+		{tool: "get_problems", args: map[string]any{"device": "d1"}, answer: `[]`,
+			reqs: []mcpWant{{method: "GET", path: "/problems", query: "device=d1"}}},
 		{tool: "get_problems", args: map[string]any{"robot": "r1", "device": "d1"}, answer: `[]`,
 			reqs: []mcpWant{{method: "GET", path: "/problems", query: "device=d1&robot=r1"}}},
 		{tool: "get_config", args: map[string]any{"target": "vs"}, answer: `{"target":{}}`,
@@ -301,6 +303,11 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 			}
 		}
 	}
+	for _, tool := range tools.Tools {
+		if strings.HasPrefix(tool.Name, "inspect_") && !strings.HasSuffix(tool.Description, mcpInspectNote+" "+mcpUntrustedNote) {
+			t.Errorf("%s: the description lacks the Shell and access note: %q", tool.Name, tool.Description)
+		}
+	}
 	if got := cs.InitializeResult().Instructions; got != mcpInstructions {
 		t.Errorf("instructions %q", got)
 	}
@@ -355,6 +362,9 @@ func TestMCPToolsCallThePlatform(t *testing.T) {
 			}
 			if got, want := mcpText(t, res), mcpIndented(t, c.lastAnswer()); got != want {
 				t.Errorf("text %q, want %q", got, want)
+			}
+			if res.StructuredContent != nil {
+				t.Errorf("structured content %s: the result would be sent twice, the second time uncut", res.StructuredContent)
 			}
 			for _, r := range c.reqs {
 				seen := p.seen(r.method, r.path)
@@ -478,6 +488,9 @@ func TestMCPWhoami(t *testing.T) {
 		if res.IsError {
 			t.Fatal(mcpText(t, res))
 		}
+		if res.StructuredContent != nil {
+			t.Errorf("structured content %s: the result would be sent twice", res.StructuredContent)
+		}
 		var got map[string]any
 		if err := json.Unmarshal([]byte(mcpText(t, res)), &got); err != nil {
 			t.Fatal(err)
@@ -488,6 +501,24 @@ func TestMCPWhoami(t *testing.T) {
 		}
 		if n := p.countAll(); n != 0 {
 			t.Errorf("whoami as a user sent %d request(s)", n)
+		}
+	})
+
+	t.Run("the teamspace tnctl targets", func(t *testing.T) {
+		// whoami names the teamspace the other tools use (config.GetNamespace, as defaultEnv.fleet).
+		noBotMode(t)
+		useLogin(t, map[string]any{"email": "a@b.c"}, "teknoir-demo")
+		t.Setenv("TNCTL_NAMESPACE", "acme")
+		initConfig()
+		p := newFakePlatform(t)
+		e, _ := testEnv(t, p, nil)
+		cs := mcpClient(t, newMCPServer(e))
+		var got map[string]any
+		if err := json.Unmarshal([]byte(mcpText(t, mcpCall(t, cs, "whoami", nil))), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["namespace"] != "acme" {
+			t.Errorf("namespace %v, want acme (TNCTL_NAMESPACE)", got["namespace"])
 		}
 	})
 
@@ -512,6 +543,9 @@ func TestMCPWhoami(t *testing.T) {
 		if res.IsError {
 			t.Fatal(mcpText(t, res))
 		}
+		if res.StructuredContent != nil {
+			t.Errorf("structured content %s: the result would be sent twice", res.StructuredContent)
+		}
 		if got, want := mcpText(t, res), mcpIndented(t, botWhoamiBody); got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}
@@ -521,6 +555,47 @@ func TestMCPWhoami(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A tnctl mcp that runs while another tnctl logs in, or runs `tnctl ns`, must see that on its next
+// call: the login and the teamspace live in a file this process re-reads.
+func TestMCPSeesALoginMadeWhileItRuns(t *testing.T) {
+	noBotMode(t)
+	useConfigFile(t, "domain: teknoir.cloud\n")
+	initConfig()
+	cs := mcpClient(t, newMCPServer(defaultEnv))
+	res := mcpCall(t, cs, "whoami", nil)
+	if !res.IsError || !strings.Contains(mcpText(t, res), "not logged in") {
+		t.Fatalf("before the login: %v %q", res.IsError, mcpText(t, res))
+	}
+	write := func(ns string) { // what tnctl login and tnctl ns leave in the file
+		auths := map[string]any{"teknoir_cloud": map[string]any{
+			"access_token": testJWT(t, map[string]any{"email": "a@b.c"}), "namespace": ns}}
+		b, _ := json.Marshal(map[string]any{"domain": "teknoir.cloud", "auths": auths})
+		if err := os.WriteFile(cfgFile, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("teknoir-demo")
+	res = mcpCall(t, cs, "whoami", nil)
+	if res.IsError {
+		t.Fatalf("after the login: %q", mcpText(t, res))
+	}
+	var v whoamiUserJSON
+	if err := json.Unmarshal([]byte(mcpText(t, res)), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Namespace != "teknoir-demo" || v.Email != "a@b.c" {
+		t.Errorf("after the login: %+v", v)
+	}
+	write("acme")                       // tnctl ns acme
+	fl, err := mcpFleet(defaultEnv, "") // the client a teamspace tool would use; it sends nothing
+	if err != nil || !strings.HasSuffix(fl.Base, "/api/device/fleet/acme") {
+		t.Errorf("after tnctl ns acme the teamspace tools use %v (%v)", fl, err)
+	}
+	if res := mcpCall(t, cs, "whoami", nil); !strings.Contains(mcpText(t, res), `"namespace": "acme"`) {
+		t.Errorf("after tnctl ns acme: %q", mcpText(t, res))
+	}
 }
 
 // ---------- (g) input refusals ----------
@@ -548,6 +623,10 @@ func TestMCPRefusesBadInput(t *testing.T) {
 		{"inspect_logs", map[string]any{"robot": "vs", "pod_namespace": "default", "pod": "p", "tail": 2001}, "tail must be from 1 to 2000"},
 		{"inspect_logs", map[string]any{"robot": "vs", "pod_namespace": "default", "pod": "p", "tail": -1}, "tail must be from 1 to 2000"},
 		{"inspect_logs", map[string]any{"robot": "vs", "pod_namespace": "default", "pod": "p", "since": "ten minutes"}, "since must be like 30s, 10m or 2h, at most 168h"},
+		{"inspect_logs", map[string]any{"robot": "..", "pod_namespace": "default", "pod": "p"}, `".." is not a valid robot`},
+		{"inspect_logs", map[string]any{"robot": "vs", "pod_namespace": "..", "pod": "p"}, `".." is not a valid pod_namespace`},
+		{"inspect_logs", map[string]any{"robot": "vs", "pod_namespace": "default", "pod": "a/b"}, `"a/b" is not a valid pod`},
+		{"inspect_release", map[string]any{"robot": "..", "release_namespace": "default", "release": "x"}, `".." is not a valid robot`},
 		{"inspect_release", map[string]any{"robot": "vs", "release_namespace": "..", "release": "x"}, `".." is not a valid release_namespace`},
 		{"inspect_release", map[string]any{"robot": "vs", "release_namespace": "default", "release": ".."}, `".." is not a valid release`},
 		{"prom_query", map[string]any{"query": "  "}, "query must be 1 to 4096 bytes"},
@@ -570,6 +649,36 @@ func TestMCPRefusesBadInput(t *testing.T) {
 	}
 	if n := p.countAll(); n != 0 {
 		t.Errorf("a refused input sent %d request(s)", n)
+	}
+}
+
+// A value at its limit is accepted: the refusals are for what is beyond it.
+func TestMCPAcceptsTheLimits(t *testing.T) {
+	noBotMode(t)
+	p := newFakePlatform(t)
+	ns63 := strings.Repeat("a", 63)
+	p.on("GET", "/prometheus/query", 200, `{}`)
+	p.on("GET", "/robots/vs/inspect/pods/default/p/logs", 200, `{}`)
+	p.on("GET", "/api/device/fleet/"+ns63+"/robots", 200, `[]`)
+	e, _ := testEnv(t, p, nil)
+	cs := mcpClient(t, newMCPServer(e))
+	for _, c := range []struct {
+		tool, path string
+		args       map[string]any
+	}{
+		{"prom_query", "/prometheus/query", map[string]any{"query": strings.Repeat("a", 4096)}},
+		{"inspect_logs", "/robots/vs/inspect/pods/default/p/logs", map[string]any{"robot": "vs", "pod_namespace": "default", "pod": "p", "tail": 2000}},
+		{"list_robots", "/api/device/fleet/" + ns63 + "/robots", map[string]any{"namespace": ns63}},
+	} {
+		if res := mcpCall(t, cs, c.tool, c.args); res.IsError {
+			t.Errorf("%s at its limit was refused: %s", c.tool, mcpText(t, res))
+		}
+		if len(p.seen("GET", c.path)) != 1 {
+			t.Errorf("%s: no GET %s", c.tool, c.path)
+		}
+	}
+	if r := p.seen("GET", "/robots/vs/inspect/pods/default/p/logs"); len(r) == 1 && r[0].Query != "enable=false&tail=2000" {
+		t.Errorf("inspect_logs query %q, want enable=false&tail=2000", r[0].Query)
 	}
 }
 
@@ -645,8 +754,12 @@ func TestMCPTruncatesALongResultAtANewline(t *testing.T) {
 
 	res := mcpCall(t, cs, "list_robots", nil)
 	text := mcpText(t, res)
+	if res.StructuredContent != nil {
+		t.Error("structured content: the uncut answer is sent again")
+	}
 	full := mcpIndented(t, body)
-	kept := strings.LastIndex(full[:mcpMaxResult], "\n")
+	const limit = 200 << 10
+	kept := strings.LastIndex(full[:limit], "\n")
 	if kept < 100<<10 {
 		t.Fatalf("the fixture has no newline in the last 100 KiB")
 	}
@@ -658,6 +771,7 @@ func TestMCPTruncatesALongResultAtANewline(t *testing.T) {
 
 func TestMCPTruncatesASingleLongLineAtARuneBoundary(t *testing.T) {
 	noBotMode(t)
+	const limit = 200 << 10
 	body := fmt.Sprintf(`{"text":%q}`, strings.Repeat("ü", 150<<10))
 	p := newFakePlatform(t)
 	p.on("GET", "/robots/vs/inspect/pods/default/p/logs", 200, body)
@@ -666,6 +780,9 @@ func TestMCPTruncatesASingleLongLineAtARuneBoundary(t *testing.T) {
 
 	res := mcpCall(t, cs, "inspect_logs", map[string]any{"robot": "vs", "pod_namespace": "default", "pod": "p"})
 	text := mcpText(t, res)
+	if res.StructuredContent != nil {
+		t.Error("structured content: the uncut answer is sent again")
+	}
 	full := mcpIndented(t, body)
 	if !utf8.ValidString(text) {
 		t.Error("the cut is not at a rune boundary")
@@ -685,7 +802,7 @@ func TestMCPTruncatesASingleLongLineAtARuneBoundary(t *testing.T) {
 	if got, want := more, len(full)-kept; got != want {
 		t.Errorf("note says %d bytes more, %d are gone", got, want)
 	}
-	if kept < 100<<10 || kept > mcpMaxResult || kept < mcpMaxResult-utf8.UTFMax {
+	if kept < 100<<10 || kept > limit || kept < limit-utf8.UTFMax {
 		t.Errorf("kept %d of %d bytes", kept, len(full))
 	}
 }
@@ -695,6 +812,44 @@ func TestMCPSmallResultHasNoTruncationLine(t *testing.T) {
 	_, cs := mcpHarness(t, c)
 	if text := mcpText(t, mcpCall(t, cs, c.tool, nil)); strings.Contains(text, "truncated") {
 		t.Errorf("a small answer was cut: %q", text)
+	}
+}
+
+// The cut prefers the last newline before the cap only when it keeps at least 100 KiB; the cap is
+// 200 KiB. Each case puts the indented answer's last newline before the cap at nl.
+func TestMCPTruncationNewlineThreshold(t *testing.T) {
+	noBotMode(t)
+	for _, c := range []struct{ nl, kept int }{
+		{100 << 10, 100 << 10},   // exactly 100 KiB kept: cut at the newline
+		{100<<10 - 1, 200 << 10}, // one byte less: the line is cut at the cap
+		{150 << 10, 150 << 10},
+	} {
+		body := fmt.Sprintf(`{"a":%q,"b":%q}`, strings.Repeat("x", c.nl-12), strings.Repeat("y", 150<<10))
+		p := newFakePlatform(t)
+		p.on("GET", "/overview", 200, body)
+		e, _ := testEnv(t, p, nil)
+		cs := mcpClient(t, newMCPServer(e))
+		text := mcpText(t, mcpCall(t, cs, "get_overview", nil))
+		full := mcpIndented(t, body)
+		if got := strings.LastIndex(full[:200<<10], "\n"); got != c.nl {
+			t.Fatalf("fixture: last newline before the cap at %d, want %d", got, c.nl)
+		}
+		want := full[:c.kept] + fmt.Sprintf("\n… truncated, %d bytes more; narrow the query", len(full)-c.kept)
+		if text != want {
+			t.Errorf("newline at %d: kept %d bytes, want %d", c.nl, strings.Index(text, "\n… truncated"), c.kept)
+		}
+	}
+}
+
+// An answer with no text is an empty object, not an empty result.
+func TestMCPEmptyAnswerIsAnEmptyObject(t *testing.T) {
+	for _, body := range []string{"", " \n"} {
+		c := mcpCase{tool: "list_fleets", answer: body, reqs: []mcpWant{{method: "GET", path: "/fleets"}}}
+		_, cs := mcpHarness(t, c)
+		res := mcpCall(t, cs, c.tool, nil)
+		if got := mcpText(t, res); res.IsError || got != "{}" {
+			t.Errorf("the answer %q gave %q (error %v), want {}", body, got, res.IsError)
+		}
 	}
 }
 
@@ -807,7 +962,16 @@ func TestMCPPanicBecomesAnErrorResult(t *testing.T) {
 	})
 	cs := mcpClient(t, s)
 
+	stopOut := captureOSStdout(t)
+	stopErr := captureOSFile(t, &os.Stderr)
 	res := mcpCall(t, cs, "boom", nil)
+	stderr := stopErr()
+	if got := stopOut(); got != "" {
+		t.Errorf("the panic wrote %q to stdout, the protocol's stream", got)
+	}
+	if !strings.HasPrefix(stderr, "tnctl mcp: boom panicked: assignment to entry in nil map\n") || !strings.Contains(stderr, "goroutine ") {
+		t.Errorf("stderr %q: want the panic line, then its stack", stderr)
+	}
 	const want = "internal error in tnctl mcp (boom); see the agent's MCP server log"
 	if !res.IsError || len(res.Content) != 1 || mcpText(t, res) != want {
 		t.Fatalf("%+v %q", res, mcpText(t, res))
@@ -862,6 +1026,34 @@ func TestMCPRunReturnsNilWhenTheSessionEnds(t *testing.T) {
 		wait(t, done)
 	})
 
+	t.Run("cancelled during a call", func(t *testing.T) {
+		p := newFakePlatform(t)
+		entered, release := make(chan struct{}, 1), make(chan struct{})
+		t.Cleanup(func() { close(release) }) // runs before the fake's srv.Close
+		p.onFunc("GET", "/robots", func(rec) (int, string) {
+			entered <- struct{}{}
+			<-release
+			return 200, `[]`
+		})
+		e, _ := testEnv(t, p, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		st, ct := mcp.NewInMemoryTransports()
+		done := make(chan error, 1)
+		go func() { done <- runMCP(ctx, e, st) }()
+		cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(context.Background(), ct, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cs.Close() })
+		go func() {
+			_, _ = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_robots", Arguments: map[string]any{}})
+		}()
+		<-entered
+		cancel()
+		wait(t, done)
+	})
+
 	t.Run("the client closes the session", func(t *testing.T) {
 		st, ct := mcp.NewInMemoryTransports()
 		done := run(t, context.Background(), st)
@@ -889,18 +1081,25 @@ func TestMCPIsNotRefusedInBotMode(t *testing.T) {
 // captureOSStdout swaps os.Stdout for a pipe that a goroutine drains, until stop or the end of the test.
 func captureOSStdout(t *testing.T) (stop func() string) {
 	t.Helper()
-	old := os.Stdout
+	return captureOSFile(t, &os.Stdout)
+}
+
+// captureOSFile swaps *f (os.Stdout or os.Stderr) for a pipe that a goroutine drains, until stop or
+// the end of the test.
+func captureOSFile(t *testing.T, f **os.File) (stop func() string) {
+	t.Helper()
+	old := *f
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Stdout = w
+	*f = w
 	done := make(chan string, 1)
 	go func() { b, _ := io.ReadAll(r); done <- string(b) }()
 	var once sync.Once
 	var got string
 	stop = func() string {
-		once.Do(func() { os.Stdout = old; _ = w.Close(); got = <-done })
+		once.Do(func() { *f = old; _ = w.Close(); got = <-done })
 		return got
 	}
 	t.Cleanup(func() { stop() })
@@ -915,7 +1114,7 @@ func TestMCPWritesNothingToStdout(t *testing.T) {
 	for _, c := range mcpCases() {
 		mcpRegister(p, c)
 	}
-	p.on("GET", "/overview", 500, `{"error":{"message":"boom"}}`)
+	p.on("GET", mcpAcmePath("/overview"), 500, `{"error":{"message":"boom"}}`)
 	e, _ := testEnv(t, p, nil)
 
 	ptermBuf := capturePterm(t)
@@ -929,11 +1128,11 @@ func TestMCPWritesNothingToStdout(t *testing.T) {
 				args = c.args
 			}
 		}
-		if res := mcpCall(t, cs, name, args); res == nil {
-			t.Errorf("%s returned no result", name)
+		if res := mcpCall(t, cs, name, args); res == nil || res.IsError {
+			t.Errorf("%s did not succeed: %+v", name, res)
 		}
 	}
-	if res := mcpCall(t, cs, "get_overview", nil); !res.IsError {
+	if res := mcpCall(t, cs, "get_overview", map[string]any{"namespace": "acme"}); !res.IsError {
 		t.Errorf("the 500 was a success: %q", mcpText(t, res))
 	}
 
