@@ -77,5 +77,7 @@ release:
     owner: teknoir
     name: cli
   draft: false
-  prerelease: false
+  # auto: a tag with a pre-release suffix (v0.2.0-rc.1, v0.1.5-beta) is published as a prerelease,
+  # and releases/latest (what scripts/install.sh installs) skips it. The next full release needs a plain vX.Y.Z tag.
+  prerelease: auto
   mode: replace # replace existing release if it exists for the same tag
