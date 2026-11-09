@@ -40,33 +40,43 @@ sent it (compacted, so a field this tnctl does not know survives):
 `{"topic":"/devices/d1/state/x","payload":"hello","retain":false,"ts":"2026-11-08T10:00:00Z"}`.
 
 Messages the platform had to drop are reported on stderr, with why (`rate`: too many messages too fast, `size`:
-the messages were too large). An error the platform reports ends the stream: it is printed and the exit code is
-non-zero.
+the messages were too large, `slow`: the reader did not keep up). An error the platform reports ends the stream: it
+is printed and the exit code is non-zero.
 
 | Flag | Description |
 | --- | --- |
 | `--count N` | Stop after N messages (exit 0). |
 | `--seconds S` | Stop after S seconds (exit 0). |
 | `--json` | Print each message's data as one JSON line. |
-| `--reconnect` | Connect again when the stream ends or the network fails. |
+| `--reconnect` | Connect again when the stream ends, the network fails or the portal restarts. |
 
-Ctrl-C stops cleanly as well. `--reconnect` waits 1 s, then doubles the pause up to 30 s, and says so on stderr
-each time; after a connection that delivered messages the wait starts at 1 s again. It does **not** reconnect
-after a refused request (a non-2xx answer: a bad topic, no access), a missing key, or an error the platform
-reported: those are not network failures.
+Ctrl-C stops cleanly as well. `--reconnect` connects again when the stream ends, the network fails, or the
+gateway answers `502`, `503` or `504` while the portal is being replaced: it waits 1 s, then doubles the pause
+up to 30 s, and says so on stderr each time; after a connection that delivered messages the wait starts at 1 s
+again. It also waits out a `503` that carries `Retry-After` — the platform cannot reach the broker, or is
+restarting — for that long, at most 60 s, instead of the 1 s-to-30 s pause; a `429` that carries `Retry-After`
+because a bot made more than 120 requests in a minute is waited out the same way. It does **not** reconnect after
+a refused request (a bad topic, no access, a device that is not there: `400`, `403`, `404`), a `429` that says
+too many live streams are open, `live MQTT is not configured`, a missing key, or an error the platform reported
+on the stream (`access_lost`, `broker_closed`). If no stream opened before `--seconds` ends, it exits with the
+last answer's code.
 
 Without `--reconnect` the command exits **0 only** for a clean end of the stream (the platform ended a `200`
 answer), `--count` or `--seconds`; a network failure — a refused connection, a DNS error, a reset — is an error:
-exit 1 with its message on stderr.
+exit 1 with its message on stderr (exit 4 when the connection or the answer timed out).
 
 ## Exit codes
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | ok: stopped by `--count`, `--seconds`, Ctrl-C, or a clean end of the stream |
-| 1 | error: the platform reported an error on the stream, or the network failed without `--reconnect` |
+| 0 | ok: stopped by `--count`, `--seconds` (after a stream opened), Ctrl-C, or a clean end of the stream |
+| 1 | error: the platform reported an error on the stream; it answered `500`, `502` or `503` (with `--reconnect` only a `503` that says `live MQTT is not configured`, and a `500`, end it); or the network failed without `--reconnect` |
 | 2 | usage: a topic that cannot be followed, or more than 8 |
+| 3 | not found (`404`): a device in a topic is not in the teamspace, or the platform has no stream route |
+| 4 | timeout, without `--reconnect`: the gateway answered `504`, or no answer came within 30 s |
+| 5 | rejected (`400`): the platform refused the topics |
 | 6 | not logged in, not allowed to follow MQTT in this teamspace, or a missing bot key |
+| 9 | rate limited (`429`): too many live streams open (close one); with `--reconnect` a bot's request budget (more than 120 requests in a minute) is waited out instead |
 
 ## See also
 

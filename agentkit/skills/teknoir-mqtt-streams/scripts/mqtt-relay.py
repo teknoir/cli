@@ -47,6 +47,13 @@ LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 
 DEVICE_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
+# The platform's dropped reasons, as `tnctl mqtt stream` prints them.
+DROPPED_REASONS = {
+    "rate": "too many messages too fast",
+    "size": "the messages were too large",
+    "slow": "the reader was too slow",
+}
+
 
 class Fatal(Exception):
     """Ends the relay: the condition will not go away by connecting again."""
@@ -225,20 +232,21 @@ def response_message(response):
         body = response.read(65536).decode("utf-8", "replace").strip()
     except (OSError, http.client.HTTPException):
         return "(no message)"
+    text = body
     try:
         doc = json.loads(body)
     except ValueError:
-        return body[:300] or "(no message)"
+        doc = None
     if isinstance(doc, dict):
         for key in ("message", "error"):
             value = doc.get(key)
-            if isinstance(value, str) and value:
-                return value
             if isinstance(value, dict):
-                inner = value.get("message")
-                if isinstance(inner, str) and inner:
-                    return inner
-    return body[:300] or "(no message)"
+                value = value.get("message")
+            if isinstance(value, str) and value:
+                text = value
+                break
+    # One log line per answer, however the body was shaped: the relay's log is the operator's only clue.
+    return " ".join(text.split())[:300] or "(no message)"
 
 
 def sse_open(api, namespace, topics, key_file, idle_timeout):
@@ -282,13 +290,22 @@ def sse_open(api, namespace, topics, key_file, idle_timeout):
         connection.close()
         raise Fatal(2, f"the platform refused the topics (HTTP 400): {message}")
     if status == 404:
+        message = response_message(response)
         connection.close()
-        raise Fatal(
-            1, "HTTP 404 from the stream route: device unknown, or this platform has no stream route")
+        if not re.fullmatch(r"device \S+ not found", message):
+            message += " (this platform has no stream route yet, or --api is not its bot API)"
+        raise Fatal(1, f"HTTP 404 from the stream route: {message}")
+    if status in (502, 504):
+        message = response_message(response)
+        connection.close()
+        raise Retry(None, f"the gateway answered HTTP {status} (the portal may be restarting): {message}")
     if status in (429, 503):
         seconds = retry_after_seconds(response.getheader("Retry-After"))
+        message = response_message(response)
         connection.close()
-        raise Retry(seconds, f"the platform asked the stream to wait (HTTP {status})")
+        if status == 503 and "live MQTT is not configured" in message:
+            raise Fatal(1, f"the platform has no live MQTT: {message}")
+        raise Retry(seconds, f"the platform asked the stream to wait (HTTP {status}): {message}")
     if status < 200 or status >= 300:
         connection.close()
         raise Fatal(1, f"the stream route answered HTTP {status}")
@@ -361,6 +378,7 @@ def handle_event(name, data, sink):
     if name == "dropped":
         count = doc.get("count", 0)
         reason = doc.get("reason") or "unknown reason"
+        reason = DROPPED_REASONS.get(reason, reason) if isinstance(reason, str) else reason
         print(f"relay: the platform dropped {count} message(s): {reason}",
               file=sys.stderr, flush=True)
         return
