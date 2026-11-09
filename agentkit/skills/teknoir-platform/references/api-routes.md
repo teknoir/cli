@@ -19,9 +19,10 @@ may call a route at all.
   without it turns the robot's Shell on for a person. `tnctl inspect …` always sends it, and the
   platform forces it for a bot.
 - A `never` route answers 403 `A TeknoirBot may not use this endpoint.` (exit 6). A `creator` route at
-  access Read only answers 403 `This TeknoirBot may only read (Read only)…`. A `read` route at access
-  Off answers 403 `This TeknoirBot's agent has no platform access (Off)…`. In every case: report it and
-  stop; the bot cannot widen its own access.
+  access Read only answers 403 `This TeknoirBot may only read (Read only)…`; a bot set to Act as me
+  whose creator may only view gets `This TeknoirBot acts as <email>, who may only view in teamspace
+  <teamspace>…`. A `read` route at access Off answers 403 `This TeknoirBot's agent has no platform
+  access (Off)…`. In every case: report it and stop; the bot cannot widen its own access.
 - Query parameters are sent as written; percent-encode values that contain `/`, `?` or `&`.
 
 ## The bot's own teamspace

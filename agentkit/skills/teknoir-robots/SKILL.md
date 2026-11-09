@@ -53,7 +53,8 @@ tnctl robot <robot> -o json                   # the platform's answer, including
 ```
 
 `tnctl robots` shows `Disabled`, `Disabling`, `Enabling`, `Not fully disabled` or `Enabling failed` in
-the phase column when the robot is in the disable cycle. An empty teamspace prints `[]` and exits 0.
+the phase column when the robot is in the disable cycle. An empty teamspace exits 0: with `-o json`
+it prints `[]`; the table prints `no robots in teamspace <teamspace>` on stderr.
 
 There is no tnctl subcommand for types or fleets: use `tnctl api GET <teamspace>/types` and
 `…/fleets`.
@@ -279,6 +280,7 @@ Conditions are not in the robot answer the API returns: read the phase and `phas
 | `X is the computer of TeknoirBot B and cannot back a robot.` | 8 | Pick another device. Do not retry. |
 | `Robot names starting with tb- are kept for the computers of TeknoirBots…` / `Device tb-x has a name kept for the computers of TeknoirBots…` | 5 | Pick another name or device. |
 | `This TeknoirBot may only read (Read only)…` | 6 | A bot at Read only cannot write. Ask the creator. |
+| `This TeknoirBot acts as <email>, who may only view in teamspace <teamspace>…` | 6 | The bot is set to Act as me, but its creator may only view (`.bot.configuredAccess` `creator`, `.bot.access` `read`). Tell the person a teamspace admin can give the creator write access; the bot cannot change it. |
 | `Choose the org unit for this robot: A, B.` | 5 | Pass `--unit <id>`. |
 | `Your account is limited to org units but has none assigned…` | 5 | Ask a teamspace admin to assign a unit. |
 | `You can only place robots in your own units (…) or below them.` | 6 | The unit is outside your scope. |

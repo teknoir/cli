@@ -93,8 +93,11 @@ and at least one of them.
 | `applications` | **Replaces** the robot's own configuration layer. |
 
 ```json
-{"labels": {"site": "karlstad", "env": "prod"}, "serverAddress": "192.168.1.20"}
+{"serverAddress": "192.168.1.20"}
 ```
+
+For `labels`, `nodes` or `applications`, send the full set: read `.labels`, `.spec.nodes` and
+`.spec.applications` from `tnctl robot <robot> -o json`, merge your change in, then send it.
 
 The answer is the updated robot detail. A 409 means someone changed the robot first: re-read and apply
 your change again.
