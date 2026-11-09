@@ -52,7 +52,7 @@ key=""
 case "${1:-} ${2:-}" in
   "whoami -o") key=whoami ;;
   "robot "*)   key=robot ;;
-  "api GET")   key=problems ;;
+  "api GET")   case "${3:-}" in */access) key=access ;; *"/problems?robot="*) key=problems ;; *) key=other ;; esac ;;
   "config "*)  key=config ;;
   "inspect "*) key=inspect ;;
   *)           key=other ;;
@@ -122,7 +122,9 @@ bad_config='{
   "overrides":{"resources":{}},
   "overrideStatus":[
     {"target":"HelmChart/default/notebook","state":"invalid","message":"valuesContent is not valid YAML"},
-    {"target":"Deployment/default/whoami","state":"active"}
+    {"target":"Deployment/default/whoami","state":"active"},
+    {"target":"Deployment/default/gone","state":"no-target"},
+    {"target":"Deployment/default/local1","state":"not-applicable","message":"this is a local item on the device"}
   ],
   "published":{"hash":"def456","lastChange":"2026-11-09T11:00:00Z","message":"2 items are held back"}
 }'
@@ -189,6 +191,7 @@ write_user "$hf/whoami.json" ts1
 printf '%s' "$healthy_robot" > "$hf/robot.json"
 printf '{"problems":[],"source":"prometheus"}' > "$hf/problems.json"
 printf '%s' "$healthy_config" > "$hf/config.json"
+printf '{"tunnel":{"state":"active","connected":true},"terminal":{"state":"off"}}' > "$hf/access.json"
 
 run_case "healthy" "$hf" vs-01
 check_eq "healthy: exit 0" 0 "$last_rc"
@@ -199,6 +202,13 @@ check_contains "healthy: phase reported" "$work/out" "phase: Online"
 check_contains "healthy: published reported" "$work/out" "published: abc123"
 check_eq "healthy: no inspect call (no failing pod)" 0 "$(calls_of "$work/log" inspect)"
 check_contains "healthy: the teamspace from whoami" "$work/out" "teamspace: ts1"
+check_contains "robot: tunnel" "$work/out" "tunnel: active, connected: true"
+check_contains "robot: shell" "$work/out" "shell: off"
+check_eq "problems filtered to the robot" 1 "$(awk -F'\t' '$1=="api" && $3=="ts1/problems?robot=vs-01"' "$work/log" | wc -l | tr -d ' ')"
+
+# A healthy robot's inspect step did run and found nothing: ok, not a failure.
+run_case "healthy --json" "$hf" vs-01 --json
+check_eq "healthy json: inspect ok" true "$(jq -r '.inspect.ok' < "$work/out")"
 
 # ---------------------------------------------------------------- 2. failing pods, person and bot
 
@@ -209,6 +219,7 @@ printf '%s' "$broken_robot" > "$pf/robot.json"
 printf '%s' "$five_pods" > "$pf/problems.json"
 printf '%s' "$bad_config" > "$pf/config.json"
 printf '%s' "$inspect_answer" > "$pf/inspect.json"
+printf '{"tunnel":{"state":"active","connected":true},"terminal":{"state":"off"}}' > "$pf/access.json"
 
 run_case "person, 5 failing pods" "$pf" vs-01
 check_eq "person: exit 0" 0 "$last_rc"
@@ -222,6 +233,17 @@ check_contains "problems: a problem row" "$work/out" "crash-loop: api"
 check_contains "config: invalid override" "$work/out" "(invalid)"
 check_contains "config: pending row" "$work/out" "pending in the published config: 1"
 check_contains "config: deviation" "$work/out" "Deployment-chatty-default (off)"
+check_contains "config: overrides not applied" "$work/out" "overrides not applied: 3"
+check_contains "config: no-target" "$work/out" "(no-target)"
+check_contains "config: not-applicable" "$work/out" "(not-applicable)"
+
+mp="$work/many-problems"
+mkdir -p "$mp"
+cp "$pf"/*.json "$mp/"
+jq -n '{source:"prometheus",problems:[range(0;9)|{kind:"crash-loop",severity:"critical",app:"a\(.)",namespace:"default"}]}' > "$mp/problems.json"
+run_case "nine problems" "$mp" vs-01
+check_contains "problems: and N more" "$work/out" "and 2 more"
+check_absent "problems: at most seven rows" "$work/out" "crash-loop: a7"
 
 # A bot at creator may inspect, and is capped the same way.
 bf="$work/bot-creator"
@@ -282,10 +304,8 @@ mf="$work/bot-other"
 mkdir -p "$mf"
 cp "$pf"/*.json "$mf/"
 write_bot "$mf/whoami.json" ts1 creator
-# The bot's own teamspace is ts1; -n x would be refused by a real tnctl, so use the same name to
-# test the plumbing: -n ts1 must be passed through, not dropped.
-run_case "with -n" "$pf" vs-01 -n ts1
-check_teamspace "with -n ts1: every call carries -n ts1" ts1
+run_case "bot with -n ts2" "$mf" vs-01 -n ts2
+check_teamspace "bot with -n ts2: -n wins over .bot.namespace" ts2
 
 # A person's whoami says ts1; -n ts2 must win over it.
 run_case "with -n ts2" "$pf" vs-01 -n ts2
@@ -308,13 +328,13 @@ check_eq "unavailable: no inspect (no named pod)" 0 "$(calls_of "$work/log" insp
 sf="$work/shell-off"
 mkdir -p "$sf"
 cp "$pf"/*.json "$sf/"
-printf 'The Shell of vs-01 is off. Ask a person to turn it on in the portal.\n' > "$sf/inspect.err"
+printf '{"error":{"code":"rejected","message":"The Shell of vs-01 is off. Ask a person to turn it on in the portal."}}\n' > "$sf/inspect.err"
 printf '5' > "$sf/inspect.rc"
 
 run_case "shell off" "$sf" vs-01
 check_eq "shell off: exit 0 (it ran)" 0 "$last_rc"
 check_contains "shell off: the exit code and the message" "$work/out" \
-  "failed: tnctl inspect pod exited 5: The Shell of vs-01 is off"
+  "failed: tnctl inspect pod exited 5 (rejected): The Shell of vs-01 is off"
 check_contains "shell off: the config was still read" "$work/out" "published: def456"
 
 # ---------------------------------------------------------------- 4. a bot at read
@@ -329,12 +349,14 @@ check_eq "bot read: exit 0" 0 "$last_rc"
 check_eq "bot read: inspect not called" 0 "$(calls_of "$work/log" inspect)"
 check_contains "bot read: says why" "$work/out" "skipped: inspect needs a person"
 check_contains "bot read: still reads the problems" "$work/out" "crash-loop: api"
+run_case "bot read --json" "$rf" vs-01 --json
+check_eq "bot read json: inspect says why" "skipped: inspect needs a person or a bot at access creator" "$(jq -r '.inspect.error' < "$work/out")"
 
 # ---------------------------------------------------------------- 5. whoami refused
 
 wf="$work/whoami-refused"
 mkdir -p "$wf"
-printf 'not logged in: run tnctl login\n' > "$wf/whoami.err"
+printf '{"error":{"code":"auth","message":"not logged in: run tnctl login"}}\n' > "$wf/whoami.err"
 printf '6' > "$wf/whoami.rc"
 
 run_case "whoami refused" "$wf" vs-01
@@ -373,7 +395,7 @@ check_eq "json: one key per thing" "config inspect problems robot target teamspa
   "$(jq -r 'keys | join(" ")' < "$work/out")"
 check_eq "json: each step has the same shape" "true true true true true" \
   "$(jq -r '[.whoami, .robot, .problems, .config, .inspect]
-            | map((keys | sort) == ["data","error","exitCode","ok","summary"])
+            | map((keys | sort) == ["code","data","error","exitCode","ok","retryAfter","summary"])
             | join(" ")' < "$work/out")"
 check_eq "json: robot data is an object" "vs-01" "$(jq -r '.robot.data.name' < "$work/out")"
 check_eq "json: whoami data carries the mode" "user" "$(jq -r '.whoami.data.mode' < "$work/out")"
@@ -385,7 +407,7 @@ check_absent "json: no section headings on stdout" "$work/out" "== problems"
 jf="$work/json-fail"
 mkdir -p "$jf"
 cp "$pf"/*.json "$jf/"
-printf 'the platform refused the manifest (exit 5)\n' > "$jf/config.err"
+printf '{"error":{"code":"rejected","message":"the platform refused the manifest"}}\n' > "$jf/config.err"
 printf '5' > "$jf/config.rc"
 
 run_case "json with a failing step" "$jf" vs-01 --json
@@ -393,7 +415,9 @@ check_eq "json failure: exit 0 (it ran)" 0 "$last_rc"
 if jq -e . < "$work/out" > /dev/null 2>&1; then ok "json failure: valid JSON"; else fail "json failure: not valid JSON"; fi
 check_eq "json failure: the failing step's exit code" "5" "$(jq -r '.config.exitCode' < "$work/out")"
 check_eq "json failure: the failing step is not ok" "false" "$(jq -r '.config.ok' < "$work/out")"
-check_eq "json failure: the first error line" "the platform refused the manifest (exit 5)" "$(jq -r '.config.error' < "$work/out")"
+check_eq "json failure: the error message" "the platform refused the manifest" "$(jq -r '.config.error' < "$work/out")"
+check_eq "json failure: tnctl's code name" "rejected" "$(jq -r '.config.code' < "$work/out")"
+check_eq "json failure: no retryAfter" "null" "$(jq -r '.config.retryAfter' < "$work/out")"
 check_eq "json failure: later steps ran" "true" "$(jq -r '.problems.ok' < "$work/out")"
 
 # The same failure without --json: the exit code and the first error line in the section, and the
@@ -401,33 +425,95 @@ check_eq "json failure: later steps ran" "true" "$(jq -r '.problems.ok' < "$work
 run_case "a failing step, human output" "$jf" vs-01
 check_eq "failing step: exit 0 (it ran)" 0 "$last_rc"
 check_contains "failing step: the exit code and the first line" "$work/out" \
-  "failed: tnctl config get exited 5: the platform refused the manifest (exit 5)"
+  "failed: tnctl config get exited 5 (rejected): the platform refused the manifest"
 check_contains "failing step: a later step still ran" "$work/out" "crash-loop: api"
+
+# A notice on stderr before tnctl's JSON error must not hide the error.
+nf="$work/notice-first"
+mkdir -p "$nf"
+cp "$pf"/*.json "$nf/"
+printf 'Creating default configuration file at /x/.tnctl.yaml\n{"error":{"code":"error","message":"the robot is offline (HTTP 503)"}}\n' > "$nf/robot.err"
+printf '1' > "$nf/robot.rc"
+
+run_case "notice before the JSON error" "$nf" vs-01 --json
+check_eq "notice: the message is the JSON's" "the robot is offline (HTTP 503)" "$(jq -r '.robot.error' < "$work/out")"
+check_eq "notice: tnctl's code name" "error" "$(jq -r '.robot.code' < "$work/out")"
+run_case "notice before the JSON error, human output" "$nf" vs-01
+check_contains "notice: the human line" "$work/out" \
+  "failed: tnctl robot exited 1 (error): the robot is offline (HTTP 503)"
+
+# A plain-text error (a tnctl without the command, or a flag error before -o json): the Error line,
+# not the hint or suggestion after it.
+xf="$work/plain-error"
+mkdir -p "$xf"
+cp "$pf"/*.json "$xf/"
+rm -f "$xf/problems.json"
+printf 'Error: unknown command "api" for "tnctl"\n\nDid you mean this?\n\tadd\n\n' > "$xf/problems.err"
+printf '1' > "$xf/problems.rc"
+run_case "plain-text error" "$xf" vs-01
+check_contains "plain error: the Error line, not the suggestion" "$work/out" \
+  "failed: tnctl api GET problems exited 1: unknown command \"api\" for \"tnctl\""
+
+# A 429 carries retryAfter, in the step's JSON and in the human line.
+qf="$work/rate-limited"
+mkdir -p "$qf"
+cp "$pf"/*.json "$qf/"
+printf '{"error":{"code":"rate_limited","message":"slow down","retryAfter":1}}\n' > "$qf/robot.err"
+printf '9' > "$qf/robot.rc"
+
+run_case "rate limited" "$qf" vs-01 --json
+check_eq "429: the step's exit code" 9 "$(jq -r '.robot.exitCode' < "$work/out")"
+check_eq "429: retryAfter" 1 "$(jq -r '.robot.retryAfter' < "$work/out")"
+check_eq "429: retryAfter is a number" number "$(jq -r '.robot.retryAfter | type' < "$work/out")"
+run_case "rate limited, human output" "$qf" vs-01
+check_contains "429: the human line names the wait" "$work/out" \
+  "failed: tnctl robot exited 9 (rate_limited): slow down - retry after 1s"
+
+# A config answer far bigger than the 128 KiB Linux allows in one argv string: --json must still
+# work (the whole answer once went to jq as one argument and died with exit 126).
+bigf="$work/big-config"
+mkdir -p "$bigf"
+cp "$pf"/*.json "$bigf/"
+jq -n '{target:{kind:"robot",name:"vs-01",device:"vs-01"},
+        configuration:{resources:[range(0;600) | {identity:"resource-\(.)", values:{merged:("x" * 500)}}],
+                       effective:[],deviations:[],warnings:[]},
+        overrides:{resources:{}},overrideStatus:[],
+        published:{hash:"abc123",lastChange:"2026-11-09T10:00:00Z"}}' > "$bigf/config.json"
+check_eq "big config: the fixture is over 200 KB" "true" \
+  "$([ "$(wc -c < "$bigf/config.json" | tr -d ' ')" -gt 204800 ] && echo true || echo false)"
+
+run_case "big config --json" "$bigf" vs-01 --json
+check_eq "big config: --json exits 0" 0 "$last_rc"
+if jq -e . < "$work/out" > /dev/null 2>&1; then ok "big config: --json is valid JSON"; else fail "big config: --json is not valid JSON"; fi
+check_eq "big config: the whole answer is in the data" 600 \
+  "$(jq -r '.config.data.configuration.resources | length' < "$work/out")"
 
 # ---------------------------------------------------------------- 7. no writes
 
 for case_fix in "$pf" "$bf" "$rf"; do
   run_case "no writes ($case_fix)" "$case_fix" vs-01
-  badwords=""
-  for w in set unset on off add remove reset promote delete try untry edit; do
-    if awk -F'\t' -v w="$w" \
-        '{ if ($1 == w) f = 1; for (i = 2; i <= NF; i++) if ($i == w && $1 == "config") f = 1 } END { exit !f }' \
-        "$work/log"; then
-      badwords="$badwords $w"
-    fi
-  done
-  if awk -F'\t' '$1 == "api" && $2 != "GET"' "$work/log" | grep -q .; then
-    badwords="$badwords api-nonGET"
-  fi
-  # Every config call is one of the read subcommands.
-  if awk -F'\t' '$1 == "config" && $2 != "get" && $2 != "diff" && $2 != "links" && $2 != "kinds" && $2 != "wait"' \
-      "$work/log" | grep -q .; then
-    badwords="$badwords config-write"
-  fi
-  check_eq "no writes: no write command, no api beyond GET ($(basename "$case_fix"))" "" "$badwords"
+  bad=$(awk -F'\t' '
+    ($1 == "whoami") { next }
+    ($1 == "robot" && $2 != "add" && $2 != "disable" && $2 != "enable" && $2 != "remove") { next }
+    ($1 == "api" && $2 == "GET" && $3 !~ /\/inspect(\/|$|\?)/ && tolower($3) !~ /credentials/) { next }
+    ($1 == "config" && $2 == "get") { next }
+    ($1 == "inspect" && $2 == "pod") { next }
+    { print }' "$work/log")
+  check_eq "no writes: only read commands ($(basename "$case_fix"))" "" "$bad"
+  check_eq "no raw inspect route ($(basename "$case_fix"))" 0 "$(awk -F'\t' '$1=="api" && $3 ~ /\/inspect\//' "$work/log" | wc -l | tr -d ' ')"
 done
 
-# ---------------------------------------------------------------- 8. usage errors
+# ---------------------------------------------------------------- 8. bash 3.2
+
+# A person's laptop runs macOS's /bin/bash 3.2: no mapfile, readarray, associative arrays, case
+# mapping, |&, ;;&, coproc, wait -n or EPOCHSECONDS, and every array expansion guarded for set -u.
+b32="$work/b32"
+grep -nE 'mapfile|readarray|declare -A|local -A|\$\{[A-Za-z_]+(,,|\^\^)\}|\|&|;;&|coproc|wait -n|EPOCHSECONDS' "$script" > "$b32" || true
+check_eq "bash 3.2 syntax: no construct newer than bash 3.2" "" "$(cat "$b32")"
+grep -nE '(^|[^+])"\$\{(TARGS|podlist|ins_files)\[@\]\}"' "$script" > "$b32-array" || true
+check_eq "bash 3.2 syntax: every array expansion is guarded" "" "$(cat "$b32-array")"
+
+# ---------------------------------------------------------------- 9. usage errors
 
 usage_rc() {  # args... -> last_rc
   last_rc=0

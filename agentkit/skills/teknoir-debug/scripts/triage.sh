@@ -30,7 +30,7 @@ Read-only triage of one Teknoir robot, in five steps:
   -h, --help                   this text
 
 Every command is a read. It needs tnctl on the PATH (override with TNCTL) and jq.
-Exit codes: 0 it ran, 1 a tool is missing, 2 usage, 6 whoami itself was refused.
+Exit codes: 0 it ran, 1 jq is missing, 2 usage, 6 whoami itself was refused.
 EOF
 }
 
@@ -87,8 +87,11 @@ fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/triage.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
+# Each step's answer lives in a file, never in an argv string: a config answer can be far
+# bigger than the 128 KiB Linux allows in one argument.
 for s in whoami robot problems config inspect; do
   : > "$tmp/$s.lines"
+  printf 'null' > "$tmp/$s.data"
 done
 
 # The -n arguments every command after whoami carries, once the teamspace is known.
@@ -118,16 +121,40 @@ line() {  # <text>: at most ten lines per section
 CALLRC=0
 CALLOUT=""
 CALLERR=""
+CALLCODE=""
+CALLRETRY=""
 
-call() {  # <command...>: never fails the script; sets CALLRC, CALLOUT and CALLERR
+call() {  # <command...>: never fails the script; sets CALLRC, CALLOUT, CALLERR, CALLCODE and CALLRETRY
   CALLRC=0
   CALLOUT=""
   CALLERR=""
+  CALLCODE=""
+  CALLRETRY=""
   : > "$tmp/stderr"
   CALLOUT=$("$@" 2>"$tmp/stderr") || CALLRC=$?
-  CALLERR=$(head -n 1 "$tmp/stderr" 2>/dev/null || true)
-  CALLERR=${CALLERR#"Error: "}
+  # Every call passes -o json, so tnctl writes its error as one JSON object on stderr. Read the
+  # last non-blank line: a notice printed before it (a default configuration file being created)
+  # must not hide the error.
+  last=$(grep -v '^[[:space:]]*$' "$tmp/stderr" 2>/dev/null | tail -n 1 || true)
+  if printf '%s' "$last" | jq -e '.error | type == "object"' >/dev/null 2>&1; then
+    CALLERR=$(printf '%s' "$last" | jq -r '.error.message // ""')
+    CALLCODE=$(printf '%s' "$last" | jq -r '.error.code // ""')
+    CALLRETRY=$(printf '%s' "$last" | jq -r '.error.retryAfter // ""')
+  else
+    first=$(grep -m 1 '^Error: ' "$tmp/stderr" 2>/dev/null || true)
+    CALLERR=${first:-$last}
+    CALLERR=${CALLERR#"Error: "}
+  fi
   return 0
+}
+
+failed_text() {  # <command> <rc> <code> <retryAfter> <message>
+  local m
+  m="failed: $1 exited $2"
+  [ -z "$3" ] || m="$m ($3)"
+  m="$m: $5"
+  [ -z "$4" ] || m="$m - retry after ${4}s"
+  printf '%s' "$m"
 }
 
 is_json() {  # <text>: true when it parses as JSON
@@ -138,50 +165,58 @@ notrun=""
 who_ok=0
 who_rc=0
 who_err=""
-who_data=null
+who_code=""
+who_retry=""
 mode=""
 access=""
 rob_ok=0
 rob_rc=0
 rob_err=""
-rob_data=null
+rob_code=""
+rob_retry=""
 pro_ok=0
 pro_rc=0
 pro_err=""
-pro_data=null
+pro_code=""
+pro_retry=""
 con_ok=0
 con_rc=0
 con_err=""
-con_data=null
+con_code=""
+con_retry=""
 ins_ok=0
 ins_rc=0
 ins_err=""
-ins_data=null
+ins_code=""
+ins_retry=""
 
-step_obj() {  # <step> <ok 0|1> <exit code> <error> <data json>
+step_obj() {  # <step> <ok 0|1> <exit code> <error> <code> <retryAfter>
   local err=$4
   # A step that never ran (the script stopped at whoami) says so.
   if [ -z "$err" ] && [ "$2" = "0" ] && [ "$3" = "0" ] && [ -n "$notrun" ]; then
     err=$notrun
   fi
   jq -n --arg name "$1" --arg ok "$2" --argjson rc "$3" --arg err "$err" \
-    --rawfile summary "$tmp/$1.lines" --argjson data "$5" \
+    --arg code "$5" --arg retry "$6" \
+    --rawfile summary "$tmp/$1.lines" --slurpfile data "$tmp/$1.data" \
     '{ok: ($ok == "1"), exitCode: $rc, error: (if $err == "" then null else $err end),
-      summary: ($summary | split("\n") | map(select(length > 0))), data: $data}'
+      code: (if $code == "" then null else $code end),
+      retryAfter: (if $retry == "" then null else ($retry | tonumber? // null) end),
+      summary: ($summary | split("\n") | map(select(length > 0))), data: $data[0]}'
 }
 
 print_json() {
-  local who rob pro con ins
-  who=$(step_obj whoami "$who_ok" "$who_rc" "$who_err" "$who_data")
-  rob=$(step_obj robot "$rob_ok" "$rob_rc" "$rob_err" "$rob_data")
-  pro=$(step_obj problems "$pro_ok" "$pro_rc" "$pro_err" "$pro_data")
-  con=$(step_obj config "$con_ok" "$con_rc" "$con_err" "$con_data")
-  ins=$(step_obj inspect "$ins_ok" "$ins_rc" "$ins_err" "$ins_data")
+  step_obj whoami "$who_ok" "$who_rc" "$who_err" "$who_code" "$who_retry" > "$tmp/whoami.step"
+  step_obj robot "$rob_ok" "$rob_rc" "$rob_err" "$rob_code" "$rob_retry" > "$tmp/robot.step"
+  step_obj problems "$pro_ok" "$pro_rc" "$pro_err" "$pro_code" "$pro_retry" > "$tmp/problems.step"
+  step_obj config "$con_ok" "$con_rc" "$con_err" "$con_code" "$con_retry" > "$tmp/config.step"
+  step_obj inspect "$ins_ok" "$ins_rc" "$ins_err" "$ins_code" "$ins_retry" > "$tmp/inspect.step"
   jq -n --arg target "$robot" --arg teamspace "$ts" \
-    --argjson whoami "$who" --argjson robot "$rob" --argjson problems "$pro" \
-    --argjson config "$con" --argjson inspect "$ins" \
-    '{target: $target, teamspace: $teamspace, whoami: $whoami, robot: $robot,
-      problems: $problems, config: $config, inspect: $inspect}'
+    --slurpfile whoami "$tmp/whoami.step" --slurpfile robot "$tmp/robot.step" \
+    --slurpfile problems "$tmp/problems.step" --slurpfile config "$tmp/config.step" \
+    --slurpfile inspect "$tmp/inspect.step" \
+    '{target: $target, teamspace: $teamspace, whoami: $whoami[0], robot: $robot[0],
+      problems: $problems[0], config: $config[0], inspect: $inspect[0]}'
 }
 
 # ---------------------------------------------------------------- 1. whoami
@@ -190,16 +225,18 @@ section whoami "whoami"
 call "$TNCTL" whoami -o json
 who_rc=$CALLRC
 who_err=$CALLERR
+who_code=$CALLCODE
+who_retry=$CALLRETRY
 
 if [ "$who_rc" -ne 0 ]; then
-  line "failed: tnctl whoami exited $who_rc: $who_err"
+  line "$(failed_text 'tnctl whoami' "$who_rc" "$who_code" "$who_retry" "$who_err")"
 elif ! is_json "$CALLOUT"; then
   line "failed: tnctl whoami did not answer JSON"
   who_rc=1
   who_err="whoami did not answer JSON"
 else
   who_ok=1
-  who_data=$(printf '%s' "$CALLOUT" | jq -c .)
+  printf '%s' "$CALLOUT" | jq -c . > "$tmp/whoami.data"
   mode=$(printf '%s' "$CALLOUT" | jq -r '.mode // ""')
   case "$mode" in
     bot)
@@ -241,18 +278,20 @@ fi
 # ---------------------------------------------------------------- 2. the robot
 
 section robot "robot $robot"
-call "$TNCTL" robot "$robot" "${TARGS[@]}" -o json
+call "$TNCTL" robot "$robot" ${TARGS[@]+"${TARGS[@]}"} -o json
 rob_rc=$CALLRC
 rob_err=$CALLERR
+rob_code=$CALLCODE
+rob_retry=$CALLRETRY
 if [ "$rob_rc" -ne 0 ]; then
-  line "failed: tnctl robot exited $rob_rc: $rob_err"
+  line "$(failed_text 'tnctl robot' "$rob_rc" "$rob_code" "$rob_retry" "$rob_err")"
 elif ! is_json "$CALLOUT"; then
   line "failed: tnctl robot did not answer JSON"
   rob_rc=1
   rob_err="robot did not answer JSON"
 else
   rob_ok=1
-  rob_data=$(printf '%s' "$CALLOUT" | jq -c .)
+  printf '%s' "$CALLOUT" | jq -c . > "$tmp/robot.data"
   while IFS= read -r l; do
     line "$l"
   done < <(printf '%s' "$CALLOUT" | jq -r '
@@ -265,7 +304,7 @@ else
     "fleets: \(if ((.fleets // []) | length) == 0 then "none" else (.fleets | join(", ")) end)"
   ')
   if [ "${#TARGS[@]}" -gt 0 ]; then
-    call "$TNCTL" api GET "$ts/robots/$robot/access" "${TARGS[@]}" -o json
+    call "$TNCTL" api GET "$ts/robots/$robot/access" ${TARGS[@]+"${TARGS[@]}"} -o json
     if [ "$CALLRC" -eq 0 ] && is_json "$CALLOUT"; then
       while IFS= read -r l; do
         line "$l"
@@ -274,7 +313,7 @@ else
         "shell: \(.terminal.state // "?")"
       ')
     else
-      line "failed: tnctl api GET robots/$robot/access exited $CALLRC: $CALLERR"
+      line "$(failed_text "tnctl api GET $ts/robots/$robot/access" "$CALLRC" "$CALLCODE" "$CALLRETRY" "$CALLERR")"
     fi
   fi
 fi
@@ -285,12 +324,15 @@ section problems "problems"
 pro_call_ok=0
 if [ -z "$ts" ]; then
   line "skipped: the teamspace is unknown (whoami failed and -n was not given)"
+  pro_err="skipped: the teamspace is unknown"
 else
-  call "$TNCTL" api GET "$ts/problems?robot=$robot" "${TARGS[@]}" -o json
+  call "$TNCTL" api GET "$ts/problems?robot=$robot" ${TARGS[@]+"${TARGS[@]}"} -o json
   pro_rc=$CALLRC
   pro_err=$CALLERR
+  pro_code=$CALLCODE
+  pro_retry=$CALLRETRY
   if [ "$pro_rc" -ne 0 ]; then
-    line "failed: tnctl api GET problems exited $pro_rc: $pro_err"
+    line "$(failed_text 'tnctl api GET problems' "$pro_rc" "$pro_code" "$pro_retry" "$pro_err")"
   elif ! is_json "$CALLOUT"; then
     line "failed: the problems answer is not JSON"
     pro_rc=1
@@ -298,7 +340,7 @@ else
   else
     pro_ok=1
     pro_call_ok=1
-    pro_data=$(printf '%s' "$CALLOUT" | jq -c .)
+    printf '%s' "$CALLOUT" | jq -c . > "$tmp/problems.data"
     while IFS= read -r l; do
       line "$l"
     done < <(printf '%s' "$CALLOUT" | jq -r '
@@ -311,8 +353,8 @@ else
         then "source: unavailable - Prometheus could not be asked, so the problems are unknown, not absent"
         else "source: \(.source // "prometheus")" end),
       "total: \(.problems | length), \(([.problems[] | select(.severity == "critical")] | length)) critical",
-      (([.problems[]? | problem] | .[0:8])[]),
-      (if ((.problems // []) | length) > 8 then "and \(((.problems // []) | length) - 8) more" else empty end)
+      (([.problems[]? | problem] | .[0:7])[]),
+      (if ((.problems // []) | length) > 7 then "and \(((.problems // []) | length) - 7) more" else empty end)
     ')
   fi
 fi
@@ -320,18 +362,20 @@ fi
 # ---------------------------------------------------------------- 4. the config
 
 section config "config $robot"
-call "$TNCTL" config get "$robot" "${TARGS[@]}" -o json
+call "$TNCTL" config get "$robot" ${TARGS[@]+"${TARGS[@]}"} -o json
 con_rc=$CALLRC
 con_err=$CALLERR
+con_code=$CALLCODE
+con_retry=$CALLRETRY
 if [ "$con_rc" -ne 0 ]; then
-  line "failed: tnctl config get exited $con_rc: $con_err"
+  line "$(failed_text 'tnctl config get' "$con_rc" "$con_code" "$con_retry" "$con_err")"
 elif ! is_json "$CALLOUT"; then
   line "failed: the configuration answer is not JSON"
   con_rc=1
   con_err="the configuration answer is not JSON"
 else
   con_ok=1
-  con_data=$(printf '%s' "$CALLOUT" | jq -c .)
+  printf '%s' "$CALLOUT" | jq -c . > "$tmp/config.data"
   while IFS= read -r l; do
     line "$l"
   done < <(printf '%s' "$CALLOUT" | jq -r '
@@ -340,7 +384,7 @@ else
     . as $v
     | ($v.configuration.deviations // []) as $dev
     | ($v.configuration.warnings // []) as $warn
-    | ([$v.overrideStatus[]? | select(.state == "invalid" or .state == "no-target")]) as $bad
+    | ([$v.overrideStatus[]? | select(.state == "invalid" or .state == "no-target" or .state == "not-applicable")]) as $bad
     | ([$v.configuration.effective[]? | select(.status == "pending")]) as $pend
     | [
         (if $v.published != null then
@@ -373,29 +417,37 @@ fi
 
 if [ "$may_inspect" -eq 0 ]; then
   line "skipped: inspect needs a person (mode user) or a bot at access creator (mode ${mode:-unknown}, access ${access:-unknown})"
+  ins_err="skipped: inspect needs a person or a bot at access creator"
 elif [ "$pro_call_ok" -eq 0 ]; then
   line "skipped: the problems of the robot are unknown, so no failing pod is named"
+  ins_err="skipped: the problems are unknown"
 else
-  mapfile -t podlist < <(printf '%s' "$pro_data" | jq -r '
+  podlist=()
+  while IFS= read -r p; do
+    if [ -n "$p" ]; then podlist+=("$p"); fi
+  done < <(jq -r '
     [.problems[]?
      | select(.kind == "image-pull" or .kind == "crash-loop" or .kind == "not-running" or .kind == "not-ready")
      | . as $p
      | ($p.pods // [])[]
      | "\($p.namespace // "default")/\(.)"]
-    | unique | .[0:3] | .[]')
+    | unique | .[0:3] | .[]' "$tmp/problems.data")
   if [ "${#podlist[@]}" -eq 0 ]; then
+    ins_ok=1
     line "nothing to read: no image-pull, crash-loop, not-running or not-ready problem names a pod"
   fi
   pod_count=0
   ins_files=()
-  for pod in "${podlist[@]}"; do
+  for pod in ${podlist[@]+"${podlist[@]}"}; do
     [ -n "$pod" ] || continue
     pod_count=$((pod_count + 1))
-    call "$TNCTL" inspect pod "$robot" "$pod" "${TARGS[@]}" -o json
+    call "$TNCTL" inspect pod "$robot" "$pod" ${TARGS[@]+"${TARGS[@]}"} -o json
     if [ "$CALLRC" -ne 0 ]; then
-      line "$pod: failed: tnctl inspect pod exited $CALLRC: $CALLERR"
+      line "$pod: $(failed_text 'tnctl inspect pod' "$CALLRC" "$CALLCODE" "$CALLRETRY" "$CALLERR")"
       ins_rc=$CALLRC
       ins_err=$CALLERR
+      ins_code=$CALLCODE
+      ins_retry=$CALLRETRY
       continue
     fi
     if ! is_json "$CALLOUT"; then
@@ -418,11 +470,10 @@ else
         | if ($w | length) > 0 then "warnings: " + $w else empty end)
     ')
   done
-  if [ "$pod_count" -eq 0 ]; then
-    line "no failing pod to read"
-  fi
   if [ "${#ins_files[@]}" -gt 0 ]; then
-    ins_data=$(jq -s '.' "${ins_files[@]}")
+    jq -s '.' ${ins_files[@]+"${ins_files[@]}"} > "$tmp/inspect.data"
+  else
+    printf '[]' > "$tmp/inspect.data"
   fi
 fi
 

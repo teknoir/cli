@@ -8,10 +8,12 @@ q='pod_running{device_id="edge-01"} == 0'
 tnctl api GET "<teamspace>/prometheus/query?query=$(jq -rn --arg q "$q" '$q|@uri')" -o json
 ```
 
-`query_range` takes `&start=&end=&step=` as well. Write `device_id="<name>"` in every selector: an
-account limited to org units is refused when a selector does not name the devices it reads. The query
-text may be at most 4096 characters, the answer at most 10 MiB, and the platform gives Prometheus 10
-seconds.
+`query_range` takes `&start=&end=&step=` as well. Pin `device_id` in every selector. For an account
+limited to org units, and for a bot placed in a unit, the platform adds the devices in scope to every
+selector. A device outside that scope, or a series without `device_id` such as `up`, gives an empty
+`result`, not an error. For such an account, a query the platform cannot parse or check is refused
+(exit 6). For everyone, a query over 4096 characters, or one Prometheus rejects, is exit 5. The
+answer may be at most 10 MiB, and the platform gives Prometheus 10 seconds.
 
 ## What a device reports
 
@@ -21,7 +23,7 @@ Prometheus. A series that the device stops reporting disappears about 90 seconds
 
 | Metric | Value and unit | Labels |
 |---|---|---|
-| `device_last_seen` | unix seconds of the last state or event message; 0 = never reported | `device_id` |
+| `device_last_seen` | unix seconds of the last state or event message; 0 = none since the metrics processor last started (for a new device: never reported) | `device_id` |
 | `device_updated_at` | unix seconds of the last configuration message | `device_id` |
 | `pod_running` | 1 when the container's reason is `Running`, else 0 | `name`, `namespace`, `node`, `version`, `reason`, the pod's labels |
 | `pod_restarts` | restarts of the container | the same |
@@ -32,17 +34,17 @@ Prometheus. A series that the device stops reporting disappears about 90 seconds
 | `pod_memory_usage` | **bytes**, only while running | the same |
 | `pod_resource_requests_cpu`, `pod_resource_limits_cpu` | millicores, 0 = not set | the same |
 | `pod_resource_requests_memory`, `pod_resource_limits_memory` | bytes, 0 = not set | the same |
-| `pod_net_tx`, `pod_net_rx` | counters | the same |
+| `pod_net_tx`, `pod_net_rx` | byte counters | the same |
 | `node_ready` | 1 when the Ready condition is true | `name` (the k3s node name) |
 | `node_cpu_usage`, `node_memory_usage` | **millicores** and **bytes**, from metrics-server | `name` |
 | `node_cpu_allocatable`, `node_cpu_capacity` | millicores | `name` |
 | `node_memory_allocatable`, `node_memory_capacity` | bytes | `name` |
 | `node_cpu_requests`, `node_cpu_limits`, `node_memory_requests`, `node_memory_limits` | request and limit sums, millicores and bytes | `name` |
 | `node_storage_capacity`, `node_storage_usage`, `node_storage_available` | bytes | `name` |
-| `node_net_tx`, `node_net_rx`, `node_if_net_tx`, `node_if_net_rx` | counters; `rate()` of them is KB/s | `name` (+ the interface) |
+| `node_net_tx`, `node_net_rx`, `node_if_net_tx`, `node_if_net_rx` | byte counters; `rate()` of them is bytes per second | `name` (+ the interface) |
 | `toe_build_info` | always 1 | `version`, `commit`, `capabilities` - the robot agent's version |
 | `DCGM_FI_DEV_GPU_UTIL`, `_GPU_TEMP`, `_FB_USED`, `_FB_FREE`, `_POWER_USAGE`, ... | the GPU's own numbers (`_FB_*` in MiB) | `gpu`, `modelName`; empty when the GPU exporter is not deployed |
-| `up` | 1 while the target answers, from Prometheus itself (no `device_id`: a caller limited to org units is refused for it) | `job`, `instance` |
+| `up` | 1 while the target answers, from Prometheus itself (no `device_id`: for a caller limited to org units the answer is empty) | `job`, `instance` |
 
 `reason` is the Kubernetes reason (`Running`, `Pending`, `CrashLoopBackOff`, `ImagePullBackOff`,
 `ErrImagePull`, `ContainerCreating`, `OOMKilled`, `Error`, `Completed`, `Terminating`, `NotReady`,
@@ -61,7 +63,7 @@ Replace `edge-01` with the device's name. Each selector is pinned to one device.
 
 | # | Question | Query |
 |---|---|---|
-| 1 | Seconds since the device last reported (empty = never) | `time() - max(device_last_seen{device_id="edge-01"} > 0)` |
+| 1 | Seconds since the device last reported (empty = none recorded; check the robot's `phase`: `Offline` means it reported before) | `time() - max(device_last_seen{device_id="edge-01"} > 0)` |
 | 2 | Is it online (under 300 s)? | `(time() - max(device_last_seen{device_id="edge-01"} > 0)) < 300` |
 | 3 | Firing alerts on the device, by rule and pod | `count by (alertname, name, reason) (ALERTS{device_id="edge-01",alertstate="firing"})` |
 | 4 | How long each alert has been firing (seconds) | `time() - ALERTS_FOR_STATE{device_id="edge-01"}` |

@@ -40,7 +40,7 @@ tnctl inspect logs <robot> <namespace>/<pod> -n <teamspace> --previous --tail 10
 | exit 126 or 127 | the command or entrypoint is wrong or missing in the image | fix the image or the `command`/`args` |
 | `CreateContainerConfigError` | a referenced ConfigMap or Secret does not exist, or a key is missing | add the item (`config add`) or fix the name |
 | `FailedMount` | a volume or a PVC is missing or bound to the wrong node | a storage problem: the pod's events name the volume |
-| `FailedScheduling` | no node has the CPU, memory or taint tolerance | look at `node_cpu_limits`/`node_memory_limits` against `node_*_allocatable`, or an `UntoleratedTaint` line in the event |
+| `FailedScheduling` | no node has the CPU, memory or taint tolerance | look at `node_cpu_requests`/`node_memory_requests` against `node_*_allocatable`, or an untolerated-taint line in the event |
 | the container is `not-ready` but running | the readiness probe fails | `inspect logs` plus the probe's `Unhealthy` event |
 | restarts without a clear reason, `pod_restarted_ago` small | a liveness probe kills it | compare the probe's `initialDelaySeconds` with the app's start time |
 
@@ -61,9 +61,12 @@ refused, and of a TeknoirBot whose computer could not be admitted. The reason is
 | `NoAllowance` | the teamspace has no virtual-device allowance (its `<teamspace>-vdev` namespace, quota or annotation is missing or invalid) |
 | `ExceedsMax` | cpu, memory or disk is above the maximum for one device |
 | `AllowanceExceeded` | the teamspace allowance is used up; for a device that already has a VM this is a warning and the VM keeps running |
-| `QuotaExceeded`, `CreateRefused` | Kubernetes refused the VM (a ResourceQuota, or a webhook) |
+| `InvalidKeys` | the device's keys or user cannot be put into the VM's bootstrap script (unsafe characters) |
 | `RegistryCredentialMissing` | the VM cannot pull from the registry |
 | `VirtualDevicesDisabled`, `RuntimeMissing` | virtual devices are off in this environment, or the VM runtime is not installed |
+
+`QuotaExceeded` and `CreateRefused` are reasons of the `RuntimeReady` condition (phase `Failed`):
+Kubernetes refused the VM through a ResourceQuota or a webhook.
 
 Only a platform administrator changes an allowance or the runtime. Tell the person the reason and
 send them to the device's or the bot's page in the portal; do not guess.
@@ -91,4 +94,4 @@ computer's state; the person reads it on the Bots page.
 | `enable-later`, `cap` | writes are disabled, or the teamspace limit of robots with browser access is reached |
 | `starting` | declared, not published or not ready yet: usually under a minute |
 | `ready` | it opens now |
-| `unavailable` | the device's state could not be read |
+| `unavailable` | the remote desktop only: the platform has none configured, or objects in the device's configuration block it |

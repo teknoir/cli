@@ -34,7 +34,7 @@ upgrade it and stop.
 ```bash
 tnctl api GET <teamspace>/overview -o json
 tnctl api GET <teamspace>/problems -o json
-tnctl api GET <teamspace>/problems?robot=<robot> -o json      # one robot
+tnctl api GET "<teamspace>/problems?robot=<robot>" -o json      # one robot
 ```
 
 - `overview.robots` counts `total, online, waiting, degraded, offline, disabled`; `overview.problems`
@@ -57,14 +57,15 @@ tnctl api GET <teamspace>/robots/<robot>/access -o json
 |---|---|---|
 | `phase`, `phaseMessage` | `robot` | the platform's verdict: `WaitingForDevice`, `Registered`, `Online`, `Degraded`, `Offline`; the message is a sentence |
 | `nodes[]` | `robot` | each computer: `role`, `joined`, `ready` (a node that is not ready explains `node-not-ready`) |
+| `device` | `robot` | the device name that `device_id`, the MQTT topics and `devices/<device>` take; it is not always the robot's name |
 | `disabled` | `robot` | set while the device is disabled or on its way in or out: `state`, `by`, `reason` |
 | `phaseMessage` for a Degraded robot | `robot` | the platform replaces it with a sentence naming the problems |
 | `tunnel.state`, `tunnel.connected` | `access` | `active`, `pending`, `revoked`, `disabled`, `off`; `connected` is whether the robot's agent is up now |
 | `terminal.state` | `access` | the Shell's state (`ready`, `off`, `starting`, `offline`, `paused`, ...): what `inspect` can do |
 | last seen | step 7 | the API has no last-seen field: read `device_last_seen` from Prometheus |
 
-Conditions are **not** in the API answer: read `phase` and `phaseMessage`, and the `Admitted`
-condition's reason only for a virtual device (see [references/failures.md](references/failures.md)).
+Conditions are **not** in the API answer: read `phase` and `phaseMessage`. A virtual device's
+`Admitted` condition is not returned either; see [references/failures.md](references/failures.md).
 
 ### 4. Configuration state
 
@@ -114,7 +115,7 @@ tnctl inspect release <robot> <namespace>/<release> -n <teamspace> -o json
 ### 6. Events from the robot
 
 ```bash
-tnctl mqtt stream /devices/<device>/state/events --seconds 60 --count 50 --json
+tnctl mqtt stream /devices/<device>/state/events -n <teamspace> --seconds 60 --count 50 --json
 ```
 
 Every Kubernetes Event of the robot is published there. This is the only event source for a bot at
@@ -133,8 +134,11 @@ tnctl api GET "<teamspace>/prometheus/query?query=$(jq -rn --arg q "$q" '$q|@uri
 ```
 
 - The query is sent exactly as written: percent-encode it yourself, as above.
-- Pin `device_id` in every selector. An account limited to org units is refused (exit 6) when a
-  selector does not name the devices it reads.
+- Pin `device_id` in every selector. For an account limited to org units, and for a bot placed in a
+  unit, the platform adds the devices in scope to every selector. A device outside that scope, or a
+  series without `device_id` such as `up`, gives an empty `result`, not an error. For such an
+  account, a query the platform cannot parse or check is refused (exit 6). For everyone, a query over
+  4096 characters, or one Prometheus rejects, is exit 5.
 - The answer is the Prometheus API's JSON: `{"status":"success","data":{"result":[...]}}`. An empty
   `result` is a valid answer: no series.
 - The `pod_*` and `node_*` series of a device disappear about 90 seconds after it stops reporting;
@@ -177,7 +181,7 @@ failure that just happened is not in `/problems` yet - check `pod_running == 0` 
 | `crash-loop`: exit 1 or 2 | the app's own error, in its previous log | `inspect logs --previous` |
 | `crash-loop`: exit 126 or 127 | a wrong or missing command or entrypoint | the image, or `command`/`args` |
 | `not-running`: `CreateContainerConfigError` | a ConfigMap or Secret it needs does not exist | the pod's events |
-| `not-running`: `FailedScheduling` | no node has the CPU, memory or taint tolerance | the pod's events; `node_cpu_limits` against `node_cpu_allocatable` |
+| `not-running`: `FailedScheduling` | no node has the CPU, memory or taint tolerance | the pod's events; `node_cpu_requests` against `node_cpu_allocatable`, and `node_memory_requests` against `node_memory_allocatable` |
 | `not-ready`: the readiness probe fails | the app is up but not answering | the logs and the `Unhealthy` event |
 
 More, including the `NotAdmitted` reasons of a virtual device and the exit codes of a crash loop:
@@ -216,25 +220,33 @@ are not recognisable.
 | `disabled` | Tunneling is off for this device | an admin's job |
 | `off` | not enabled | an admin's job |
 
-The terminal's `AccessState` adds `unavailable` (the device's state could not be read) and
-`no-exec` (your account may not open a terminal in it): both are access, not a fault.
+The terminal's `AccessState` also has `no-exec` (your account may not open a terminal on it): access,
+not a fault. `unavailable` belongs to the remote desktop only.
 
 ### inspect error codes
 
-The platform's code (not the exit code) says what happened:
+tnctl does not print the platform's code. With `-o json`, `.error.code` is tnctl's own name for the
+exit code (`rejected`, `conflict`, `not_found`, `auth` or `session_expired`, `rate_limited`,
+`timeout`, `usage`, `error`), and `.error.message` holds the platform's sentence: alone for
+`terminal_off`, otherwise followed by `(HTTP n)`, and for a 403 after `not allowed for this account
+or teamspace: `. Branch on the exit code first, then use the message to tell apart rows that share an
+exit code. The Code column gives the platform's name for reference.
 
 | Code | HTTP | tnctl | Meaning | What you do |
 |---|---|---|---|---|
-| `terminal_off` | 409 | **5** | the robot's Shell is off (or paused, `disabled`, `tunneling-off`, `outdated`) | a person turns the Shell on in the portal; then ask again |
-| `not_ready` | 409 | 8 | the Shell is starting | ask again in 5 to 30 seconds |
+| `terminal_off` | 409 | **5** | the robot's Shell is off (or paused, `disabled`, `tunneling-off`, `outdated`) | read `.terminal.state` from `tnctl api GET <teamspace>/robots/<robot>/access -o json`. If it is `off`, a person turns the Shell on in the portal, then you ask again. Any other state is an admin's job (see Tunneling), or a person runs `tnctl logs`. |
+| `not_ready` | 409 | 8 | the message says the Shell is starting | ask again after 5 s, at most a few times |
+| `not_started` | 409 | 8 | "The container has not started yet.": an image pull or volume wait, so there is no log | do not retry; read the events with `inspect pod` |
+| `invalid` | 400 | 5 | the platform refused a parameter | fix the command; do not retry |
+| `forbidden` | 403 | 6 | the robot refused the read | report it; do not retry |
 | `not_found` | 404 | 3 | not a pod or release of this robot, or the pod is in `kube-system` and in no problem | use the names from step 2 |
 | `no_previous` | 404 | 3 | the container never restarted, so there is no previous log | drop `--previous` |
 | `no_write` | 403 | 6 | the person needs the developer role in the teamspace | a teamspace admin |
 | `no_exec` | 403 | 6 | the person may not open a terminal on devices here (`pods/exec`) | a teamspace admin |
 | `offline` | 503 | 1 | the robot is offline | step 3 |
-| `unavailable` | 503 | 1 | in-browser inspection is switched off on this platform | a platform administrator; use a person's `tnctl logs` |
+| `unavailable` | 503 | 1 | inspection is off on this platform, or this robot cannot answer it (an older robot agent or web terminal) | a person runs `tnctl logs` from their computer; an admin updates the robot |
 | `rate_limited`, `session_limit` | 429 | 9 | too many reads, or 5 sessions already open | wait, close a Shell tab, or ask again |
-| `busy` | 429 | 9 | another inspection of the same robot is running | wait a few seconds and retry once |
+| `busy` | 429 | 9 | the robot or the portal is busy with other reads | wait `error.retryAfter` s and retry once |
 | `too_large` | 413 | 1 | the answer is bigger than the platform allows | narrow it with `--tail` or `--since` |
 | `device_error` | 502 | 1 | the read failed on the robot | retry once; then a person |
 | `timeout` | 504 | 4 | the read took too long | retry once with a smaller tail |
@@ -264,12 +276,13 @@ admin right, or a physical check.
 
 | When | Why | What to give them |
 |---|---|---|
-| the Shell is off (`inspect` exit 5, `terminal_off`) | only a person turns it on | the robot, the pod, "turn the Shell on in the portal", then you retry |
+| the Shell is off (`inspect` exit 5 and `.terminal.state` is `off`) | only a person turns it on | the robot, the pod, "turn the Shell on in the portal", then you retry |
 | the tunnel is `revoked`, `disabled`, `pending` or `off`, or the terminal is `paused`, `tunneling-off`, `disabled` | an admin act | `tnctl wg status <device>` and the state you saw |
 | the robot is `Offline` for more than 5 minutes | power or network on site | the last-seen age and the tunnel state |
-| the robot is `Registered` or `WaitingForDevice` | it was never bootstrapped | `tnctl bootstrap <device> ...` (teknoir-robots); it needs the device login |
+| the robot is `Registered` | it was never bootstrapped | `tnctl bootstrap <device> ...` (teknoir-robots); it needs the device login |
+| `WaitingForDevice` for more than a minute | no device, no keys, or a conflict with another robot or a TeknoirBot | the `phaseMessage`; a teamspace admin |
 | `disk`, `node-pressure`, or anything needing `df`, `journalctl` or `kube-system` | needs a shell on the device | `tnctl exec <robot> -- df -h /`, `tnctl logs <robot> <resource>` |
-| exit 6 `no_write`, `no_exec`, or a bot at Read only | rights, not a fault | ask a teamspace admin, or switch the bot to Act as me |
+| exit 6 and the message names the developer role or pods/exec, or a bot at Read only | rights, not a fault | ask a teamspace admin, or switch the bot to Act as me |
 | the fix is a configuration change and the bot is at `read` | writes need `creator` | the exact `tnctl config` command, from teknoir-config |
 | a virtual device's `NotAdmitted` or `Failed` | the fleet API does not return it | the device or bot page in the portal; an admin changes the allowance |
 
@@ -291,16 +304,20 @@ A bot has `tnctl inspect logs` instead of `tnctl logs`, and nothing instead of `
 scripts/triage.sh <robot> [-n <teamspace>] [--json]
 ```
 
-It runs steps 1 to 5 in one go, read-only, and prints one section per step: whoami, the robot, the
-robot's problems, the configuration state and - when it may - up to three failing pods. It never
-writes, never uses `tnctl api` with a method other than GET, and never calls an inspect route outside
-`tnctl inspect`. A step that fails prints its exit code and first error line and the script goes on.
+It runs steps 1 to 5 in one go (step 2 only as this robot's problems, without the overview),
+read-only, and prints one section per step: whoami, the robot, the robot's problems, the
+configuration state and - when it may - up to three failing pods. It never writes, never uses
+`tnctl api` with a method other than GET, and never calls an inspect route outside `tnctl inspect`. A
+step that fails prints `failed: tnctl <command> exited <n> (<code>): <message>`, read from tnctl's
+JSON error, plus ` - retry after <s>s` when tnctl gives `retryAfter`, and the script goes on. With
+`--json`, each step has `ok`, `exitCode`, `error`, `code`, `retryAfter`, `summary` and `data`.
 
 Run it first when a robot is reported broken: it finds the shape of the problem faster than the
-commands by hand, and `--json` gives you the same data to filter. Exit codes: 0 it ran, 2 usage, 6
-`whoami` itself was refused. Then continue from the step that showed something.
+commands by hand, and `--json` gives you the same data to filter. Exit codes: 0 it ran, 1 jq is
+missing, 2 usage, 6 `whoami` itself was refused. Then continue from the step that showed something.
 
-It needs `tnctl` on the PATH (override with `TNCTL=<path>`) and `jq`.
+It needs `tnctl` on the PATH (override with `TNCTL=<path>`). It runs on bash 3.2 or newer (macOS's
+own bash is fine) and needs jq 1.6 or newer.
 
 ## Bot mode
 
@@ -316,7 +333,8 @@ It needs `tnctl` on the PATH (override with `TNCTL=<path>`) and `jq`.
 | `tnctl mqtt stream .../state/events` | no | yes | yes |
 | `tnctl ssh`, `exec`, `logs`, `wg`, `port-forward` | refused, whatever the access | refused | refused |
 
-- Branch on `.bot.access`, never on the text of an error message.
+- Branch on `.bot.access`, never on the text of an error message (the one exception: the inspect
+  table above, where the message tells apart codes that share an exit code).
 - At access `none` every route is refused (exit 6): the bot's creator has turned its access Off.
 - A 401 means the bot's key was not accepted: a person must re-create the bot. Never run `tnctl login`
   from a bot.
