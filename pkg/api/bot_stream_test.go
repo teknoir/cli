@@ -150,6 +150,9 @@ func TestValidateStreamTopic(t *testing.T) {
 		"/devices/d1/events/x/y",
 		"/devices/d1/state/telemetry",
 		"/devices/vision-station-01/events/app/log",
+		// a concrete topic below a + device level, and one with several segments
+		"/devices/+/state/temp",
+		"/devices/d1/state/a/b",
 	}
 	for _, topic := range valid {
 		if err := ValidateStreamTopic(topic); err != nil {
@@ -168,6 +171,12 @@ func TestValidateStreamTopic(t *testing.T) {
 		"/devices/+/state/#/x",
 		"devices/d1/state/#",
 		"/devices//state/#",
+		// the server's rule for <d> and for a concrete segment
+		"/devices/D1/state/#",
+		"/devices/d1/state/a b",
+		"/devices/d1/state/+\tx",
+		// 257 characters: one over the limit
+		"/devices/d1/state/" + strings.Repeat("a", 257-len("/devices/d1/state/")),
 	}
 	for _, topic := range invalid {
 		if err := ValidateStreamTopic(topic); err == nil {

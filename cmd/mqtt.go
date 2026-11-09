@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/teknoir/cli/pkg/api"
+	"github.com/teknoir/cli/pkg/auth"
 )
 
 // mqttReconnectDelay and mqttReconnectMax bound the pause between two connects of --reconnect: it
@@ -49,7 +50,7 @@ func newMqttStreamCmd(e *cliEnv) *cobra.Command {
 		Long: `Follow MQTT topics of the teamspace's devices and print their messages as they arrive.
 
 A topic is /devices/<device|+>/state/#, /devices/<device|+>/events/#, or a concrete topic below
-/devices/<device>/state/ or /devices/<device>/events/. Up to 8 topics are followed at once.
+/devices/<device|+>/state/ or /devices/<device|+>/events/. Up to 8 topics are followed at once.
 
 Each message is one line: "<topic> <payload>"; with --json, each message's data is one JSON line.
 A message that is not text shows as <base64:N bytes>. When the platform had to drop messages it
@@ -205,6 +206,12 @@ func runMqttStreamOnce(ctx context.Context, fl *api.Fleet, topics []string, f mq
 		var ae *api.Error
 		if errors.As(err, &ae) {
 			// A refused request or a rejected key is not retried: it says nothing about the network.
+			return true, false, classify(err)
+		}
+		if errors.Is(err, api.ErrBotKey) || errors.Is(err, api.ErrBotAPIInsecure) ||
+			errors.Is(err, auth.ErrNotLoggedIn) || errors.Is(err, auth.ErrSessionExpired) {
+			// The token was read again for this connection and could not be: a missing or emptied bot
+			// key, or a person's login that ended. Connecting again would not help.
 			return true, false, classify(err)
 		}
 		if ctx.Err() != nil {

@@ -10,8 +10,13 @@ import (
 // Go mirror of the bot API (GET whoami). A TeknoirBot is an edge computer that runs an AI agent;
 // the agent reaches the platform with the bot's own key instead of a user's login.
 
-// BotAccessNone is the bot's access when its creator may not do anything in the teamspace yet.
-const BotAccessNone = "none"
+// The bot's access levels. none: the bot may do nothing in the teamspace yet; read: it may view;
+// creator: it acts with its creator's permissions.
+const (
+	BotAccessNone    = "none"
+	BotAccessRead    = "read"
+	BotAccessCreator = "creator"
+)
 
 // BotWhoami is the answer of GET <bot API>/whoami.
 type BotWhoami struct {
@@ -21,10 +26,16 @@ type BotWhoami struct {
 		// Namespace is the bot's teamspace; Name the bot's name.
 		Namespace string `json:"namespace"`
 		Name      string `json:"name"`
-		// Unit is the organisation unit the bot is placed in; nil when it is not placed.
+		// Unit is the name of the organisation unit the bot is placed in; nil when it is not placed.
 		Unit *string `json:"unit"`
-		// Access is what the bot's creator may do here: none, read or creator.
+		// UnitID is that unit's id, the one `tnctl robot add --unit` takes; nil when the bot is not
+		// placed (and from a platform that predates it).
+		UnitID *string `json:"unitId"`
+		// Access is what the bot may do here: none, read or creator. It is read when the bot is set to
+		// creator but its creator may only view.
 		Access string `json:"access"`
+		// ConfiguredAccess is the level its creator set; empty from a platform that predates it.
+		ConfiguredAccess string `json:"configuredAccess"`
 	} `json:"bot"`
 	Creator struct {
 		// Email is the person the bot works for.

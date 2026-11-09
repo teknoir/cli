@@ -52,7 +52,10 @@ type Error struct {
 	// Code is the server's error code or error name when it sent one.
 	Code    string
 	Message string
-	// RetryAfter is the Retry-After header of a 429, in seconds (0: none).
+	// Detail is the server's own message of a 401 (why it refused the login), which Message
+	// replaces with the advice to log in. Empty when the server sent none.
+	Detail string
+	// RetryAfter is the Retry-After header of a 429 or a 503, in seconds (0: none).
 	RetryAfter int
 	// Body is the response body of the failed request (at most the size the client reads), for
 	// callers that know a richer error shape, such as a 422 that carries a validation result.
@@ -213,6 +216,8 @@ func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) 
 		// A bearer request the platform could not authenticate: the token is missing, expired or
 		// rejected. The challenge (WWW-Authenticate) and the JSON message say why.
 		ch := parseChallenge(resp.Header.Values("WWW-Authenticate"))
+		// The answer's own message, kept before it is replaced by the advice to log in.
+		e.Detail = e.Message
 		detail := e.Message
 		if detail == "" {
 			detail = ch["error_description"]
@@ -236,7 +241,7 @@ func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) 
 			e.Message = msgForbidden + ": " + e.Message
 		}
 	}
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		e.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
 	return e

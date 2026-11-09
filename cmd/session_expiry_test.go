@@ -267,11 +267,16 @@ func useConfig(t *testing.T, domain string, a map[string]any) string {
 	oldCfg := cfgFile
 	cfgFile = path
 	viper.Reset()
+	bindViper()
 	viper.SetConfigFile(path)
 	if err := viper.ReadInConfig(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cfgFile = oldCfg; viper.Reset() })
+	t.Cleanup(func() {
+		cfgFile = oldCfg
+		viper.Reset()
+		bindViper()
+	})
 	return path
 }
 

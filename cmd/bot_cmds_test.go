@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/teknoir/cli/pkg/api"
+	"github.com/teknoir/cli/pkg/auth"
 )
 
 // ---------- whoami ----------
@@ -27,7 +29,7 @@ func TestWhoamiBotTableAndJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "bot teknoir-demo/scout for a@b.c, access read, unit Karlstad\n"; out != want {
+	if want := "bot teknoir-demo/scout for a@b.c, access read, unit Karlstad (se-karlstad)\n"; out != want {
 		t.Errorf("got %q, want %q", out, want)
 	}
 	out, _, err = runCLI(t, e, "whoami", "-o", "json")
@@ -35,12 +37,39 @@ func TestWhoamiBotTableAndJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	var v struct {
-		Mode  string
-		Bot   struct{ Namespace, Name, Unit, Access string }
+		Mode string
+		Bot  struct {
+			Namespace, Name, Unit, Access string
+			UnitID                        string `json:"unitId"`
+			ConfiguredAccess              string `json:"configuredAccess"`
+		}
 		Email string
 	}
-	if err := json.Unmarshal([]byte(out), &v); err != nil || v.Mode != "bot" || v.Bot.Name != "scout" || v.Bot.Access != "read" {
+	if err := json.Unmarshal([]byte(out), &v); err != nil || v.Mode != "bot" || v.Bot.Name != "scout" || v.Bot.Access != "read" ||
+		v.Bot.UnitID != "se-karlstad" || v.Bot.ConfiguredAccess != "read" {
 		t.Errorf("%v: %s", err, out)
+	}
+}
+
+// A bot set to creator whose creator may only view acts at read; the table says why. A platform that
+// predates configuredAccess and unitId prints as before.
+func TestWhoamiBotLoweredAccess(t *testing.T) {
+	cases := map[string]string{
+		`{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":"Karlstad","unitId":"Karlstad","access":"read","configuredAccess":"creator"},"creator":{"email":"a@b.c"},"domain":"teknoir.cloud"}`: "bot teknoir-demo/scout for a@b.c, access read (set to creator, but a@b.c may only view), unit Karlstad\n",
+		`{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":null,"unitId":null,"access":"none","configuredAccess":"read"},"creator":{"email":"a@b.c"},"domain":"teknoir.cloud"}`:                "bot teknoir-demo/scout for a@b.c, access none (set to read), unit —\n",
+		`{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":"Karlstad","access":"creator"},"creator":{"email":"a@b.c"},"domain":"teknoir.cloud"}`:                                               "bot teknoir-demo/scout for a@b.c, access creator, unit Karlstad\n",
+	}
+	for body, want := range cases {
+		p := newBotAPI(t)
+		p.on("GET", "/whoami", 200, body)
+		e := botEnv(t, p)
+		out, _, err := runCLI(t, e, "whoami")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != want {
+			t.Errorf("got %q, want %q", out, want)
+		}
 	}
 }
 
@@ -59,7 +88,9 @@ func TestWhoamiBotWithoutUnit(t *testing.T) {
 
 // useConfigFile gives this test a HOME of its own with that .tnctl.yaml in it: initConfig reads it
 // on every command run, as it does for a person, and the test that comes next brings its own.
-// Nothing here resets viper: that would also drop the flag bindings and defaults root.go binds once.
+// cfgFile names that file, so viper's search paths (which only ever grow) cannot pick up another
+// test's file or the developer's. Nothing here resets viper: that would also drop the flag bindings
+// and defaults root.go binds once.
 func useConfigFile(t *testing.T, content string) {
 	t.Helper()
 	home := t.TempDir()
@@ -67,6 +98,9 @@ func useConfigFile(t *testing.T, content string) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	old := cfgFile
+	cfgFile = filepath.Join(home, ".tnctl.yaml")
+	t.Cleanup(func() { cfgFile = old })
 }
 
 // useLogin stores a login for teknoir.cloud in a temporary config file, as the login tests do.
@@ -914,5 +948,192 @@ func TestMqttStreamTopicValidation(t *testing.T) {
 	}
 	if n := len(p.seen("GET", "/mqtt/stream")); n != len(valid) {
 		t.Errorf("%d stream requests, want %d", n, len(valid))
+	}
+}
+
+// ---------- a token error under --reconnect ----------
+
+// A key that disappears between two connections ends the stream at once, --reconnect or not: it is
+// not a network failure, and no amount of waiting brings the key back.
+func TestMqttStreamReconnectStopsOnAKeyThatWentAway(t *testing.T) {
+	oldDelay := mqttReconnectDelay
+	mqttReconnectDelay = time.Millisecond
+	t.Cleanup(func() { mqttReconnectDelay = oldDelay })
+
+	var p *botAPI
+	perConn := func(i int) string {
+		if i == 1 {
+			// The key is read again for the next connection: it must fail then, not be retried.
+			if err := os.Remove(p.keyFile); err != nil {
+				t.Error(err)
+			}
+			return msgEvent("/devices/d1/state/x", "one")
+		}
+		return msgEvent("/devices/d1/state/x", "again")
+	}
+	var conns *int
+	p, conns = sseBotAPI(t, perConn)
+	e := botEnv(t, p)
+	start := time.Now()
+	_, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#", "--reconnect", "--seconds", "2")
+	elapsed := time.Since(start)
+
+	if err == nil || exitCodeOf(err) != codeAuth || !strings.Contains(err.Error(), "the bot key is missing or empty") {
+		t.Errorf("exit %d, %v", exitCodeOf(err), err)
+	}
+	if n := *conns; n != 1 {
+		t.Errorf("%d connections, want 1: %s", n, errs)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("took %s: the key error was retried", elapsed)
+	}
+}
+
+// A person's login that ends between two connections is the same: --reconnect does not wait for a
+// session that will never come back.
+func TestMqttStreamReconnectStopsOnAnEndedLogin(t *testing.T) {
+	noBotMode(t)
+	oldDelay := mqttReconnectDelay
+	mqttReconnectDelay = time.Millisecond
+	t.Cleanup(func() { mqttReconnectDelay = oldDelay })
+
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "one"))
+	}))
+	defer srv.Close()
+	// The login is good for the first connection and over for the next, as a session that ends.
+	calls := 0
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) {
+			calls++
+			// One connection reads the token twice: before the loop and for the request.
+			if calls <= 2 {
+				return "tok", nil
+			}
+			return "", auth.ErrSessionExpired
+		}}, "teknoir.cloud", "teknoir-demo", nil
+	}
+	start := time.Now()
+	_, errs, err := runCLI(t, e, "mqtt", "stream", "/devices/+/state/#", "--reconnect", "--seconds", "2")
+	elapsed := time.Since(start)
+
+	if err == nil || exitCodeOf(err) != codeAuth {
+		t.Fatalf("exit %d, %v", exitCodeOf(err), err)
+	}
+	// One wait, for the clean end of the first stream: the attempt after it ends on the token error.
+	if n := strings.Count(errs, "connecting again"); n != 1 {
+		t.Errorf("%d waits before connecting again: %q", n, errs)
+	}
+	if hits != 1 {
+		t.Errorf("%d requests, want 1", hits)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("took %s: the login error was retried", elapsed)
+	}
+}
+
+// ---------- inspect logs: what the server refuses ----------
+
+func TestInspectLogsRejectsWhatTheServerRefuses(t *testing.T) {
+	noBotMode(t)
+	p := newFakePlatform(t)
+	e, _ := testEnv(t, p, nil)
+	for _, args := range [][]string{
+		{"inspect", "logs", "vs", "default/whoami-1", "--tail", "-1"},
+		{"inspect", "logs", "vs", "default/whoami-1", "--tail", "2001"},
+		{"inspect", "logs", "vs", "default/whoami-1", "--since", "500ms"},
+		{"inspect", "logs", "vs", "default/whoami-1", "--since", "0s"},
+		{"inspect", "logs", "vs", "default/whoami-1", "--since", "169h"},
+	} {
+		if _, _, err := runCLI(t, e, args...); err == nil || exitCodeOf(err) != codeUsage {
+			t.Errorf("%v: exit %d, %v", args, exitCodeOf(err), err)
+		}
+	}
+	if n := p.countAll(); n != 0 {
+		t.Errorf("%d requests were sent", n)
+	}
+	// The largest values the server takes are sent as they are.
+	p.on("GET", "/robots/vs/inspect/pods/default/whoami-1/logs", 200, `{"text":"a line\n"}`)
+	if _, _, err := runCLI(t, e, "inspect", "logs", "vs", "default/whoami-1", "--tail", "2000", "--since", "168h"); err != nil {
+		t.Fatal(err)
+	}
+	got := p.seen("GET", "/robots/vs/inspect/pods/default/whoami-1/logs")
+	if len(got) != 1 {
+		t.Fatalf("requests %+v", p.reqs)
+	}
+	for _, want := range []string{"tail=2000", "since=168h", "enable=false"} {
+		if !strings.Contains(got[0].Query, want) {
+			t.Errorf("query %q lacks %q", got[0].Query, want)
+		}
+	}
+}
+
+// ---------- errors in bot mode ----------
+
+// A bot's refused key is reported with the platform's own words, and without advice a bot cannot
+// take: only a person can re-create it.
+func TestBotRefusedKeySaysWhatThePlatformSaid(t *testing.T) {
+	p := newBotAPI(t)
+	p.on("GET", "/whoami", 401, `{"error":{"name":"AuthenticationError","message":"The bot key was not accepted."}}`)
+	e := botEnv(t, p)
+	_, _, err := runCLI(t, e, "whoami")
+	if err == nil || exitCodeOf(err) != codeAuth {
+		t.Fatalf("exit %d, %v", exitCodeOf(err), err)
+	}
+	if !strings.Contains(err.Error(), "The bot key was not accepted.") {
+		t.Errorf("the platform's words are lost: %v", err)
+	}
+	if strings.Contains(err.Error(), "tnctl login") {
+		t.Errorf("the error tells a bot to log in: %v", err)
+	}
+}
+
+// A 503 carries its Retry-After like a 429 does.
+func TestServiceUnavailableCarriesRetryAfterInJSON(t *testing.T) {
+	p := newBotAPI(t)
+	p.on("GET", "/whoami", 503, `{"error":{"name":"ServiceUnavailable","message":"try again later"}}`)
+	inner := p.srv.Config.Handler
+	p.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		inner.ServeHTTP(w, r)
+	})
+	e := botEnv(t, p)
+	_, _, err := runCLI(t, e, "whoami")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	var buf bytes.Buffer
+	writeError(&buf, err, "json")
+	var body struct {
+		Error struct {
+			Code       string
+			Message    string
+			RetryAfter int `json:"retryAfter"`
+		}
+	}
+	if jerr := json.Unmarshal(buf.Bytes(), &body); jerr != nil {
+		t.Fatalf("%v: %q", jerr, buf.String())
+	}
+	if body.Error.RetryAfter != 5 {
+		t.Errorf("retryAfter %d: %q", body.Error.RetryAfter, buf.String())
+	}
+}
+
+// ---------- whoami without a creator ----------
+
+func TestWhoamiBotWithoutCreatorEmail(t *testing.T) {
+	p := newBotAPI(t)
+	p.on("GET", "/whoami", 200, `{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":null,"access":"none"},"creator":{"email":null},"domain":"teknoir.cloud"}`)
+	e := botEnv(t, p)
+	out, _, err := runCLI(t, e, "whoami")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "bot teknoir-demo/scout for an unknown person, access none, unit —\n"; out != want {
+		t.Errorf("got %q, want %q", out, want)
 	}
 }

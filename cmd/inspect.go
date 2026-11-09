@@ -4,9 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -189,6 +192,41 @@ func printInspectPod(w io.Writer, res *api.InspectPodResponse) {
 	}
 }
 
+// inspectTailMax is the most lines the platform's log route hands out.
+const inspectTailMax = 2000
+
+// inspectSince matches the --since of inspect logs: one to six digits and s, m or h.
+var inspectSince = regexp.MustCompile(`^[1-9][0-9]{0,5}[smh]$`)
+
+// inspectSinceMax is the longest --since the platform's log route accepts.
+const inspectSinceMax = 168 * time.Hour
+
+// parseInspectSince checks --since against what the platform's log route takes: a whole number of
+// seconds, minutes or hours, at most 168h. It is stricter than durationArg (which tnctl logs keeps).
+func parseInspectSince(s string) error {
+	bad := usageErr("--since must be like 30s, 10m or 2h, at most 168h")
+	if !inspectSince.MatchString(s) {
+		return bad
+	}
+	n, err := strconv.Atoi(s[:len(s)-1])
+	if err != nil {
+		return bad
+	}
+	var unit time.Duration
+	switch s[len(s)-1] {
+	case 's':
+		unit = time.Second
+	case 'm':
+		unit = time.Minute
+	default: // 'h'
+		unit = time.Hour
+	}
+	if time.Duration(n)*unit > inspectSinceMax {
+		return bad
+	}
+	return nil
+}
+
 func newInspectLogsCmd(e *cliEnv) *cobra.Command {
 	var f logsFlags
 	c := &cobra.Command{
@@ -198,22 +236,24 @@ func newInspectLogsCmd(e *cliEnv) *cobra.Command {
 		Long: `Show the log of a pod on a robot. This is the command to use inside a TeknoirBot, which may not
 run "tnctl logs".
 
---tail is how many lines from the end are shown (200 by default; -1 asks for all the server
-sends). --since takes a duration such as 30s, 10m or 2h. Lines the platform redacts (a password an
-app printed) stay hidden.`,
+--tail is how many lines from the end are shown: 500 lines by default, at most 2000. --since takes a
+duration such as 30s, 10m or 2h, at most 168h. Lines the platform redacts (a password an app
+printed) stay hidden.`,
 		Example: `  tnctl inspect logs vision-station-01 default/whoami-7d9f-x2k4p
   tnctl inspect logs vision-station-01 default/whoami-7d9f-x2k4p --tail 50 --since 10m
   tnctl inspect logs vision-station-01 default/notebook-0 -c notebook --previous`,
 		Args: argsRange(2, 2, "inspect logs needs a robot and <namespace>/<pod>"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if f.since != "" && !durationArg.MatchString(f.since) {
-				return usageErr("--since %q: use a duration like 30s, 10m or 2h", f.since)
+			if f.since != "" {
+				if err := parseInspectSince(f.since); err != nil {
+					return err
+				}
 			}
 			if f.container != "" && !k8sName.MatchString(f.container) {
 				return usageErr("--container %q is not a container name", f.container)
 			}
-			if f.tail < -1 {
-				return usageErr("--tail must be 0 or more, or -1 for all")
+			if f.tail < 0 || f.tail > inspectTailMax {
+				return usageErr("--tail must be from 1 to 2000")
 			}
 			ns, pod, err := parseK8sPair("inspect logs", args[1])
 			if err != nil {
@@ -250,8 +290,8 @@ app printed) stay hidden.`,
 	}
 	c.Flags().StringVarP(&f.container, "container", "c", "", "container name")
 	c.Flags().BoolVar(&f.previous, "previous", false, "log of the previous container instance")
-	c.Flags().IntVar(&f.tail, "tail", 0, "lines to show from the end (0: the platform's default)")
-	c.Flags().StringVar(&f.since, "since", "", "only lines newer than this, for example 10m")
+	c.Flags().IntVar(&f.tail, "tail", 0, "lines to show from the end, at most 2000 (0: the platform's default of 500)")
+	c.Flags().StringVar(&f.since, "since", "", "only lines newer than this, for example 10m (at most 168h)")
 	return c
 }
 

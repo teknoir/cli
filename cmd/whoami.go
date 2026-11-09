@@ -64,12 +64,28 @@ func runBotWhoami(cmd *cobra.Command, format string, fl *api.Fleet) error {
 	unit := "—"
 	if who.Bot.Unit != nil && *who.Bot.Unit != "" {
 		unit = *who.Bot.Unit
+		// The id is what robot add --unit takes; it is shown when the name is not the id.
+		if who.Bot.UnitID != nil && *who.Bot.UnitID != "" && *who.Bot.UnitID != unit {
+			unit += " (" + *who.Bot.UnitID + ")"
+		}
 	}
 	access := who.Bot.Access
 	if access == "" {
 		access = api.BotAccessNone
 	}
-	fmt.Fprintf(out, "bot %s/%s for %s, access %s, unit %s\n", who.Bot.Namespace, who.Bot.Name, who.Creator.Email, access, unit)
+	creator := who.Creator.Email
+	if creator == "" {
+		creator = "an unknown person"
+	}
+	// The platform lowers a bot set to creator to read when its creator may only view.
+	switch c := who.Bot.ConfiguredAccess; {
+	case c == "" || c == access:
+	case c == api.BotAccessCreator && access == api.BotAccessRead:
+		access += fmt.Sprintf(" (set to %s, but %s may only view)", c, creator)
+	default:
+		access += fmt.Sprintf(" (set to %s)", c)
+	}
+	fmt.Fprintf(out, "bot %s/%s for %s, access %s, unit %s\n", who.Bot.Namespace, who.Bot.Name, creator, access, unit)
 	return nil
 }
 

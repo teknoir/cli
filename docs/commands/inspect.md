@@ -40,8 +40,8 @@ The pod's log goes to stdout, line for line, so `| grep` and `> file` work.
 | --- | --- |
 | `-c, --container` | Container name, for a pod with more than one. |
 | `--previous` | The previous instance of the container (after a crash). |
-| `--tail N` | Lines from the end (the platform's default when not given). |
-| `--since D` | Only lines newer than a duration such as `30s`, `10m`, `2h`. |
+| `--tail N` | Lines from the end: 500 lines by default, at most 2000. |
+| `--since D` | Only lines newer than a duration such as `30s`, `10m`, `2h`, at most `168h`. |
 
 When the platform cut the log off, or redacted lines that held credentials, a note goes to stderr; the log on
 stdout stays what the app printed.

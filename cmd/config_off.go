@@ -128,6 +128,7 @@ func addOffFlags(c *cobra.Command, f *offFlags, bare waitLevel) {
 		c.Flags().StringVar(&f.confirm, "confirm", "", "the text a dry run asked for (turning off deletes data)")
 	}
 	f.wait.add(c)
+	f.wait.bare = bare
 	c.Flags().Lookup("wait").NoOptDefVal = string(bare)
 	c.Flags().Lookup("wait").Usage = usage
 }

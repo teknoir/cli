@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 	"github.com/teknoir/cli/pkg/api"
 )
 
@@ -119,10 +122,17 @@ func (p *botAPI) writeKey(t *testing.T, content string) {
 // namespace is present: bot mode must ignore it.
 func botEnv(t *testing.T, p *botAPI) *cliEnv {
 	t.Helper()
+	return botEnvWithConfig(t, p, "domain: other.example\nauths:\n  other_example:\n    access_token: not-this\n    namespace: someone-else\n")
+}
+
+// botEnvWithConfig is botEnv with that .tnctl.yaml in $HOME; cfg "" leaves $HOME empty of one.
+func botEnvWithConfig(t *testing.T, p *botAPI, cfg string) *cliEnv {
+	t.Helper()
 	home := t.TempDir()
-	cfg := "domain: other.example\nauths:\n  other_example:\n    access_token: not-this\n    namespace: someone-else\n"
-	if err := os.WriteFile(filepath.Join(home, ".tnctl.yaml"), []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
+	if cfg != "" {
+		if err := os.WriteFile(filepath.Join(home, ".tnctl.yaml"), []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("HOME", home)
 	t.Setenv(envBotAPI, p.srv.URL+"/api/device/bot/v1")
@@ -148,7 +158,8 @@ func noBotMode(t *testing.T) {
 	t.Setenv(envBotDomain, "")
 }
 
-const botWhoamiBody = `{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":"Karlstad","access":"read"},
+const botWhoamiBody = `{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":"Karlstad","unitId":"se-karlstad",
+"access":"read","configuredAccess":"read"},
 "creator":{"email":"a@b.c"},"domain":"teknoir.cloud"}`
 
 // ---------- bot mode plumbing ----------
@@ -278,12 +289,42 @@ func runRealRoot(t *testing.T, args ...string) (string, string, error) {
 	// The flags write package level variables: take them before the flags are parsed.
 	oldNS, oldOut, oldDomain, oldCfg := namespace, outputFlag, domain, cfgFile
 	rootCmd.SetArgs(args)
-	err := rootCmd.ExecuteContext(context.Background())
+	c, err := rootCmd.ExecuteContextC(context.Background())
 	rootCmd.SetArgs(nil)
 	rootCmd.SetOut(nil)
 	rootCmd.SetErr(nil)
+	// A flag set by one test stays "changed" on the shared tree unless it is put back: a test that
+	// sets --namespace must not change what the next one sees.
+	if c == nil {
+		c = rootCmd
+	}
+	resetFlagSet(t, c.Flags())
+	resetFlagSet(t, rootCmd.PersistentFlags())
 	namespace, outputFlag, domain, cfgFile = oldNS, oldOut, oldDomain, oldCfg
 	return out.String(), errb.String(), err
+}
+
+// resetFlagSet puts every flag of fs back to its default and marks it unchanged. A slice or array
+// flag's default is "[]", which Set would append to the value, so those are replaced; robot add's
+// --label (key=value) refuses its own empty default, so it is cleared. Any other flag that cannot
+// be reset fails the test: its value would leak into the next run.
+func resetFlagSet(t *testing.T, fs *pflag.FlagSet) {
+	t.Helper()
+	fs.VisitAll(func(f *pflag.Flag) {
+		if lf, ok := f.Value.(*labelFlags); ok {
+			lf.labels = nil
+		} else if strings.HasSuffix(f.Value.Type(), "Slice") || strings.HasSuffix(f.Value.Type(), "Array") {
+			sv, ok := f.Value.(pflag.SliceValue)
+			if !ok {
+				t.Errorf("runRealRoot cannot reset --%s (%s): not a pflag.SliceValue", f.Name, f.Value.Type())
+			} else if err := sv.Replace(nil); err != nil {
+				t.Errorf("runRealRoot cannot reset --%s (%s): %v", f.Name, f.Value.Type(), err)
+			}
+		} else if err := f.Value.Set(f.DefValue); err != nil {
+			t.Errorf("runRealRoot cannot reset --%s (%s): %v", f.Name, f.Value.Type(), err)
+		}
+		f.Changed = false
+	})
 }
 
 func TestBotModeRefusesTheCommandsItMayNotRun(t *testing.T) {
@@ -498,5 +539,125 @@ func TestBotModeNeedsBothVariables(t *testing.T) {
 		if on, _, _, _, err := botMode(); err != nil || on {
 			t.Errorf("api=%q key=%q: on %v err %v", c.api, c.key, on, err)
 		}
+	}
+}
+
+// ---------- the config file is not bot mode's ----------
+
+// On a fresh HOME a bot writes no config file and reads none: the answer on stdout is JSON only.
+func TestBotModeFreshHomeWritesNoConfig(t *testing.T) {
+	p := newBotAPI(t)
+	p.on("GET", "/whoami", 200, botWhoamiBody)
+	botEnvWithConfig(t, p, "") // $HOME with no .tnctl.yaml
+	before := viper.ConfigFileUsed()
+
+	out, _, err := runRealRoot(t, "whoami", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid([]byte(out)) {
+		t.Errorf("stdout is not JSON on its own: %q", out)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".tnctl.yaml")); !os.IsNotExist(err) {
+		t.Errorf("bot mode created %s", filepath.Join(home, ".tnctl.yaml"))
+	}
+	if got := viper.ConfigFileUsed(); got != before {
+		t.Errorf("viper's config file changed from %q to %q", before, got)
+	}
+}
+
+// A bot's $HOME may hold a config tnctl cannot read: bot mode never opens it.
+func TestBotModeWithAnInvalidConfigStillAnswersJSON(t *testing.T) {
+	p := newBotAPI(t)
+	p.on("GET", "/whoami", 200, botWhoamiBody)
+	botEnvWithConfig(t, p, ": : :\n")
+	out, _, err := runRealRoot(t, "whoami", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid([]byte(out)) {
+		t.Errorf("stdout is not JSON on its own: %q", out)
+	}
+}
+
+// As a person on a fresh HOME, initConfig creates the default config file and says so: the notice
+// goes to stderr, so stdout stays the command's data, also with -o json.
+func TestWhoamiJSONOnAFreshHomeIsCleanStdout(t *testing.T) {
+	noBotMode(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// viper keeps the config and the overrides of earlier tests in memory: only a reset gives a
+	// fresh HOME a fresh viper. With cfgFile empty, initConfig takes the default $HOME/.tnctl.yaml.
+	oldCfg := cfgFile
+	cfgFile = ""
+	viper.Reset()
+	bindViper()
+	t.Cleanup(func() {
+		cfgFile = oldCfg
+		viper.Reset()
+		bindViper()
+	})
+
+	oldErr := os.Stderr
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = pw
+	out, _, runErr := runRealRoot(t, "whoami", "-o", "json")
+	_ = pw.Close()
+	os.Stderr = oldErr
+	notice, _ := io.ReadAll(pr)
+
+	if runErr == nil || exitCodeOf(runErr) != codeAuth {
+		t.Fatalf("no login must exit %d: %v", codeAuth, runErr)
+	}
+	if out != "" && !json.Valid([]byte(out)) {
+		t.Errorf("stdout is not JSON on its own: %q", out)
+	}
+	if !strings.Contains(string(notice), "Creating default configuration file at") {
+		t.Errorf("the creation notice is not on stderr: %q", notice)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".tnctl.yaml")); err != nil {
+		t.Errorf("the default config was not created: %v", err)
+	}
+}
+
+// config wait takes --for, and its refusal in bot mode says so.
+func TestBotConfigWaitRefusalNamesItsOwnFlag(t *testing.T) {
+	p := newBotAPI(t)
+	e := botEnv(t, p)
+	capturePterm(t)
+	for _, args := range [][]string{
+		{"config", "wait", "scout"},
+		{"config", "wait", "scout", "--for", "applied"},
+		{"config", "wait", "scout", "--for", "ready"},
+	} {
+		_, _, err := runCLI(t, e, args...)
+		if err == nil || exitCodeOf(err) != codeAuth || !strings.Contains(err.Error(), "use --for=published") {
+			t.Errorf("%v: exit %d, %v", args, exitCodeOf(err), err)
+		}
+	}
+	if n := p.count(); n != 0 {
+		t.Errorf("%d requests were sent", n)
+	}
+
+	// --for=published needs no device shell: it goes through the bot API.
+	p.on("GET", "/fleet/teknoir-demo/config/scout", 200, jsonOf(t, standardView()))
+	out, errs, err := runCLI(t, e, "config", "wait", "scout", "--for", "published")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if !strings.Contains(out, "published") {
+		t.Errorf("stdout %q", out)
+	}
+	// The target is read before the wait and polled for the state: at least one request reached the
+	// bot API, and none was refused.
+	if n := len(p.seen("GET", "/fleet/teknoir-demo/config/scout")); n < 1 {
+		t.Errorf("no request reached the bot API: %+v", p.reqs)
 	}
 }

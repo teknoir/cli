@@ -90,7 +90,9 @@ func init() { defaultEnv.newExec = newDeviceExec }
 // and the routes that hand one out are refused to it.
 func newDeviceExec(ctx context.Context, domain, ns, device string) (deviceExec, error) {
 	if on, _, _, _ := botEnabled(); on {
-		return nil, botNoDeviceShell("")
+		// --wait is the only caller's flag: every command that opens a device shell is refused to a
+		// bot before it gets here.
+		return nil, botNoDeviceShell("--wait", "")
 	}
 	return newWGExec(ctx, domain, ns, device)
 }

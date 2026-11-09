@@ -78,12 +78,13 @@ func checkBotNamespace(want string) error {
 }
 
 // botNoDeviceShell is the refusal of a device shell in bot mode: --wait=applied and --wait=ready need
-// one, --wait=published does not. level is the wait mode the caller knows, "" when it has none.
-func botNoDeviceShell(level waitLevel) error {
+// one, --wait=published does not. flag is the flag the level came from (--wait, or --for of config
+// wait) and is named in the message; level is the wait mode the caller knows, "" when it has none.
+func botNoDeviceShell(flag string, level waitLevel) error {
 	if level == "" {
-		return newErr(codeAuth, "a TeknoirBot cannot run commands on devices: --wait=applied and --wait=ready need a device shell; use --wait=published")
+		return newErr(codeAuth, "a TeknoirBot cannot run commands on devices: %s=applied and %s=ready need a device shell; use %s=published", flag, flag, flag)
 	}
-	return newErr(codeAuth, "a TeknoirBot cannot run commands on devices: --wait=%s needs a device shell; use --wait=published", level)
+	return newErr(codeAuth, "a TeknoirBot cannot run commands on devices: %s=%s needs a device shell; use %s=published", flag, level, flag)
 }
 
 // botRefused are the commands a TeknoirBot may not run, matched on the command path ("wg status") and

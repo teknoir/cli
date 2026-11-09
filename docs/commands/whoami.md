@@ -28,20 +28,35 @@ domain's stored namespace). The command does not ask the platform, so a login th
 
 ```bash
 $ tnctl whoami
-bot teknoir-demo/scout for a@b.c, access read, unit Karlstad
+bot teknoir-demo/scout for a@b.c, access read, unit Karlstad (se-karlstad)
 ```
 
 It asks the bot API (`GET $TEKNOIRBOT_API/whoami`): the bot's teamspace and name, the person it works for, what
-that person may do in the teamspace (`none`, `read` or `creator`) and the organisation unit the bot is placed
-in (`—` when it is not placed). `-o json` prints the platform's answer unchanged. See [Bot mode](../bot-mode.md).
+the bot may do in the teamspace (`none`, `read` or `creator`, which acts with the creator's permissions) and
+the organisation unit the bot is placed in (`—` when it is not placed), with the unit's id in brackets when it
+differs from the name: that id is what `tnctl robot add --unit` takes.
+
+A bot set to `creator` whose creator may only view in the teamspace acts at `read`, and the line says so:
+`access read (set to creator, but a@b.c may only view)`. A teamspace admin can give the creator write access.
+
+`-o json` prints the platform's answer unchanged:
+
+```json
+{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":"Karlstad","unitId":"se-karlstad","access":"read","configuredAccess":"creator"},"creator":{"email":"a@b.c"},"domain":"teknoir.cloud"}
+```
+
+`access` is the level the bot acts at, `configuredAccess` the level its creator set. `unit` and `unitId` are
+`null` for a bot that is not placed. See [Bot mode](../bot-mode.md).
 
 ## Exit codes
 
 | Exit | Meaning |
 | --- | --- |
 | 0 | ok |
+| 1 | the bot API failed (for example a 503 while the platform cannot look the bot up; with `-o json` the error carries `retryAfter` when the platform sent one) |
 | 2 | usage |
-| 6 | not logged in (a person's `tnctl` without a stored login) |
+| 6 | not logged in (a person's `tnctl` without a stored login); in a bot, the key was not accepted or the bot may not be used |
+| 9 | too many requests: wait the `Retry-After` time and run it again |
 
 ## See also
 

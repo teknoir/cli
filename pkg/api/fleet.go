@@ -41,8 +41,9 @@ func NewFleet(domain, namespace string) *Fleet {
 	}
 }
 
-// ErrBotKey is what the bot's fleet returns when its key file is missing or empty (exit code 6: the
-// bot must be re-created). The error message adds the file's path; its content is never shown.
+// ErrBotKey is what the bot's fleet returns when its key file is missing or empty (exit code 6: this
+// computer predates the agent, and only a person can re-create the bot, whose new computer brings a new
+// key). The error message adds the file's path; its content is never shown.
 var ErrBotKey = errors.New("the bot key is missing or empty")
 
 // ErrBotAPIInsecure is what NewBotFleet refuses a $TEKNOIRBOT_API with: the bot's key must not travel
@@ -50,9 +51,10 @@ var ErrBotKey = errors.New("the bot key is missing or empty")
 var ErrBotAPIInsecure = errors.New("TEKNOIRBOT_API must be https")
 
 // NewBotFleet returns the fleet client of a TeknoirBot: the bot API's fleet routes for the bot's own
-// teamspace, authenticated with the bot's key, which is read from keyFile on every request (the
-// platform replaces the file when the bot is re-created). A bot API that is not https (and not on a
-// loopback address) answers ErrBotAPIInsecure before any request leaves.
+// teamspace, authenticated with the bot's key, which is read from keyFile on every request. A bot gets
+// its key when its computer is made: re-creating the bot gives it a new computer and a new key. A bot
+// API that is not https (and not on a loopback address) answers ErrBotAPIInsecure before any request
+// leaves.
 func NewBotFleet(apiBase, namespace, keyFile string) *Fleet {
 	root := strings.TrimSuffix(apiBase, "/") + "/fleet"
 	f := &Fleet{

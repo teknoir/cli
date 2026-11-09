@@ -29,12 +29,13 @@ teamspace than `TEKNOIRBOT_NAMESPACE` is refused: _a TeknoirBot works only in it
 
 ## Where the key comes from
 
-The key is **a file the platform puts into the bot's computer**. The platform replaces it when the bot is
-re-created, so `tnctl` reads it again on every request; changing the file needs no restart. `tnctl` never
-prints, logs or reports the key. When the file is missing or empty, every fleet call refuses with:
+The key is **a file in the bot's computer**, at the path `$TNCTL_BOT_KEY_FILE` (on a bot's computer,
+`/run/teknoirbot/key`). A bot gets its key when its computer is made; re-creating the bot gives it a new
+computer and a new key. `tnctl` reads the file on every request. It never prints, logs or reports the key.
+When the file is missing or empty, every fleet call refuses with:
 
 ```text
-the bot key is missing or empty (/var/lib/teknoirbot/bot-key): this computer predates the agent; re-create the bot
+the bot key is missing or empty (/run/teknoirbot/key): this computer predates the agent; re-create the bot
 ```
 
 ## What a bot may do
@@ -75,14 +76,18 @@ Device logins are refused outright: `Credentials` and `CredentialsBulk` answer w
 
 ```bash
 $ tnctl whoami
-bot teknoir-demo/scout for a@b.c, access read, unit Karlstad
+bot teknoir-demo/scout for a@b.c, access read, unit Karlstad (se-karlstad)
 ```
 
-The unit is `—` when the bot is not placed in an organisation unit. `-o json` prints the platform's answer:
+The unit is `—` when the bot is not placed in an organisation unit; the id in brackets is what
+`tnctl robot add --unit` takes. A bot set to `creator` whose creator may only view acts at `read`, and the line
+ends the access with `(set to creator, but a@b.c may only view)`. `-o json` prints the platform's answer:
 
 ```json
-{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":"Karlstad","access":"read"},"creator":{"email":"a@b.c"},"domain":"teknoir.cloud"}
+{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":"Karlstad","unitId":"se-karlstad","access":"read","configuredAccess":"read"},"creator":{"email":"a@b.c"},"domain":"teknoir.cloud"}
 ```
+
+`access` is the level the bot acts at, `configuredAccess` the level its creator set.
 
 Outside bot mode the same command prints the person: `user a@b.c on teknoir.cloud, teamspace teknoir-demo`.
 

@@ -78,10 +78,6 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	// Set defaults
-	defaultCfg := config.DefaultConfig()
-	viper.SetDefault("domain", defaultCfg.Domain)
-
 	// Persistent flags that are available to every subcommand
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.tnctl.yaml)")
 	rootCmd.PersistentFlags().StringVarP(&domain, "domain", "d", "", "Teknoir domain (e.g., teknoir.cloud)")
@@ -90,6 +86,14 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&config.Debug, "debug", false, "Enable debug output")
 	rootCmd.PersistentFlags().StringVarP(&outputFlag, "output", "o", "", "Output format of robots, robot, config and robot/device disable, enable, remove: table, json or yaml (default table). Data goes to stdout, progress to stderr")
 	rootCmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageErr("%v", err) })
+
+	bindViper()
+}
+
+// bindViper gives viper its defaults and binds the persistent flags and environment variables to
+// it. init calls it once; a test that resets viper (viper.Reset) calls it again.
+func bindViper() {
+	viper.SetDefault("domain", config.DefaultConfig().Domain)
 
 	// Bind flags to viper
 	viper.BindPFlag("domain", rootCmd.PersistentFlags().Lookup("domain"))
@@ -103,6 +107,11 @@ func init() {
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
+	// A bot reads no config file and writes none: its fleet needs neither, and the creating notice
+	// below must not reach the stdout an agent parses as JSON.
+	if on, _, _, _ := botEnabled(); on {
+		return
+	}
 	if cfgFile != "" {
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
@@ -111,10 +120,11 @@ func initConfig() {
 		home, err := os.UserHomeDir()
 		cobra.CheckErr(err)
 
-		// Search config in home directory with name ".tnctl" (without extension).
-		viper.AddConfigPath(home)
+		// The default config is $HOME/.tnctl.yaml. It is named, not searched for: a search path
+		// outlives the run that added it, and a process that reads two HOMEs (the test binary) would
+		// otherwise keep reading the first one it found.
 		viper.SetConfigType("yaml")
-		viper.SetConfigName(".tnctl")
+		viper.SetConfigFile(filepath.Join(home, ".tnctl.yaml"))
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -139,7 +149,8 @@ func createDefaultConfig() {
 
 	// Only create if it doesn't exist
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		fmt.Printf("Creating default configuration file at %s\n", path)
+		// The notice goes to stderr: stdout is the command's data, also with -o json.
+		fmt.Fprintf(os.Stderr, "Creating default configuration file at %s\n", path)
 
 		// Create directory if it doesn't exist (though it's usually $HOME)
 		dir := filepath.Dir(path)

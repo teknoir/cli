@@ -1,10 +1,13 @@
 package config
 
 import (
-	"github.com/spf13/viper"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/spf13/viper"
 )
 
 // AuthConfig defines the authentication credentials for a domain.
@@ -103,7 +106,9 @@ func writeConfigAtomic() error {
 
 // LoadFresh reads the configuration file from disk again, ignoring viper's
 // in-memory state, for long-running processes that must see token refreshes
-// made by other tnctl processes. Without a config file it behaves like Load.
+// made by other tnctl processes. Without a config file it behaves like Load, also when viper names
+// a file that is not there (a HOME where the default config could not be created): that is "not
+// logged in", not an error of its own.
 func LoadFresh() (*Config, error) {
 	path := viper.ConfigFileUsed()
 	if path == "" {
@@ -112,6 +117,9 @@ func LoadFresh() (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Load()
+		}
 		return nil, err
 	}
 	var cfg Config

@@ -12,11 +12,14 @@ A topic is
 
 - `/devices/<device|+>/state/#` — the whole state subtree of one device, or with `+` of every device;
 - `/devices/<device|+>/events/#` — the same for events;
-- or a concrete topic below `/devices/<device>/state/` or `/devices/<device>/events/`.
+- or a concrete topic below `/devices/<device|+>/state/` or `/devices/<device|+>/events/`: one or more
+  further segments, none empty and none containing `+`, `#`, NUL or whitespace.
 
-Anything else is refused on the client (exit 2, nothing is sent): `#`, `/devices/#`, a shared subscription such
-as `$share/a//devices/+/state/#`, `/devices/d1/config`, `/devices/+/commands/#`, a `+` inside the concrete part.
-**1 to 8 topics** are followed at once.
+`<device>` is `+` or a DNS label (`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, at most 63 characters), and the whole
+topic is at most 256 characters. Anything else is refused on the client (exit 2, nothing is sent): `#`,
+`/devices/#`, a shared subscription such as `$share/a//devices/+/state/#`, `/devices/d1/config`,
+`/devices/+/commands/#`, `/devices/D1/state/#`, a `+` inside the concrete part. **1 to 8 topics** are followed
+at once.
 
 ```bash
 tnctl mqtt stream /devices/+/state/#

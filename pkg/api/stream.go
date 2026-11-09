@@ -9,9 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Go mirror of the MQTT stream of the fleet API: GET <Base>/mqtt/stream?topic=... answers a
@@ -43,19 +46,22 @@ func ValidateStreamTopics(topics []string) error {
 }
 
 // ValidateStreamTopic accepts what the platform accepts: /devices/<device|+>/state/#,
-// /devices/<device|+>/events/#, or a concrete topic below /devices/<device>/state/ or
-// /devices/<device>/events/. Anything else (other topics, a shared subscription, wildcards in the
-// middle of a topic) is refused.
+// /devices/<device|+>/events/#, or a concrete topic below /devices/<device|+>/state/ or
+// /devices/<device|+>/events/. Anything else (other topics, a shared subscription, wildcards in the
+// middle of a topic, a topic over 256 characters) is refused.
 func ValidateStreamTopic(topic string) error {
 	bad := fmt.Errorf("%q is not a topic a stream can follow: use /devices/<device|+>/state/#, "+
-		"/devices/<device|+>/events/#, or a concrete topic below /devices/<device>/state/ or /devices/<device>/events/", topic)
+		"/devices/<device|+>/events/#, or a concrete topic below /devices/<device|+>/state/ or /devices/<device|+>/events/", topic)
+	if utf8.RuneCountInString(topic) > maxStreamTopicLen {
+		return bad
+	}
 	// A topic always starts with "/": the first segment is empty.
 	parts := strings.Split(topic, "/")
 	if len(parts) < 5 || parts[0] != "" || parts[1] != "devices" {
 		return bad
 	}
 	device := parts[2]
-	if device == "" || device == "#" {
+	if device != "+" && (len(device) > 63 || !streamDeviceLabel.MatchString(device)) {
 		return bad
 	}
 	if parts[3] != "state" && parts[3] != "events" {
@@ -64,16 +70,20 @@ func ValidateStreamTopic(topic string) error {
 	if len(parts) == 5 && parts[4] == "#" {
 		return nil // the whole subtree of a device, or of every device with +
 	}
-	if device == "+" {
-		return bad // + is only the whole device level of the two # forms
-	}
 	for _, seg := range parts[4:] {
-		if seg == "" || strings.ContainsAny(seg, "+#") {
+		// A concrete segment: + and # are only the whole device level and the last one.
+		if seg == "" || strings.ContainsAny(seg, "+#\x00") || strings.ContainsFunc(seg, unicode.IsSpace) {
 			return bad
 		}
 	}
 	return nil
 }
+
+// streamDeviceLabel is a device name in a topic: the platform's DNS label rule.
+var streamDeviceLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// maxStreamTopicLen caps one topic, as the platform does.
+const maxStreamTopicLen = 256
 
 // StreamEvent is one server-sent event of the MQTT stream. Data is the event's data lines, joined
 // with newlines.
