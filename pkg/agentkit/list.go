@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 )
 
@@ -153,7 +154,7 @@ func (p *op) rootStatus(r root) (*RootStatus, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		if !exists {
+		if !exists && blockedPrefix(rr, rel) == "" {
 			st.Missing = append(st.Missing, rel)
 			continue
 		}
@@ -178,9 +179,10 @@ func (p *op) rootStatus(r root) (*RootStatus, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		if !exists {
+		if !exists && blockedPrefix(rr, rel) == "" {
 			st.Missing = append(st.Missing, rel)
 		} else {
+			// There, or blocked by a file or a link where a directory belongs: install refuses it.
 			st.Changed = append(st.Changed, rel)
 		}
 	}
@@ -230,6 +232,16 @@ func (p *op) mcpStatus(a Agent) MCPStatus {
 			st.Note = why
 			return st
 		}
+	}
+	// A symlinked config file of a cloned project is not followed: it could lead outside the project, or
+	// to a device that never ends.
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 && p.o.Scope == ScopeProject {
+		st.Note = path + " is a symlink: tnctl does not read it"
+		return st
+	}
+	if fi, err := os.Stat(path); err == nil && !fi.Mode().IsRegular() {
+		st.Note = "not a regular file"
+		return st
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

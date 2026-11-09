@@ -630,7 +630,7 @@ func (p *op) foreignTarget(path string) (target, why string) {
 		return path, ""
 	}
 	if err != nil {
-		return "", fmt.Sprintf("%s: %v", path, err)
+		return "", fmt.Sprintf("%s: %v: edit it by hand:", path, err)
 	}
 	if fi.Mode()&fs.ModeSymlink == 0 {
 		return path, ""
@@ -640,7 +640,7 @@ func (p *op) foreignTarget(path string) (target, why string) {
 		return "", fmt.Sprintf("%s is a dangling symlink: edit it by hand:", path)
 	}
 	if err != nil {
-		return "", fmt.Sprintf("%s: %v", path, err)
+		return "", fmt.Sprintf("%s: %v: edit it by hand:", path, err)
 	}
 	if p.o.Scope == ScopeProject && filepath.Clean(path) == filepath.Clean(p.agentsMDPath()) {
 		proj, err := filepath.EvalSymlinks(p.o.ProjectDir)

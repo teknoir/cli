@@ -360,17 +360,17 @@ func jsonEqual(a, b []byte) bool {
 // tomlEntryBlock is the codex config entry of the MCP server.
 const tomlEntryBlock = "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"
 
-// tomlSnippet is what the user adds or removes by hand.
-func tomlSnippet(remove bool) string {
-	if remove {
-		return "remove " + strings.TrimRight(tomlEntryBlock, "\n")
-	}
-	return "add " + tomlEntryBlock
+// codexReplace is the verb of a refusal that asks the user to replace an entry that is there already.
+const codexReplace = "replace mcp_servers.teknoir with"
+
+// tomlSnippet is what the user does by hand: the verb ("add", "remove" or codexReplace) and the entry.
+func tomlSnippet(verb string) string {
+	return verb + " " + strings.TrimRight(tomlEntryBlock, "\n")
 }
 
-// refuseCodex refuses an edit of the Codex config, naming the snippet to add or remove by hand.
-func (p *op) refuseCodex(path, why string, remove bool) {
-	snippet := tomlSnippet(remove)
+// refuseCodex refuses an edit of the Codex config, naming the snippet to add, remove or replace by hand.
+func (p *op) refuseCodex(path, why, verb string) {
+	snippet := tomlSnippet(verb)
 	p.refuse(path, string(AgentCodex), why+" "+snippet, why+" "+snippet)
 }
 
@@ -379,7 +379,7 @@ func (p *op) registerCodexMCP() error {
 	agent := string(AgentCodex)
 	target, why := p.foreignTarget(path)
 	if why != "" {
-		p.refuseCodex(path, why, false)
+		p.refuseCodex(path, why, "add")
 		return nil
 	}
 	data, err := os.ReadFile(target)
@@ -394,6 +394,7 @@ func (p *op) registerCodexMCP() error {
 	note := "mcp_servers." + mcpServerName
 	existing, isTable := tomlServer(parsed)
 	_, present := tomlServerValue(parsed)
+	verb := "add"
 	switch {
 	case !present:
 		text = appendTOML(text, tomlEntryBlock)
@@ -405,18 +406,19 @@ func (p *op) registerCodexMCP() error {
 		p.r.warn("%s already has a different [mcp_servers.%s]; kept it (use --force to replace it)", path, mcpServerName)
 		return nil
 	case !isTable:
-		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: replace it by hand:",
-			path, mcpServerName, mcpServerName), false)
+		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: edit it by hand:",
+			path, mcpServerName, mcpServerName), codexReplace)
 		return nil
 	default:
 		start, end, ok := tomlTableRange(text, "mcp_servers."+mcpServerName)
 		if !ok {
-			p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: replace it by hand:",
-				path, mcpServerName, mcpServerName), false)
+			p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: edit it by hand:",
+				path, mcpServerName, mcpServerName), codexReplace)
 			return nil
 		}
 		text = text[:start] + tomlEntryBlock + tomlJoin(text[end:])
 		note += ": replaced a differing one (--force)"
+		verb = codexReplace
 	}
 	// The new text is checked before anything is written, a dry run included: tnctl never promises a
 	// register that would break the file.
@@ -424,7 +426,7 @@ func (p *op) registerCodexMCP() error {
 	if err != nil {
 		return err
 	}
-	if !p.codexEditOK(path, string(data), text, entry, false) {
+	if !p.codexEditOK(path, string(data), text, entry, verb) {
 		return nil
 	}
 	p.r.act(ActionRegister, path, agent, note)
@@ -439,7 +441,7 @@ func (p *op) removeCodexMCP() error {
 	agent := string(AgentCodex)
 	target, why := p.foreignTarget(path)
 	if why != "" {
-		p.refuseCodex(path, why, true)
+		p.refuseCodex(path, why, "remove")
 		return nil
 	}
 	data, err := os.ReadFile(target)
@@ -468,8 +470,8 @@ func (p *op) removeCodexMCP() error {
 	}
 	start, end, ok := tomlTableRange(text, "mcp_servers."+mcpServerName)
 	if !ok {
-		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a table header: remove it by hand:",
-			path, mcpServerName), true)
+		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a table header: edit it by hand:",
+			path, mcpServerName), "remove")
 		return nil
 	}
 	// Only the seam is trimmed: the blank line the entry was separated by. Nothing else in the file is
@@ -488,7 +490,7 @@ func (p *op) removeCodexMCP() error {
 		after = strings.TrimLeft(after, "\n")
 	}
 	next := before + after
-	if !p.codexEditOK(path, string(data), next, nil, true) {
+	if !p.codexEditOK(path, string(data), next, nil, "remove") {
 		return nil
 	}
 	p.r.act(ActionDelete, path, agent, "mcp_servers."+mcpServerName)
@@ -501,14 +503,14 @@ func (p *op) removeCodexMCP() error {
 // codexEditOK checks, before any write, that next is orig with exactly the mcp_servers.teknoir entry
 // removed (put nil) or replaced by put. A text that does not parse, or an edit that would touch anything
 // else, is refused and false comes back; the file is left as it is.
-func (p *op) codexEditOK(path, orig, next string, put map[string]any, remove bool) bool {
+func (p *op) codexEditOK(path, orig, next string, put map[string]any, verb string) bool {
 	if _, err := tomlParse(next); err != nil {
-		p.refuseCodex(path, fmt.Sprintf("%s: the edit would not parse (%v); unchanged: add it by hand:", path, err), remove)
+		p.refuseCodex(path, fmt.Sprintf("%s: the edit would not parse (%v); unchanged: edit it by hand:", path, err), verb)
 		return false
 	}
 	if err := tomlSameExcept(orig, next, put); err != nil {
 		p.refuseCodex(path, fmt.Sprintf("%s: tnctl cannot edit [mcp_servers.%s] safely here; edit it by hand:",
-			path, mcpServerName), remove)
+			path, mcpServerName), verb)
 		return false
 	}
 	return true
@@ -687,7 +689,9 @@ func tomlSplitKey(s string) []string {
 // tomlTableRange returns the byte range of the [name] table: its header line through the last line of
 // its own, so the blank and comment lines that separate it from the next table stay with that table. Any
 // header, [x] or [[x]], ends the table; when none follows, the range runs to the end of the text when
-// only blank lines are left, and stops before the comment lines at the end of the file, which stay.
+// only blank lines are left, and stops before the comment lines at the end of the file, which stay. Those
+// comment lines start only where the text above them parses: a line that starts with # inside a
+// multi-line string of the table is the table's, so the whole tail is then taken.
 func tomlTableRange(text, name string) (int, int, bool) {
 	lines := strings.SplitAfter(text, "\n")
 	offs := make([]int, len(lines))
@@ -724,10 +728,17 @@ func tomlTableRange(text, name string) (int, int, bool) {
 	for end > startLine+1 && separatorLine(lines[end-1]) {
 		end--
 	}
-	if end == len(lines) || strings.TrimSpace(text[offs[end]:]) == "" {
-		return offs[startLine], len(text), true
+	// The run only starts where the text above it is complete TOML: lines that start with # inside a
+	// multi-line string of the table are the table's, not comments of the user's.
+	for ; end < len(lines); end++ {
+		if strings.TrimSpace(text[offs[end]:]) == "" {
+			break
+		}
+		if _, err := tomlParse(text[:offs[end]]); err == nil {
+			return offs[startLine], offs[end], true
+		}
 	}
-	return offs[startLine], offs[end], true
+	return offs[startLine], len(text), true
 }
 
 // separatorLine reports whether a line is blank or holds only a comment: it belongs to the table below

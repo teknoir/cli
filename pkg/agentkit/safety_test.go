@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -384,6 +385,34 @@ func TestProjectRootSymlinkDryRun(t *testing.T) {
 	}
 }
 
+// agent list reads no symlinked MCP config file of a project: a link out of the project is not
+// "registered" and a link to a device is never opened.
+func TestListProjectFileSymlinkNotRead(t *testing.T) {
+	o, _, project := testOpts(t)
+	o.Scope, o.Agents = ScopeProject, []Agent{AgentClaude, AgentCodex}
+	mcpJSON := filepath.Join(t.TempDir(), "mcp.json")
+	writeAt(t, mcpJSON, `{"mcpServers":{"teknoir":{"type":"stdio","command":"tnctl","args":["mcp"]}}}`, 0o644)
+	mustSymlink(t, mcpJSON, filepath.Join(project, ".mcp.json"))
+	cfg := filepath.Join(t.TempDir(), "config.toml")
+	writeAt(t, cfg, codexOurs, 0o644)
+	if err := os.MkdirAll(filepath.Join(project, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, cfg, filepath.Join(project, ".codex", "config.toml"))
+	res, err := List(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.MCP) != 2 {
+		t.Fatalf("mcp statuses %+v", res.MCP)
+	}
+	for _, m := range res.MCP {
+		if m.Registered || !strings.Contains(m.Note, "is a symlink") {
+			t.Errorf("a symlinked config file was read: %+v", m)
+		}
+	}
+}
+
 // agent list reports a symlinked project root as its problem, and reads nothing below it — the MCP
 // config file of the agent that lives below it included.
 func TestListProjectRootSymlink(t *testing.T) {
@@ -597,7 +626,16 @@ func TestRootErrorsRefusedNotFatal(t *testing.T) {
 						}
 					}
 					if found == nil || found.InSync() {
-						t.Errorf("the root is not reported as differing: %+v", res.Roots)
+						t.Fatalf("the root is not reported as differing: %+v", res.Roots)
+					}
+					// The bad path itself is reported: Extra (old.md) and the outdated version alone must not
+					// satisfy this.
+					if strings.HasPrefix(tc.name, "a manifest") {
+						if found.Problem == "" {
+							t.Errorf("no Problem for a manifest the kit cannot use: %+v", *found)
+						}
+					} else if !slices.Contains(found.Changed, skillRel) {
+						t.Errorf("the kit file below the blocked directory is not Changed: %+v", *found)
 					}
 				case "install":
 					res, err := Install(o)
@@ -723,7 +761,7 @@ func TestCodexInvariantRefused(t *testing.T) {
 			body: "[mcp_servers.teknoir]\ncommand = \"/other/tnctl\"\nargs = [\"mcp\"]\n\n[mcp_servers.teknoir.env]\nX = \"1\"\n",
 			run:  Install,
 			o:    func(o *Options) { o.Force = true },
-			want: tomlEntryBlock,
+			want: "replace mcp_servers.teknoir with [mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]",
 		},
 	} {
 		for _, dry := range []bool{false, true} {
@@ -888,8 +926,8 @@ func TestCodexDottedKeysRefused(t *testing.T) {
 		why  string
 		o    func(o *Options)
 	}{
-		{"uninstall", "[mcp_servers]\nteknoir.command = \"tnctl\"\nteknoir.args = [\"mcp\"]\n", Uninstall, "remove it by hand", nil},
-		{"force", "[mcp_servers]\nteknoir.command = \"/other/tnctl\"\nteknoir.args = [\"mcp\"]\n", Install, "replace it by hand",
+		{"uninstall", "[mcp_servers]\nteknoir.command = \"tnctl\"\nteknoir.args = [\"mcp\"]\n", Uninstall, "edit it by hand: remove [mcp_servers.teknoir]", nil},
+		{"force", "[mcp_servers]\nteknoir.command = \"/other/tnctl\"\nteknoir.args = [\"mcp\"]\n", Install, "edit it by hand: replace mcp_servers.teknoir with [mcp_servers.teknoir]",
 			func(o *Options) { o.Force = true }},
 	} {
 		for _, dry := range []bool{false, true} {
@@ -1140,8 +1178,7 @@ func TestSymlinkedClaudeMCPSnippet(t *testing.T) {
 	}
 }
 
-// An AGENTS.md whose section is damaged says what to do, and the reason of a symlinked settings.json on
-// an uninstall says "remove", never "add".
+// The reason of a symlinked settings.json on an uninstall says "remove", never "add".
 func TestUninstallRefusalSaysRemove(t *testing.T) {
 	o, _, project := testOpts(t)
 	o.Scope, o.Agents, o.Hooks = ScopeProject, []Agent{AgentClaude}, true
@@ -1161,7 +1198,8 @@ func TestSymlinkedConfigDangling(t *testing.T) {
 	link := filepath.Join(home, ".codex", "config.toml")
 	mustSymlink(t, filepath.Join(home, ".codex", "missing.toml"), link)
 	re := refusalOf(t, "a dangling symlink", func() (*Result, error) { return Install(o) })
-	if !strings.Contains(re.Reason, "is a dangling symlink") || !strings.Contains(re.Reason, tomlEntryBlock) {
+	if !strings.Contains(re.Reason, "is a dangling symlink") || !strings.Contains(re.Reason, "edit it by hand: add [mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]") ||
+		strings.HasSuffix(re.Reason, "\n") {
 		t.Errorf("the reason: %q", re.Reason)
 	}
 	if _, err := os.Lstat(filepath.Join(home, ".codex", "missing.toml")); !os.IsNotExist(err) {
@@ -1177,8 +1215,10 @@ func TestSymlinkedConfigDryRunWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeAt(t, filepath.Join(dir, "config.toml"), "model = \"gpt-5\"\n", 0o644)
 	mustSymlink(t, filepath.Join(dir, "config.toml"), filepath.Join(home, ".codex", "config.toml"))
-	st, err := os.Stat(dir)
-	if err != nil {
+	// A fixed time in the past: a probe that made and removed a file would move the mtime to now, which
+	// the coarse clock of the writes just above could not show.
+	old := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(dir, old, old); err != nil {
 		t.Fatal(err)
 	}
 	o.DryRun = true
@@ -1189,8 +1229,8 @@ func TestSymlinkedConfigDryRunWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !after.ModTime().Equal(st.ModTime()) {
-		t.Errorf("the dry run touched %s: mtime %v, want %v", dir, after.ModTime(), st.ModTime())
+	if !after.ModTime().Equal(old) {
+		t.Errorf("the dry run touched %s: mtime %v, want %v", dir, after.ModTime(), old)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1827,5 +1867,209 @@ func TestClaudeConfigLock(t *testing.T) {
 	}
 	if _, err := os.Stat(lock); !os.IsNotExist(err) {
 		t.Errorf("the dry run made a lock: %v", err)
+	}
+}
+
+// P2-P10 tests of the third round of part 1.
+
+// R2: only a Markdown file of the project is followed from AGENTS.md: not one below a .git directory,
+// whatever its case, and the extension is compared without case.
+func TestAgentsMDSymlinkGitAndCase(t *testing.T) {
+	for _, tc := range []struct {
+		rel    string
+		follow bool
+	}{
+		{".git/info/notes.md", false},
+		{".GIT/notes.md", false},
+		{"docs/x.MD", true},
+	} {
+		t.Run(tc.rel, func(t *testing.T) {
+			o, _, project := testOpts(t)
+			o.Scope, o.Agents, o.AgentsMD = ScopeProject, []Agent{AgentClaude}, true
+			target := filepath.Join(project, filepath.FromSlash(tc.rel))
+			writeAt(t, target, "# notes\n", 0o644)
+			link := filepath.Join(project, "AGENTS.md")
+			mustSymlink(t, filepath.FromSlash(tc.rel), link)
+			res, err := Install(o)
+			if tc.follow {
+				if err != nil {
+					t.Fatalf("a link to %s was refused: %v", tc.rel, err)
+				}
+				if got := readFile(t, target); !strings.HasPrefix(got, "# notes\n") || got == "# notes\n" {
+					t.Errorf("the section did not go into %s: %q", tc.rel, got)
+				}
+				if fi, err := os.Lstat(link); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+					t.Errorf("the link was replaced: %v %v", fi, err)
+				}
+				return
+			}
+			re, ok := Refused(err)
+			if !ok || !strings.Contains(re.Reason, "is not a Markdown file of the project") {
+				t.Fatalf("err %v, want the not-Markdown refusal", err)
+			}
+			if !hasAction(res, ActionRefuse, link) {
+				t.Errorf("actions %v", actionsOf(res))
+			}
+			if got := readFile(t, target); got != "# notes\n" {
+				t.Errorf("the link's target was written: %q", got)
+			}
+		})
+	}
+}
+
+// R6: an uninstall whose edit would not parse says "remove", never "add it by hand".
+func TestCodexUnparsableEditSaysRemove(t *testing.T) {
+	// The first [mcp_servers.teknoir] line is inside a multi-line string, so cutting the "table" there
+	// leaves an unterminated string.
+	body := "[notes]\ntext = \"\"\"\n[mcp_servers.teknoir]\nfoo\"\"\"\n[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"
+	o, path := codexConfig(t, body)
+	before := snapshotTree(t, filepath.Dir(path))
+	_, err := Uninstall(o)
+	re, ok := Refused(err)
+	if !ok {
+		t.Fatalf("err %v, want a refusal", err)
+	}
+	if !strings.Contains(re.Reason, "the edit would not parse") ||
+		!strings.Contains(re.Reason, "edit it by hand: remove [mcp_servers.teknoir]") ||
+		strings.Contains(re.Reason, "add it by hand") {
+		t.Errorf("the reason: %q", re.Reason)
+	}
+	if after := snapshotTree(t, filepath.Dir(path)); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Errorf("the refused edit changed the file")
+	}
+	if got := readFile(t, path); got != body {
+		t.Errorf("the file changed: %q", got)
+	}
+}
+
+// R6: --force over an inline entry says what to replace, with a snippet that does not end in a newline.
+func TestCodexForceInlineEntryRefusalReplaces(t *testing.T) {
+	o, path := codexConfig(t, "[mcp_servers]\nteknoir = { command = \"/x\", args = [\"mcp\"] }\n")
+	o.Force = true
+	before := readFile(t, path)
+	_, err := Install(o)
+	re, ok := Refused(err)
+	if !ok {
+		t.Fatalf("err %v, want a refusal", err)
+	}
+	if !strings.Contains(re.Reason, "edit it by hand: replace mcp_servers.teknoir with [mcp_servers.teknoir]") ||
+		strings.HasSuffix(re.Reason, "\n") {
+		t.Errorf("the reason: %q", re.Reason)
+	}
+	if got := readFile(t, path); got != before {
+		t.Errorf("the file changed: %q", got)
+	}
+}
+
+// R6: the generic error branches of foreignTarget (a link loop) are verb-neutral too.
+func TestForeignTargetGenericErrorVerb(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.Hooks = []Agent{AgentClaude}, true
+	mustSymlink(t, "settings.json", filepath.Join(home, ".claude", "settings.json"))
+	re := refusalOf(t, "a looping settings.json", func() (*Result, error) { return Install(o) })
+	if !strings.Contains(re.Reason, `edit it by hand: add {"hooks"`) {
+		t.Errorf("the install reason: %q", re.Reason)
+	}
+	re = refusalOf(t, "a looping settings.json", func() (*Result, error) { return Uninstall(o) })
+	if !strings.Contains(re.Reason, `edit it by hand: remove {"hooks"`) {
+		t.Errorf("the uninstall reason: %q", re.Reason)
+	}
+}
+
+// R1: with no header after our table, a line that starts with # inside a multi-line string of the table
+// is the table's, not a comment of the user's: --force replaces all of it.
+func TestCodexForceMultilineTail(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{
+			"basic string",
+			"model = \"gpt-5\"\n\n[mcp_servers.teknoir]\ncommand = \"/other/tnctl\"\nargs = [\"mcp\"]\ndescription = \"\"\"\nfirst\n# second\n#\"\"\"\n",
+			codexOurs,
+		},
+		{
+			"literal string and a comment of the user's",
+			"model = \"gpt-5\"\n\n[mcp_servers.teknoir]\ncommand = \"/other/tnctl\"\nargs = [\"mcp\"]\ndescription = '''\nfirst\n\n# second'''\n\n# user\n",
+			codexOurs + "\n# user\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, path := codexConfig(t, tc.body)
+			o.Force = true
+			if _, err := Install(o); err != nil {
+				t.Fatal(err)
+			}
+			if got := readFile(t, path); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// R4: uninstall goes on to .agents/skills after refusing a damaged .claude/skills.
+func TestRootErrorUninstallGoesOn(t *testing.T) {
+	for _, damage := range []string{"manifest-link", "nul-key"} {
+		t.Run(damage, func(t *testing.T) {
+			o, _, project := testOpts(t)
+			o.Scope, o.Agents = ScopeProject, []Agent{AgentClaude, AgentCodex, AgentOpencode}
+			codexOnly := *o
+			codexOnly.Agents = []Agent{AgentCodex, AgentOpencode}
+			if _, err := Install(&codexOnly); err != nil {
+				t.Fatal(err)
+			}
+			shared := filepath.Join(project, ".agents", "skills")
+			installed := []string{filepath.Join(shared, filepath.FromSlash(skillRel)), filepath.Join(shared, manifestName)}
+			for _, p := range installed {
+				if _, err := os.Lstat(p); err != nil {
+					t.Fatalf("the precondition failed: %s: %v", p, err)
+				}
+			}
+			root := filepath.Join(project, ".claude", "skills")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			switch damage {
+			case "manifest-link":
+				outside := filepath.Join(t.TempDir(), "m.json")
+				writeAt(t, outside, `{"kitVersion":"0.1.0","files":{}}`, 0o644)
+				mustSymlink(t, outside, filepath.Join(root, manifestName))
+			case "nul-key":
+				writeAt(t, filepath.Join(root, manifestName), `{"kitVersion":"0.1.0","files":{"teknoir-platform/a\u0000b":"sha256:00"}}`, 0o644)
+			}
+			res, err := Uninstall(o)
+			if _, ok := Refused(err); !ok {
+				t.Fatalf("err %v, want a refusal", err)
+			}
+			if !refusedBelow(res, root) {
+				t.Errorf("no refusal below the root: %v", actionsOf(res))
+			}
+			for _, p := range installed {
+				if _, err := os.Lstat(p); !os.IsNotExist(err) {
+					t.Errorf("the uninstall stopped before .agents/skills: %s: %v", p, err)
+				}
+			}
+		})
+	}
+}
+
+// R1: when our table is first in the file, nothing of the seam ends up at the head of the file.
+func TestCodexOursFirstUninstall(t *testing.T) {
+	ours := codexOurs[strings.Index(codexOurs, "[mcp_servers.teknoir]"):]
+	o, path := codexConfig(t, ours+"\n[other]\nx = 1\n")
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readFile(t, path), "[other]\nx = 1\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// R6: the uninstall refusal of an AGENTS.md link says "remove".
+func TestAgentsMDUninstallRefusalSaysRemove(t *testing.T) {
+	o, _, project := testOpts(t)
+	o.Scope, o.Agents, o.AgentsMD = ScopeProject, []Agent{AgentClaude}, true
+	writeAt(t, filepath.Join(project, ".git", "config"), "[core]\n", 0o644)
+	mustSymlink(t, filepath.Join(".git", "config"), filepath.Join(project, "AGENTS.md"))
+	re := refusalOf(t, "an AGENTS.md link into .git", func() (*Result, error) { return Uninstall(o) })
+	if !strings.Contains(re.Reason, "\nremove ") || strings.Contains(re.Reason, "\nadd ") {
+		t.Errorf("the uninstall refusal of AGENTS.md does not say remove: %q", re.Reason)
 	}
 }
