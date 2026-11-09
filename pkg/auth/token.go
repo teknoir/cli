@@ -157,9 +157,10 @@ func hubAccessToken(ctx context.Context, domain string, d tokenDeps) (string, bo
 		return "", false, err
 	}
 	if token.RefreshToken != authData.RefreshToken {
-		authData.RefreshToken = token.RefreshToken
-		cfg.Auths[key] = authData
-		if err := d.save(cfg); err != nil {
+		err := saveRefreshed(d, key, authData.RefreshToken, func(a *config.AuthConfig) {
+			a.RefreshToken = token.RefreshToken
+		})
+		if err != nil {
 			return "", false, fmt.Errorf("failed to save refreshed token: %w", err)
 		}
 	}
@@ -232,13 +233,41 @@ func accessToken(ctx context.Context, domain string, d tokenDeps) (string, error
 
 	// Update config with new token if refreshed
 	if token.AccessToken != authData.AccessToken || token.RefreshToken != authData.RefreshToken {
-		authData.AccessToken = token.AccessToken
-		authData.RefreshToken = token.RefreshToken
-		authData.Expiry = token.Expiry.Format(time.RFC3339)
-		cfg.Auths[key] = authData
-		if err := d.save(cfg); err != nil {
+		err := saveRefreshed(d, key, authData.RefreshToken, func(a *config.AuthConfig) {
+			a.AccessToken = token.AccessToken
+			a.RefreshToken = token.RefreshToken
+			a.Expiry = token.Expiry.Format(time.RFC3339)
+		})
+		if err != nil {
 			return "", fmt.Errorf("failed to save refreshed token: %w", err)
 		}
 	}
 	return token.AccessToken, nil
+}
+
+// saveRefreshed stores a refreshed login of key. It reads the config again after the refresh and
+// changes only that login's tokens (update), so a teamspace, domain or other login another tnctl
+// saved meanwhile stays. When the stored refresh token is no longer redeemed, the one this refresh
+// used, another tnctl replaced the login (tnctl login, possibly as another account) or the file was
+// reset: then nothing is saved, and the caller still uses the token it got.
+func saveRefreshed(d tokenDeps, key, redeemed string, update func(*config.AuthConfig)) error {
+	fresh, err := d.load()
+	if err != nil {
+		return err
+	}
+	a, ok := fresh.Auths[key]
+	// Compare-and-set on the refresh token. The file lock (d.lock) is held here, but tnctl login, ns,
+	// domain and add load, change and save the config without it, so this check is what keeps a
+	// refresh from overwriting their save. The other direction is not covered: those commands save
+	// the auths they read at process start, so one that runs during a refresh (an interactive
+	// picker, a device-flow login) can write back the refresh token this refresh replaced. Taking the
+	// lock around a fresh read, change and save in those commands would close that; it is not done
+	// here (out of scope of this fix), and the lock must never be held across a picker or device
+	// flow: fileLock takes over a lock older than 30 seconds.
+	if !ok || a.RefreshToken != redeemed {
+		return nil
+	}
+	update(&a)
+	fresh.Auths[key] = a
+	return d.save(fresh)
 }
