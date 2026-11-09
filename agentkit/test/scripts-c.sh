@@ -756,6 +756,47 @@ fi
 check_eq "build: a bad app name exits 2" 2 "$?"
 
 : > "$BUILDCTL_LOG"
+"$build" "$work/ctx" hello --tag -leading > /dev/null 2>"$work/build-tag.err"
+check_eq "build: a tag starting with '-' exits 2" 2 "$?"
+check_contains "build: the '-' tag message" "$work/build-tag.err" \
+  "must start with a letter, a digit or '_'"
+if [ -s "$BUILDCTL_LOG" ]; then fail "build: buildctl ran with a '-' tag"; else ok "build: buildctl not run with a '-' tag"; fi
+
+long_tag="$(printf 'a%.0s' {1..129})"
+: > "$BUILDCTL_LOG"
+"$build" "$work/ctx" hello --tag "$long_tag" > /dev/null 2>"$work/build-long.err"
+check_eq "build: a 129-character tag exits 2" 2 "$?"
+check_contains "build: the long tag message" "$work/build-long.err" \
+  "is longer than 128 characters"
+if [ -s "$BUILDCTL_LOG" ]; then fail "build: buildctl ran with a 129-character tag"; else ok "build: buildctl not run with a 129-character tag"; fi
+
+: > "$BUILDCTL_LOG"
+"$build" "$work/ctx" hello --tag .leading > /dev/null 2>"$work/build-dot.err"
+check_eq "build: a tag starting with '.' exits 2" 2 "$?"
+if [ -s "$BUILDCTL_LOG" ]; then fail "build: buildctl ran with a '.' tag"; else ok "build: buildctl not run with a '.' tag"; fi
+
+tag128="$(printf 'a%.0s' {1..128})"
+out="$("$build" "$work/ctx" hello --tag "$tag128" 2>/dev/null)"
+check_eq "build: a 128-character tag is accepted" "image: localhost:5000/hello:$tag128" \
+  "$(printf '%s\n' "$out" | tail -n 1)"
+
+mkdir -p "$work/ro-home" "$work/build-tmp" "$work/caller-config"
+chmod 555 "$work/ro-home"
+cat > "$work/buildctl-dc" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${DOCKER_CONFIG:-}" > "${BUILDCTL_LOG:?}"
+STUB
+chmod +x "$work/buildctl-dc"
+HOME="$work/ro-home" TMPDIR="$work/build-tmp" BUILDCTL="$work/buildctl-dc" \
+  "$build" "$work/ctx" hello > /dev/null 2>&1
+check_eq "build: an unwritable HOME exits 0" 0 "$?"
+used="$(cat "$BUILDCTL_LOG")"
+if [ -n "$used" ] && [ ! -e "$used" ]; then ok "build: the temporary DOCKER_CONFIG is removed"; else fail "build: the temporary DOCKER_CONFIG [$used] is left"; fi
+DOCKER_CONFIG="$work/caller-config" BUILDCTL="$work/buildctl-dc" \
+  "$build" "$work/ctx" hello > /dev/null 2>&1
+if [ -d "$work/caller-config" ]; then ok "build: a DOCKER_CONFIG the caller set is kept"; else fail "build: the caller's DOCKER_CONFIG was removed"; fi
+
+: > "$BUILDCTL_LOG"
 "$build" "$work/ctx" hello > /dev/null 2>&1
 output_arg="$(awk '/^--output$/ { getline; print; exit }' "$BUILDCTL_LOG")"
 if printf '%s' "$output_arg" | grep -Eq '^type=image,name=registry\.teknoir-build\.svc\.cluster\.local:5000/hello:[0-9]{8}-[0-9]{6},push=true,registry\.insecure=true$'; then

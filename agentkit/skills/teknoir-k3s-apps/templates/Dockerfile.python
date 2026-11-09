@@ -2,7 +2,7 @@
 # Copy it next to your code as `Dockerfile`, put your packages in requirements.txt, and build with
 #   teknoirbot-build . <app>
 # The base image is pinned by tag: a moving tag would make a rebuild produce a different image.
-FROM python:3.12.7-slim
+FROM public.ecr.aws/docker/library/python:3.12.7-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -13,9 +13,12 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# A password entry for uid 10001, so HOME, a shell and `id` work for the app.
+# A password entry for uid 10001, so `id` and libraries that look the user up work. HOME is /tmp,
+# because the Deployment's root filesystem is read-only.
 RUN groupadd --gid 10001 app \
- && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin app
+ && useradd --uid 10001 --gid 10001 --shell /usr/sbin/nologin app
+
+ENV HOME=/tmp
 
 COPY --chown=10001:10001 . ./
 

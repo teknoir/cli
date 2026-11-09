@@ -105,6 +105,8 @@ fi
 case "$tag" in
   ''|*[!A-Za-z0-9_.-]*) die "$tag is not a valid tag: use letters, digits, '.', '_' and '-'" ;;
 esac
+case "$tag" in [-.]*) die "$tag must start with a letter, a digit or '_'" ;; esac
+[ "${#tag}" -le 128 ] || die "$tag is longer than 128 characters"
 
 if [ -z "${BUILDKIT_HOST:-}" ]; then
   die "BUILDKIT_HOST is not set: this is not a TeknoirBot's computer. On a laptop, build with docker, nerdctl or buildx and push to a registry the device can pull from"
@@ -115,6 +117,7 @@ fi
 if [ -z "${HOME:-}" ] || [ ! -w "$HOME" ]; then
   DOCKER_CONFIG="$(mktemp -d)"
   export DOCKER_CONFIG
+  trap 'rm -rf "$DOCKER_CONFIG"' EXIT
 fi
 
 context="$(cd "$context" && pwd)"
