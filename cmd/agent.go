@@ -248,15 +248,15 @@ func classifyAgentErr(err error) error {
 	return classify(err)
 }
 
-// printAgentResult prints one line per action and a summary, or the actions as JSON with -o json. The
-// warnings always go to the error stream, so a structured result stays parseable.
+// printAgentResult prints one line per action, the warnings and a summary; with -o it prints the actions
+// as JSON/YAML and sends the warnings to the error stream, so a structured result stays parseable.
 func printAgentResult(w, errW io.Writer, format string, res *agentkit.Result, dryRun bool) error {
 	if format != "table" {
 		if err := writeStructured(w, format, marshalRaw(res.Actions)); err != nil {
 			return err
 		}
 		for _, warn := range res.Warnings {
-			fmt.Fprintf(errW, "warning: %s\n", warn)
+			_, _ = fmt.Fprintf(errW, "warning: %s\n", warn)
 		}
 		return nil
 	}

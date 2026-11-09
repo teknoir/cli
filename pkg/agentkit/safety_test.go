@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -156,8 +158,20 @@ func TestManifestBadKeysRefused(t *testing.T) {
 				victim := filepath.Join(o.ManagedDir, "victim.txt")
 				writeAt(t, victim, "victim\n", 0o644)
 				tamperManifest(t, root, map[string]string{tc.key(o.ManagedDir): hashOf("victim\n")})
-				// The tampered skills root; the managed hooks root is a root of its own.
-				beforeRoot := snapshotTree(t, root)
+				// The whole managed directory, except the hooks root on uninstall: a managed uninstall
+				// removes the guard on purpose, and it is a root of its own.
+				outside := func() string {
+					m := snapshotTree(t, o.ManagedDir)
+					if op == "uninstall" {
+						for k := range m {
+							if k == "hooks" || strings.HasPrefix(k, "hooks"+string(filepath.Separator)) {
+								delete(m, k)
+							}
+						}
+					}
+					return fmt.Sprint(m)
+				}
+				beforeRoot := outside()
 				refused := func() (*Result, error) {
 					if op == "install" {
 						return Install(o)
@@ -171,8 +185,8 @@ func TestManifestBadKeysRefused(t *testing.T) {
 				if got := readFile(t, victim); got != "victim\n" {
 					t.Errorf("the file outside the root was touched: %q", got)
 				}
-				if after := snapshotTree(t, root); fmt.Sprint(after) != fmt.Sprint(beforeRoot) {
-					t.Errorf("the refused %s changed the root:\nbefore %v\nafter  %v", op, beforeRoot, after)
+				if after := outside(); after != beforeRoot {
+					t.Errorf("the refused %s changed the managed dir:\nbefore %v\nafter  %v", op, beforeRoot, after)
 				}
 			})
 		}
@@ -1802,6 +1816,73 @@ func TestUninstallKeepsSharedSkills(t *testing.T) {
 		t.Errorf("the shared skills survived the uninstall of both: %v", err)
 	}
 	_ = home
+	// A shared root that holds only a skill of the user's is not the kit's: it is not kept and warned
+	// about, because the suggestion to uninstall both agents would find nothing to do.
+	o2, home2, _ := testOpts(t)
+	o2.Agents = []Agent{AgentCodex}
+	mine := filepath.Join(home2, ".agents", "skills", "mine", "SKILL.md")
+	writeAt(t, mine, "mine\n", 0o644)
+	res, err = Uninstall(o2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasAction(res, ActionKeep, filepath.Join(home2, ".agents", "skills")) {
+		t.Errorf("a keep action for a root the kit never wrote: %v", actionsOf(res))
+	}
+	if joined := strings.Join(res.Warnings, "\n"); strings.Contains(joined, "shared by Codex and OpenCode") {
+		t.Errorf("a warning about a root the kit never wrote: %v", res.Warnings)
+	}
+	if _, err := os.Stat(mine); err != nil {
+		t.Errorf("the user's skill went: %v", err)
+	}
+}
+
+// Project scope too: .agents/skills stays when only Codex is uninstalled.
+func TestUninstallKeepsSharedSkillsProject(t *testing.T) {
+	o, _, project := testOpts(t)
+	o.Scope, o.Agents = ScopeProject, []Agent{AgentCodex, AgentOpencode}
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(project, ".agents", "skills")
+	o.Agents = []Agent{AgentCodex}
+	res, err := Uninstall(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, filepath.FromSlash(skillRel))); err != nil {
+		t.Errorf("the shared project skills went with one agent: %v", err)
+	}
+	if !hasAction(res, ActionKeep, shared) {
+		t.Errorf("actions %v", actionsOf(res))
+	}
+	// A shared root that holds only a skill of the user's is not the kit's: no keep and no warning.
+	o2, _, project2 := testOpts(t)
+	o2.Scope, o2.Agents = ScopeProject, []Agent{AgentCodex}
+	shared2 := filepath.Join(project2, ".agents", "skills")
+	mine := filepath.Join(shared2, "mine", "SKILL.md")
+	writeAt(t, mine, "mine\n", 0o644)
+	res, err = Uninstall(o2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasAction(res, ActionKeep, shared2) {
+		t.Errorf("a keep action for a root the kit never wrote: %v", actionsOf(res))
+	}
+	if joined := strings.Join(res.Warnings, "\n"); strings.Contains(joined, "shared by Codex and OpenCode") {
+		t.Errorf("a warning about a root the kit never wrote: %v", res.Warnings)
+	}
+	if _, err := os.Stat(mine); err != nil {
+		t.Errorf("the user's skill went: %v", err)
+	}
+	// With both named, the shared root goes.
+	o.Agents = []Agent{AgentCodex, AgentOpencode}
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(shared); !os.IsNotExist(err) {
+		t.Errorf("the shared project skills survived the uninstall of both: %v", err)
+	}
 }
 
 // A dangling opencode.jsonc link is seen: the MCP entry is refused for it, and no opencode.json is
@@ -1857,16 +1938,121 @@ func TestClaudeConfigLock(t *testing.T) {
 	if got := readFile(t, path); !strings.Contains(got, mcpServerName) {
 		t.Errorf(".claude.json was not written: %s", got)
 	}
-	// A dry run takes no lock and creates none.
-	if err := os.Remove(path); err != nil {
+	// The dry-run rule is covered by TestClaudeConfigLockErrorAndDryRun.
+}
+
+// The lock goes when the edit fails, and a dry run neither waits for a held lock nor removes it.
+func TestClaudeConfigLockErrorAndDryRun(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.MCP = []Agent{AgentClaude}, true
+	path := filepath.Join(home, ".claude.json")
+	lock := path + ".lock"
+	writeAt(t, path, "not json\n", 0o600)
+	if _, err := Install(o); err == nil || !strings.Contains(err.Error(), "is not valid JSON") {
+		t.Fatalf("err %v, want the JSON error", err)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Errorf("the lock was left behind after a failed edit: %v", err)
+	}
+	writeAt(t, path, "{}\n", 0o600)
+	if err := os.Mkdir(lock, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	o.DryRun = true
+	o.DryRun, o.lockTimeout = true, 100*time.Millisecond
+	if _, err := Install(o); err != nil {
+		t.Fatalf("a dry run waited for the lock: %v", err)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Errorf("the dry run removed a lock it does not hold: %v", err)
+	}
+}
+
+// The config directory that $CLAUDE_CONFIG_DIR names does not exist: the lock is not taken there, an
+// uninstall finds nothing to remove in it, and the other agents' entries still go.
+func TestClaudeConfigLockNoDir(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.MCP = []Agent{AgentCodex, AgentOpencode}, true
 	if _, err := Install(o); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(lock); !os.IsNotExist(err) {
-		t.Errorf("the dry run made a lock: %v", err)
+	missing := filepath.Join(home, "missing")
+	o.Agents = []Agent{AgentClaude, AgentCodex, AgentOpencode}
+	o.ClaudeConfigDir = missing
+	o.ClaudeConfigFile = filepath.Join(missing, ".claude.json")
+	res, err := Uninstall(o)
+	if err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !hasAction(res, ActionSkip, o.ClaudeConfigFile) {
+		t.Errorf("actions %v", actionsOf(res))
+	}
+	for _, p := range []string{
+		filepath.Join(home, ".codex", "config.toml"),
+		filepath.Join(home, ".config", "opencode", "opencode.json"),
+	} {
+		if got := readFile(t, p); strings.Contains(got, mcpServerName) {
+			t.Errorf("%s still holds the entry: %s", p, got)
+		}
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Errorf("the missing config directory was created: %v", err)
+	}
+}
+
+// Two takers that both see the same stale lock must not both hold it: the second's remove would delete
+// the fresh lock the first just made.
+func TestClaudeConfigLockStaleRace(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		o, home, _ := testOpts(t)
+		path := filepath.Join(home, ".claude.json")
+		o.ClaudeConfigFile = path
+		o.lockTimeout = 3 * time.Second
+		lock := path + ".lock"
+		if err := os.Mkdir(lock, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-20 * time.Second)
+		if err := os.Chtimes(lock, old, old); err != nil {
+			t.Fatal(err)
+		}
+		var holders, most atomic.Int32
+		fn := func() error {
+			n := holders.Add(1)
+			for {
+				seen := most.Load()
+				if n <= seen || most.CompareAndSwap(seen, n) {
+					break
+				}
+			}
+			time.Sleep(2 * time.Millisecond)
+			holders.Add(-1)
+			return nil
+		}
+		var wg sync.WaitGroup
+		ready := make(chan struct{})
+		errs := make([]error, 2)
+		for i := range errs {
+			oo := *o
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-ready
+				errs[i] = newOp(&oo).withClaudeConfigLock(path, fn)
+			}()
+		}
+		close(ready)
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d, taker %d: %v", round, i, err)
+			}
+		}
+		if got := most.Load(); got != 1 {
+			t.Fatalf("round %d: %d holders at once", round, got)
+		}
+		if _, err := os.Stat(lock); !os.IsNotExist(err) {
+			t.Fatalf("round %d: the lock was left behind: %v", round, err)
+		}
 	}
 }
 

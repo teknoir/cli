@@ -229,6 +229,24 @@ func TestAgentList(t *testing.T) {
 	}
 }
 
+// --check with nothing installed exits 5 in the user scope, the project scope and both.
+func TestAgentListCheckNothingInstalled(t *testing.T) {
+	agentHome(t)
+	for _, args := range [][]string{
+		{"agent", "list", "--check"},
+		{"agent", "list", "--user", "--check"},
+		{"agent", "list", "--project", "--check"},
+	} {
+		out, _, err := runCLI(t, nil, args...)
+		if err == nil || exitCodeOf(err) != codeRejected {
+			t.Errorf("%v: %v, want exit %d", args, err, codeRejected)
+		}
+		if !strings.Contains(out, "no agent kit install found") {
+			t.Errorf("%v:\n%s", args, out)
+		}
+	}
+}
+
 // `agent list` with no scope flag visits both scopes; `agent install` without --agent installs all.
 func TestAgentListBothScopes(t *testing.T) {
 	home, project := agentHome(t)

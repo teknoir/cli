@@ -422,7 +422,7 @@ func TestHooksUpgradeLegacyEntry(t *testing.T) {
 	legacyGuard := filepath.Join(home, ".claude", "hooks", guardName)
 	path := settingsPath(t, home)
 	foreign := `{"matcher":"Write","hooks":[{"type":"command","command":"/usr/local/bin/check-write"}]}`
-	legacy := `{"matcher":"Bash|mcp__teknoir__.*","hooks":[{"type":"command","command":` + jsonString(t, legacyGuard) + `}]}`
+	legacy := `{"matcher":"` + legacyGuardMatcher + `","hooks":[{"type":"command","command":` + jsonString(t, legacyGuard) + `}]}`
 	writeSettings(t, path, `{"hooks":{"PreToolUse":[`+legacy+`,`+foreign+`]}}`)
 
 	res, err := Install(o)
@@ -434,6 +434,20 @@ func TestHooksUpgradeLegacyEntry(t *testing.T) {
 	}
 	if got := guardHandlers(t, path, shellQuote(legacyGuard)); len(got) != 1 {
 		t.Fatalf("%d handlers run the guard, want 1: %v", len(got), preToolUseRaw(t, path))
+	}
+	// The legacy handler in the old-matcher group is gone: exactly one handler runs the guard, in either
+	// form, and only the foreign group and ours are there.
+	if both := guardHandlersEither(t, path, legacyGuard); both != 1 {
+		t.Errorf("%d handlers run the guard in either form, want 1: %v", both, preToolUseRaw(t, path))
+	}
+	if n := len(preToolUseRaw(t, path)); n != 2 {
+		t.Errorf("%d groups, want the foreign one and ours: %v", n, preToolUseRaw(t, path))
+	}
+	// The legacy matcher is the one the kit itself used: the upgrade is not reported as a move.
+	for _, w := range res.Warnings {
+		if strings.Contains(w, legacyGuardMatcher) {
+			t.Errorf("a warning names the legacy matcher: %q", w)
+		}
 	}
 	for _, g := range preToolUseRaw(t, path) {
 		for _, cmd := range groupHandlerCommands(t, g) {
@@ -466,6 +480,24 @@ func TestHooksUpgradeLegacyEntry(t *testing.T) {
 	if n := len(guardHandlers(t, path, shellQuote(legacyGuard))); n != 1 {
 		t.Errorf("a second install left %d handlers", n)
 	}
+	if both := guardHandlersEither(t, path, legacyGuard); both != 1 {
+		t.Errorf("a second install left %d handlers in either form, want 1: %v", both, preToolUseRaw(t, path))
+	}
+}
+
+// guardHandlersEither counts the handlers of a settings.json that run the guard command as it is written
+// now, quoted, or as an older install wrote it, unquoted.
+func guardHandlersEither(t *testing.T, path, guard string) int {
+	t.Helper()
+	n := 0
+	for _, g := range preToolUseRaw(t, path) {
+		for _, cmd := range groupHandlerCommands(t, g) {
+			if cmd == guard || cmd == shellQuote(guard) {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // A group with the kit's matcher but the unquoted legacy path is upgraded in place: the group, and every
@@ -500,6 +532,131 @@ func TestHooksUpgradeInPlace(t *testing.T) {
 	}
 }
 
+// The handlers of the guard that an install moves or drops are reported, in the dry run and in the real
+// run: a handler of ours under a matcher of the user's is moved to the kit's, and a second one of the
+// same command is collapsed.
+func TestHooksReportsMovedHandlers(t *testing.T) {
+	// both installs, first as a dry run and then for real, and returns both results.
+	both := func(t *testing.T, o *Options, path string) (*Result, *Result) {
+		t.Helper()
+		before := readFile(t, path)
+		o.DryRun = true
+		dry, err := Install(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := readFile(t, path); got != before {
+			t.Errorf("the dry run wrote settings.json:\n%s", got)
+		}
+		o.DryRun = false
+		res, err := Install(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dry, res
+	}
+	t.Run("moved", func(t *testing.T) {
+		t.Parallel()
+		o, home, _ := testOpts(t)
+		o.Agents, o.Hooks = []Agent{AgentClaude}, true
+		guard := filepath.Join(home, ".claude", "hooks", guardName)
+		ours := jsonString(t, shellQuote(guard))
+		widened := "Bash|Edit|Write|mcp__teknoir__.*"
+		path := settingsPath(t, home)
+		writeSettings(t, path, `{"hooks":{"PreToolUse":[{"matcher":"`+widened+`","hooks":[{"type":"command","command":`+ours+`}]}]}}`)
+
+		dry, res := both(t, o, path)
+		for _, r := range []*Result{dry, res} {
+			if !hasAction(r, ActionRegister, path) {
+				t.Errorf("actions %v", actionsOf(r))
+			}
+			note := noteOf(r, ActionRegister, path)
+			if want := `moved from matcher "Bash|Edit|Write|mcp__teknoir__.*"`; !strings.Contains(note, want) {
+				t.Errorf("the note %q does not say %q", note, want)
+			}
+			if joined := strings.Join(r.Warnings, "\n"); !strings.Contains(joined, `under matcher "Bash|Edit|Write|mcp__teknoir__.*"`) {
+				t.Errorf("no warning about the move: %v", r.Warnings)
+			}
+		}
+		// The handler now runs under the kit's matcher alone, and a further install writes nothing.
+		if n := len(preToolUseRaw(t, path)); n != 1 {
+			t.Errorf("%d groups, want one: %v", n, preToolUseRaw(t, path))
+		}
+		after := readFile(t, path)
+		res, err := Install(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !hasAction(res, ActionAlreadyRegister, path) {
+			t.Errorf("actions %v", actionsOf(res))
+		}
+		if got := readFile(t, path); got != after {
+			t.Errorf("a further install changed settings.json:\n%s", got)
+		}
+	})
+	t.Run("duplicate", func(t *testing.T) {
+		t.Parallel()
+		o, home, _ := testOpts(t)
+		o.Agents, o.Hooks = []Agent{AgentClaude}, true
+		guard := filepath.Join(home, ".claude", "hooks", guardName)
+		ours := jsonString(t, shellQuote(guard))
+		path := settingsPath(t, home)
+		group := `{"matcher":"` + guardMatcher + `","hooks":[{"type":"command","command":` + ours + `},{"type":"command","command":` + ours + `}]}`
+		writeSettings(t, path, `{"hooks":{"PreToolUse":[`+group+`]}}`)
+
+		dry, res := both(t, o, path)
+		for _, r := range []*Result{dry, res} {
+			if !hasAction(r, ActionUpgrade, path) {
+				t.Errorf("actions %v", actionsOf(r))
+			}
+			if note := noteOf(r, ActionUpgrade, path); !strings.Contains(note, "removed 1 other handler(s)") {
+				t.Errorf("the note %q", note)
+			}
+		}
+		if got := guardHandlers(t, path, shellQuote(guard)); len(got) != 1 {
+			t.Errorf("%d handlers run the guard, want 1: %v", len(got), preToolUseRaw(t, path))
+		}
+		// A further install finds one handler and writes nothing.
+		after := readFile(t, path)
+		res, err := Install(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !hasAction(res, ActionAlreadyRegister, path) {
+			t.Errorf("actions %v", actionsOf(res))
+		}
+		if got := readFile(t, path); got != after {
+			t.Errorf("a further install changed settings.json:\n%s", got)
+		}
+	})
+}
+
+// Two handlers of our command (a hand edit, or two old installs): one install leaves exactly one.
+func TestHooksDuplicateHandlerCollapsed(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.Hooks = []Agent{AgentClaude}, true
+	guard := filepath.Join(home, ".claude", "hooks", guardName)
+	path := settingsPath(t, home)
+	ours := `{"matcher":"` + guardMatcher + `","hooks":[{"type":"command","command":` + jsonString(t, shellQuote(guard)) + `}]}`
+	writeSettings(t, path, `{"hooks":{"PreToolUse":[`+ours+`,`+ours+`]}}`)
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+	if got := guardHandlers(t, path, shellQuote(guard)); len(got) != 1 {
+		t.Errorf("%d handlers run the guard, want 1: %v", len(got), preToolUseRaw(t, path))
+	}
+}
+
+// noteOf is the note of the first action of action on path.
+func noteOf(res *Result, action, path string) string {
+	for _, a := range res.Actions {
+		if a.Action == action && a.Path == path {
+			return a.Note
+		}
+	}
+	return ""
+}
+
 // A stale unquoted absolute path from an older install goes on uninstall, whatever its matcher, and a
 // group that held only it is dropped with it.
 func TestHooksUninstallLegacyEntry(t *testing.T) {
@@ -510,7 +667,7 @@ func TestHooksUninstallLegacyEntry(t *testing.T) {
 	writeSettings(t, path, settingsWithOthers)
 	// What an older install left: our old group, with the unquoted path and the old matcher.
 	body := readFile(t, path)
-	legacy := `, {"matcher":"Bash|mcp__teknoir__.*","hooks":[{"type":"command","command":` + jsonString(t, legacyGuard) + `}]}`
+	legacy := `, {"matcher":"` + legacyGuardMatcher + `","hooks":[{"type":"command","command":` + jsonString(t, legacyGuard) + `}]}`
 	body = strings.Replace(body, `"PreToolUse": [
       {`, `"PreToolUse": [
       `+strings.TrimPrefix(legacy, ", ")+`, {`, 1)
@@ -566,6 +723,27 @@ func TestHooksGuardRefusedNoEntry(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The hooks root's manifest is refused: the guard is not written, so its hook is not registered.
+func TestHooksManifestRefusedNoEntry(t *testing.T) {
+	o, home, _ := testOpts(t)
+	o.Agents, o.Hooks = []Agent{AgentClaude}, true
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+	writeAt(t, filepath.Join(hooksDir, manifestName), `{"kitVersion":"0.1.0","files":{"../x":"`+hashOf("x\n")+`"}}`+"\n", 0o644)
+	res, err := Install(o)
+	if _, ok := Refused(err); !ok {
+		t.Fatalf("err %v, want a refusal", err)
+	}
+	if !hasAction(res, ActionSkip, settingsPath(t, home)) {
+		t.Errorf("actions %v", actionsOf(res))
+	}
+	if _, err := os.Stat(settingsPath(t, home)); !os.IsNotExist(err) {
+		t.Errorf("settings.json was written for a refused hooks root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(hooksDir, guardName)); !os.IsNotExist(err) {
+		t.Errorf("the guard was written below a refused hooks root: %v", err)
 	}
 }
 

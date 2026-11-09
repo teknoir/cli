@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -98,6 +99,8 @@ func (p *op) mergeSettings(path string, remove bool) error {
 	groups := parseHookGroups(entries)
 	legacy := p.absGuardPath()
 	registered, upgraded, changed, removed := false, false, false, false
+	var moved []string
+	dups := 0
 	for _, g := range groups {
 		if g.opaque {
 			continue
@@ -119,9 +122,11 @@ func (p *op) mergeSettings(path string, remove bool) error {
 				gChanged, changed, removed = true, true, true
 			case !ours:
 				// Ours does not belong in a group of another matcher: it would run twice over.
+				moved = append(moved, g.matcher())
 				gChanged, changed = true, true
 			case registered:
 				// A second handler of this run's command: one is enough.
+				dups++
 				gChanged, changed = true, true
 			case cmd == command:
 				registered = true
@@ -135,6 +140,11 @@ func (p *op) mergeSettings(path string, remove bool) error {
 		if gChanged {
 			g.handlers = kept
 			g.changed = true
+		}
+	}
+	for _, m := range moved {
+		if m != legacyGuardMatcher {
+			p.r.warn("%s: the guard's handler under matcher %q now runs under the kit's matcher %q", path, m, guardMatcher)
 		}
 	}
 
@@ -152,9 +162,19 @@ func (p *op) mergeSettings(path string, remove bool) error {
 		}
 		groups = append(groups, &hookGroup{raw: entry})
 		changed = true
-		p.r.act(ActionRegister, path, string(AgentClaude), "PreToolUse entry")
+		note := "PreToolUse entry"
+		if len(moved) > 0 {
+			quoted := make([]string, 0, len(moved))
+			for _, m := range moved {
+				quoted = append(quoted, strconv.Quote(m))
+			}
+			note += " (moved from matcher " + strings.Join(quoted, ", ") + ")"
+		}
+		p.r.act(ActionRegister, path, string(AgentClaude), note)
 	case upgraded:
 		p.r.act(ActionUpgrade, path, string(AgentClaude), "PreToolUse entry: quoted guard command")
+	case changed:
+		p.r.act(ActionUpgrade, path, string(AgentClaude), fmt.Sprintf("PreToolUse entry: removed %d other handler(s) of the guard", len(moved)+dups))
 	default:
 		p.r.act(ActionAlreadyRegister, path, string(AgentClaude), "PreToolUse entry")
 	}

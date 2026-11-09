@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -196,13 +197,18 @@ const (
 	claudeConfigLockStale = 10 * time.Second
 )
 
-// withClaudeConfigLock runs fn under the lock Claude Code itself holds while it saves its config file
-// (~/.claude.json.lock, a lock directory), so tnctl's read, merge and write cannot lose a save Claude
-// Code makes at the same moment. Only the user-scope Claude config file is locked; a dry run never takes
-// the lock, and a symlinked config file is locked under the path Claude Code knows.
+// withClaudeConfigLock runs fn under the lock Claude Code takes while it saves its config file (the
+// configured path plus ".lock", a lock directory), so tnctl's read, merge and write cannot lose a save
+// Claude Code makes at the same moment. Only the user-scope Claude config file is locked; a dry run never
+// takes the lock, and a symlinked config file is locked under the path Claude Code knows.
 func (p *op) withClaudeConfigLock(path string, fn func() error) error {
 	if p.o.DryRun || p.o.Scope != ScopeUser || p.o.ClaudeConfigFile == "" ||
 		filepath.Clean(path) != filepath.Clean(p.o.ClaudeConfigFile) {
+		return fn()
+	}
+	// A config directory that does not exist holds no config file and no Claude Code saving one: an
+	// uninstall finds nothing to remove, and an install's write creates the directory.
+	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
 		return fn()
 	}
 	lock := path + ".lock"
@@ -214,24 +220,39 @@ func (p *op) withClaudeConfigLock(path string, fn func() error) error {
 	for {
 		err := os.Mkdir(lock, 0o755)
 		if err == nil {
-			break
+			break // held: run fn, then remove the lock (below)
 		}
 		if !errors.Is(err, fs.ErrExist) {
-			return err
+			return err // a missing config directory is handled before the loop; anything else is an error
 		}
-		if fi, serr := os.Stat(lock); serr == nil && time.Since(fi.ModTime()) > claudeConfigLockStale {
-			if rerr := os.Remove(lock); rerr == nil || errors.Is(rerr, fs.ErrNotExist) {
-				continue
+		fi, serr := os.Stat(lock)
+		switch {
+		case errors.Is(serr, fs.ErrNotExist):
+			continue // released between our mkdir and stat: try again at once
+		case serr == nil && time.Since(fi.ModTime()) > claudeConfigLockStale:
+			// Left behind by a process that died. Another taker may have seen the same stale lock: remove
+			// it only if it is still the same directory, then wait before the mkdir, so a second taker's
+			// remove finds nothing instead of the new lock.
+			if again, aerr := os.Stat(lock); aerr == nil && os.SameFile(fi, again) {
+				if rerr := os.Remove(lock); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+					return rerr
+				}
 			}
+			time.Sleep(lockRetryDelay())
+			continue
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("Claude Code holds %s; run again", lock)
+			return fmt.Errorf("Claude Code holds %s; run again", lock) //nolint:staticcheck // ST1005: the message starts with the name Claude Code
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(lockRetryDelay())
 	}
-	defer os.Remove(lock)
+	defer func() { _ = os.Remove(lock) }()
 	return fn()
 }
+
+// lockRetryDelay is how long a taker waits before it tries the lock again: 50 to 200 ms, so takers that
+// start together do not retry in step.
+func lockRetryDelay() time.Duration { return time.Duration(50+rand.IntN(150)) * time.Millisecond }
 
 // readJSONConfig reads a JSON config file, returning nil (and an error) when it cannot be edited. A
 // .jsonc with comments, which encoding/json rejects but a JSONC reader accepts, is reported with the

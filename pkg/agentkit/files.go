@@ -733,3 +733,6 @@ func marshalNoEscape(v any) ([]byte, error) {
 // guardMatcher is the tool matcher of the guard: shell commands and every tool of the teknoir MCP
 // server, whichever way it is installed (the read-only server, and the plugin that carries the kit).
 const guardMatcher = "Bash|mcp__teknoir__.*|mcp__plugin_teknoir_teknoir__.*"
+
+// legacyGuardMatcher is the matcher cd80af0 registered the guard under.
+const legacyGuardMatcher = "Bash|mcp__teknoir__.*"

@@ -34,7 +34,7 @@ func Uninstall(o *Options) (*Result, error) {
 			continue
 		}
 		if keepShared && filepath.Clean(r.Dir) == filepath.Clean(shared) {
-			if _, err := os.Stat(r.Dir); err == nil {
+			if _, err := os.Lstat(manifestPath(r.Dir)); err == nil {
 				p.r.act(ActionKeep, r.Dir, agentLabel(r.Agents), "shared by Codex and OpenCode")
 				p.r.warn("%s is shared by Codex and OpenCode: uninstall with --agent codex,opencode to remove it", r.Dir)
 			}

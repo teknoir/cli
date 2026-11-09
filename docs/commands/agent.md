@@ -55,11 +55,12 @@ With no `--agent` every agent is installed for, in the user scope.
   `teknoir` MCP tools (`mcp__teknoir__*`, or `mcp__plugin_teknoir_teknoir__*` when the server comes from
   the kit's plugin) to `~/.claude/settings.json` (project: `.claude/settings.json`), keeping the other
   hooks and permissions. The command is the guard's absolute path, shell-quoted, so a home or a project
-  directory with a space in it works; in project scope it is
-  `"\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/teknoir-guard"`, so the committed file works on every machine. A
-  re-run adds no duplicate, and `uninstall --hooks` takes out that handler only, never a hook of yours
-  beside it. For Codex and OpenCode it prints that hooks are installed for Claude Code only. With
-  `--managed` it prints the entry to add to Claude Code's managed settings
+  directory with a space in it works. In project scope the command is
+  `"$CLAUDE_PROJECT_DIR"/.claude/hooks/teknoir-guard` (in the JSON file:
+  `"command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/teknoir-guard"`), so the committed file works on
+  every machine. A re-run adds no duplicate, and `uninstall --hooks` takes out that handler only, never a
+  hook of yours beside it. For Codex and OpenCode it prints that hooks are installed for Claude Code
+  only. With `--managed` it prints the entry to add to Claude Code's managed settings
   (`/etc/claude-code/managed-settings.json`, or a file in `/etc/claude-code/managed-settings.d/`) instead
   of writing any.
 - `--agents-md` (project scope) adds a short section to `./AGENTS.md`, between
@@ -92,16 +93,17 @@ if it is unchanged, and kept (and reported) if you changed it.
 JSON files keep every foreign key and value as JSON; `tnctl` writes them with 2-space indent, so an
 existing file's **key order changes** (the data does not). Values are written as they are (`&`, `<` and
 `>` are not escaped) and the file ends in one newline, so installing and then uninstalling gives a file
-`tnctl` wrote back byte for byte. While it edits `~/.claude.json`, `tnctl` holds the lock Claude Code
-itself uses (`~/.claude.json.lock`): an install run inside a Claude Code session waits for it, and fails
-with `Claude Code holds …; run again` after 5 seconds. Codex's TOML is edited line by line, so its
-comments stay; the result is parsed and compared with the original **before** anything is written, and an
-edit that would break the file, or touch anything beside `[mcp_servers.teknoir]`, is refused with the
-lines to edit by hand. A config file that is a symlink (dotfiles, stow, home-manager) keeps its link: the
-change goes to the file it points at. In project scope such a file is refused (exit 8) with the lines to
-edit by hand, and so is a project whose `.claude`, `.agents` or `.codex` is a symlink. `AGENTS.md` is the
-exception: a link to a Markdown file inside the project, outside `.git` (AGENTS.md -> CLAUDE.md), is
-followed, and the section goes into that file.
+`tnctl` wrote back byte for byte. While it edits `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` when
+that is set), `tnctl` takes the lock Claude Code itself takes while it saves that file (the same path plus
+`.lock`). If Claude Code is saving at that moment, `tnctl` waits; after 5 seconds it fails with
+`Claude Code holds …; run again`. A lock older than 10 seconds counts as left behind and is taken over.
+Codex's TOML is edited line by line, so its comments stay; the result is parsed and compared with the
+original **before** anything is written, and an edit that would break the file, or touch anything beside
+`[mcp_servers.teknoir]`, is refused with the lines to edit by hand. A config file that is a symlink
+(dotfiles, stow, home-manager) keeps its link: the change goes to the file it points at. In project scope
+such a file is refused (exit 8) with the lines to edit by hand, and so is a project whose `.claude`,
+`.agents` or `.codex` is a symlink. `AGENTS.md` is the exception: a link to a Markdown file inside the
+project, outside `.git` (AGENTS.md -> CLAUDE.md), is followed, and the section goes into that file.
 
 ## List and check
 
@@ -149,8 +151,9 @@ The plugin has no hook: a hook that sees every command is installed only with `t
 
 One line per action `(write|keep|upgrade|refuse|delete|register|already registered|skip)`, then a summary;
 `--dry-run` prefixes each with `would`. `-o json` prints the actions as
-`[{"action","path","agent","note"}]`; `agent list -o json` prints `{"roots":[...],"mcp":[...]}`. Warnings
-always go to stderr as `warning: …`, so a structured result stays parseable.
+`[{"action","path","agent","note"}]`; `agent list -o json` prints `{"roots":[...],"mcp":[...]}`. With
+`-o json` or `-o yaml` the warnings go to stderr as `warning: …`, so stdout stays parseable; the table
+output prints them after the actions.
 
 | Exit | Meaning |
 |---|---|
