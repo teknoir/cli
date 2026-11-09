@@ -113,11 +113,10 @@ func initConfig() {
 		return
 	}
 	if cfgFile != "" {
-		// Use config file from the flag. A file without extension is YAML, as Save writes it.
+		// Use config file from the flag. A file without extension (also a dotfile such as .tnctlrc)
+		// is YAML, as Save writes it.
 		viper.SetConfigFile(cfgFile)
-		if filepath.Ext(cfgFile) == "" {
-			viper.SetConfigType("yaml")
-		}
+		viper.SetConfigType(config.FileType(cfgFile))
 	} else {
 		// Find home directory.
 		home, err := os.UserHomeDir()
@@ -138,38 +137,34 @@ func initConfig() {
 		// Config file found and read successfully
 	} else {
 		// If no config file found, create a default one
-		createDefaultConfig()
+		createDefaultConfig(viper.ConfigFileUsed())
 		// Try to read it back in so viper knows where to write to later
 		_ = viper.ReadInConfig()
 	}
 }
 
-func createDefaultConfig() {
-	path, err := config.GetConfigPath()
-	if err != nil {
+// createDefaultConfig creates the config file this run reads and Save writes (path: --config or
+// ~/.tnctl.yaml) when it is not there.
+func createDefaultConfig(path string) {
+	if path == "" {
 		return
 	}
-
 	// Only create if it doesn't exist
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		// The notice goes to stderr: stdout is the command's data, also with -o json.
-		fmt.Fprintf(os.Stderr, "Creating default configuration file at %s\n", path)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		return
+	}
+	// The notice goes to stderr: stdout is the command's data, also with -o json.
+	fmt.Fprintf(os.Stderr, "Creating default configuration file at %s\n", path)
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 
-		// Create directory if it doesn't exist (though it's usually $HOME)
-		dir := filepath.Dir(path)
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			os.MkdirAll(dir, 0755)
-		}
-
-		// The file will hold the login's tokens: it is the user's alone (0600). It is written from a
-		// viper of its own with the default domain only, never from the global viper, whose settings
-		// also hold this run's flags and environment (-n, TNCTL_NAMESPACE, --domain).
-		v := viper.New()
-		v.SetConfigPermissions(0o600)
-		v.SetConfigType("yaml")
-		v.Set("domain", config.DefaultConfig().Domain)
-		if err := v.SafeWriteConfigAs(path); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating default config: %v\n", err)
-		}
+	// The file will hold the login's tokens: it is the user's alone (0600). It is written from a
+	// viper of its own with the default domain only, never from the global viper, whose settings
+	// also hold this run's flags and environment (-n, TNCTL_NAMESPACE, --domain).
+	v := viper.New()
+	v.SetConfigPermissions(0o600)
+	v.SetConfigType(config.FileType(path))
+	v.Set("domain", config.DefaultConfig().Domain)
+	if err := v.SafeWriteConfigAs(path); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating default config: %v\n", err)
 	}
 }

@@ -475,3 +475,77 @@ func TestRenewalAfterTheConfigWasRemovedWithoutReload(t *testing.T) {
 		t.Errorf("the removed config file is back (%v)", err)
 	}
 }
+
+// A file an older tnctl saved during `tnctl -n acme <command>` (its Save wrote the bound flag):
+// every later run targets acme. A token refresh, with no -n and no user action, must not switch it.
+func TestRefreshKeepsTheActiveTeamspace(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	path := filepath.Join(t.TempDir(), ".tnctl.yaml")
+	body := "domain: teknoir.cloud\nflag_device: \"\"\nflag_namespace: acme\nauths:\n  teknoir_cloud:\n    access_token: at-old\n    refresh_token: rt-old\n    namespace: teknoir-demo\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	viper.SetConfigFile(path)
+	if err := viper.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+	ns := func() string {
+		config.Reload() // what tnctl mcp does before each call; a new process reads the same
+		c, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.GetNamespace()
+	}
+	before := ns()
+	d := tokenDeps{
+		load: config.LoadFresh,
+		refresh: func(context.Context, string, config.AuthConfig) (*oauth2.Token, error) {
+			return &oauth2.Token{AccessToken: "at-new", RefreshToken: "rt-new", Expiry: time.Now().Add(time.Hour)}, nil
+		},
+		save: func(c *config.Config) error { return c.Save() },
+	}
+	if _, err := accessToken(context.Background(), "teknoir.cloud", d); err != nil {
+		t.Fatal(err)
+	}
+	after := ns()
+	t.Logf("active teamspace before the refresh %q, after %q", before, after)
+	if before != after {
+		t.Errorf("a token refresh switched the active teamspace from %q to %q", before, after)
+	}
+}
+
+// A tnctl login --domain other.example lands while this process refreshes teknoir.cloud: the
+// refresh saves its rotated token and keeps the other logins and the domain the other process chose.
+func TestRefreshKeepsAConcurrentLoginToAnotherDomain(t *testing.T) {
+	path := useFileLogin(t)
+	const other = "domain: other.example\nauths:\n  teknoir_cloud:\n    access_token: at-old\n    refresh_token: rt-old\n    namespace: teknoir-demo\n  other_example:\n    access_token: at-x\n    refresh_token: rt-x\n    namespace: x\n"
+	d := tokenDeps{
+		load: config.LoadFresh,
+		lock: fileLock,
+		refresh: func(context.Context, string, config.AuthConfig) (*oauth2.Token, error) {
+			if err := os.WriteFile(path, []byte(other), 0o600); err != nil {
+				t.Error(err)
+			}
+			return &oauth2.Token{AccessToken: "at-rot", RefreshToken: "rt-rot", Expiry: time.Now().Add(time.Hour)}, nil
+		},
+		save: func(c *config.Config) error { return c.Save() },
+	}
+	if _, err := accessToken(context.Background(), "teknoir.cloud", d); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := config.LoadFresh()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Domain != "other.example" {
+		t.Errorf("domain %q, want other.example", fresh.Domain)
+	}
+	if a := fresh.Auths["other_example"]; a.RefreshToken != "rt-x" {
+		t.Errorf("the other domain's login was lost: %v", a.RefreshToken == "")
+	}
+	if a := fresh.Auths["teknoir_cloud"]; a.RefreshToken != "rt-rot" {
+		t.Errorf("rotated token not saved")
+	}
+}
