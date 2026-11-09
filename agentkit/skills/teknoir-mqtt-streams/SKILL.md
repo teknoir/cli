@@ -85,10 +85,16 @@ tnctl mqtt stream /devices/+/state/# /devices/+/events/alerts --seconds 60 --rec
   device comes back online (see above).
 - A device heartbeat carries **every** pod and node metric, so it is tens of KB per message.
   Sample the narrowest topic you can, and filter before you aggregate.
-- A 404 (exit 3) has two meanings, and the message tells them apart: "device <name> not found"
-  means that device is outside what you may see, while a 404 of the route itself (`Cannot GET
-  .../fleet/.../mqtt/stream`) means this platform is older than the kit and has no stream route.
-  Tell the person in the second case; a bot has no other read path.
+- A 404 (exit 3) has two meanings. If the message is `device <name> not found`, that device is
+  outside what you may see. Any other 404 from `tnctl mqtt stream` means this platform has no
+  stream route yet: tell the person (a bot has no other read path).
+- Exit 9 (429) on start: read tnctl's message. If it says to try again in N s, the bot made too
+  many requests in a minute: wait that long and try once more. Otherwise you already hold 4
+  streams: stop a pipeline you started for this task; before you stop or delete a relay
+  Deployment, ask the person which one may go. Never retry in a loop. A relay Deployment refused
+  this way keeps running and logs `the platform asked the stream to wait (HTTP 429)`.
+- Exit 1 with `live MQTT is not configured`: the platform cannot stream this teamspace's MQTT.
+  Tell the person; there is nothing to retry.
 
 ### A first look
 
@@ -168,7 +174,8 @@ tnctl mqtt stream '/devices/+/events/#' --json | jq -c '
 **Per-device windowed aggregate** — the shape of `templates/processor.py`: keep
 `{count, sum, min, max}` per device, close the window when its start is `WINDOW_SECONDS` old in
 wall-clock time, publish one summary per device and reset. Close on a timer, not only on the next
-message, or a quiet device never reports (the template flushes on its own timer).
+message, or a quiet device never reports (the template flushes on its own timer, on the same
+timer in broker and in `--stdin` mode).
 
 **Rate and threshold alert with hysteresis** — never alert on a single sample:
 
@@ -205,8 +212,21 @@ producer that republishes the same event.
   `[A-Za-z0-9_.:/-]`, and repeat at least every 60 s (the series expire after 90 s).
 - Keep each published message well under 256 KiB (the stream would drop it, and TOE drops over
   3 MB).
-- Exit non-zero when the input stream ends, and let the supervisor restart the pipeline; a
-  processor that keeps running on a dead stream reports nothing.
+- When the input stream ends, end the processor too and let the supervisor decide whether to
+  restart. The kit's relay and processor exit 0 at the end of stdin, so a shell loop must look at
+  tnctl's own status: restart only after tnctl exits 1 (an error event such as `access_lost`, or a
+  server error), never after another exit code, and stop when its message says `live MQTT is not
+  configured`. The loop needs bash (`PIPESTATUS`): put it in a file and run it with `bash <file>`,
+  never `sh`. tnctl's own messages are in `tnctl.err` while it runs.
+
+  ```bash
+  while :; do
+    tnctl mqtt stream '/devices/+/state/#' --json --reconnect 2> tnctl.err | scripts/mqtt-relay.py
+    rc=${PIPESTATUS[0]}; cat tnctl.err >&2
+    [ "$rc" -eq 1 ] && ! grep -q 'live MQTT is not configured' tnctl.err || break
+    sleep 30
+  done
+  ```
 
 ## Publishing results (bot)
 
@@ -235,7 +255,17 @@ INPUT_TOPIC='in/devices/+/state' WINDOW_SECONDS=60 python3 templates/processor.p
 
 `scripts/mqtt-relay.py` republishes the stream onto the local broker under `in/<topic>`, so
 `processor.py` is a plain MQTT client of the local broker and runs as its own command. Both keep
-running until you stop them; leave the terminal open, or run them under `nohup` for a trial.
+running until you stop them. A person can leave the terminal open. An agent starts each in the
+background; each tool call is a new shell, so keep the process ids in files:
+
+```bash
+nohup setsid sh -c 'echo $$ > relay.pid; tnctl mqtt stream "/devices/+/state/#" --json --reconnect | scripts/mqtt-relay.py' > relay.log 2>&1 &
+INPUT_TOPIC='in/devices/+/state' nohup python3 templates/processor.py > processor.log 2>&1 & echo $! > processor.pid
+```
+
+Read the logs. When the trial is over, stop the whole relay pipeline with
+`kill -- -"$(cat relay.pid)"` (killing only the `sh` leaves tnctl streaming and holding one of
+your 4 streams), and the processor with `kill "$(cat processor.pid)"`.
 
 **(b) As Deployments in `apps`.** For something that must survive a desktop restart, the same two
 pieces are two Deployments built with the `teknoir-k3s-apps` skill:
@@ -245,16 +275,21 @@ pieces are two Deployments built with the `teknoir-k3s-apps` skill:
    `apps/<name>` without printing it.
 2. The processor runs as its own Deployment and subscribes to the local broker.
 
+A relay Deployment holds one of the bot's 4 streams for as long as it runs.
+
 ```yaml
 # relay: needs the key Secret, mounted read-only
+args: ["--sse", "--key-file", "/run/teknoirbot-app/key", "--topic", "/devices/+/state/#"]
 env:
-  - {name: TEKNOIRBOT_API, value: "https://tb-api.<domain>:8085/api/device/bot/v1"}
+  # copy the values from your environment; none of them is secret
+  - {name: TEKNOIRBOT_API, value: "<the value of $TEKNOIRBOT_API>"}
   - {name: TEKNOIRBOT_NAMESPACE, value: "<teamspace>"}
   - {name: TEKNOIRBOT_NAME, value: "<bot>"}
-  - {name: TNCTL_BOT_KEY_FILE, value: "/run/teknoirbot-app/key"}
-args: ["--sse", "--topic", "/devices/+/state/#"]
 volumeMounts:
   - {name: bot-key, mountPath: /run/teknoirbot-app, readOnly: true}
+# at the relay pod's level (not the processor's)
+volumes:
+  - {name: bot-key, secret: {secretName: <name>}}
 
 # processor: no key at all, only the local broker
 env:
@@ -269,8 +304,11 @@ may come back.
 
 The copy in `apps` is as sensitive as the key itself and stays inside the bot's own computer.
 Never `kubectl get` or `kubectl describe` that Secret with `-o yaml`, `-o json` or `-o jsonpath`;
-never `kubectl exec` into a pod that mounts it; never print its env or files. Mount it read-only
-only into the relay. Delete it (`kubectl -n apps delete secret <name>`) when the relay is gone.
+nor with any other output format (`-o go-template`, `-o template`, `-o custom-columns`), nor by
+listing the Secrets of `apps` with an output format, nor with `kubectl edit`: list Secrets only
+with the default table or `-o name`. Never `kubectl exec` into a pod that mounts it; never print
+its env or files. Mount it read-only only into the relay. Delete it
+(`kubectl -n apps delete secret <name>`) when the relay is gone.
 
 ## People on a laptop
 
@@ -280,9 +318,10 @@ A person reads with the same command under their own login, and processes locall
 tnctl mqtt stream '/devices/+/state/#' --json | python3 templates/processor.py --stdin
 ```
 
-`--stdin` reads the `--json` lines and prints the summaries instead of publishing them. Publishing
-to the platform needs a device: the person's own device app, a Notebook or a Devstudio. There is
-no bot computer and no local broker to publish to.
+`--stdin` reads the `--json` lines and prints the summaries instead of publishing them. Windows
+close on the same timer as in broker mode, so a quiet stream still prints. Publishing to the
+platform needs a device: the person's own device app, a Notebook or a Devstudio. There is no bot
+computer and no local broker to publish to.
 
 ## Safety
 
@@ -294,8 +333,6 @@ no bot computer and no local broker to publish to.
   or `.../events/inference`, and never publish a reserved event name.
 - Read before you write, and read the `dropped` lines: they tell you the stream is rate- or
   size-limiting you, not that the devices are quiet.
-- On Codex and OpenCode no guard hook sees your shell: the platform's checks and this page are the
-  protection.
 
 ## Bot mode
 
@@ -304,14 +341,20 @@ differences:
 
 - The stream is the **only** read path. The bot holds no teamspace broker credential, so there is
   no `mosquitto_sub` on `/devices/...#`, no MQTT client with a password, and no token to mint.
-  A 404 from the stream route means this platform is older than tnctl: tell the person, do not
-  work around it. A refusal (exit 6, or HTTP 401/403) means the bot's key was not accepted or its
-  access level is `none`: a person must re-create the bot; do not retry.
+  A 404 whose message is not `device <name> not found` means this platform has no stream route
+  yet: tell the person, and do not work around it.
+- The stream needs access `read` or `creator`. On exit 6, run `tnctl whoami -o json` and branch on
+  `.bot.access`: at `none`, ask the bot's creator to set it to Read only or Act as me on the Bots
+  page. If whoami fails too, or access is not `none`, give the person tnctl's message unchanged
+  (the bot may be paused, or its computer disabled). Only when tnctl says 'the bot key is missing
+  or empty' or 'the bot API did not accept the bot's key' must a person re-create the bot. Never
+  retry.
 - The bot reads only devices in its creator's scope inside its own unit. A device outside it is a
   404, as if it did not exist.
 - The bot's output is `toe/events/<stream>` on its own computer, nothing else. It never publishes
   on the teamspace broker.
 - `kubectl`, `buildctl` and the local broker exist only on the bot's computer; the relay and the
   processor as Deployments need the `teknoir-k3s-apps` skill. The bot's own device is
-  `tb-<bot>`, in `$TEKNOIRBOT_NAME`.
+  `tb-$TEKNOIRBOT_NAME` (`$TEKNOIRBOT_NAME` holds the bot's name without `tb-`); filter out topics
+  under `/devices/tb-$TEKNOIRBOT_NAME/`.
 - What a bot may run and where is in [bot-vm.md](../teknoir-platform/references/bot-vm.md).

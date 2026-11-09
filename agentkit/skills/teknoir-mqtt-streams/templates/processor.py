@@ -4,8 +4,10 @@
 Reads the device state metrics that mqtt-relay.py mirrored into the local broker
 (`in/devices/<device>/state` by default), keeps one window per device, and publishes one summary
 per window: count, min, max and mean of one metric, with the device and when the window ended.
-The summary goes out as `toe/events/<OUTPUT_STREAM>` on the local broker; TOE republishes it to
-`/devices/tb-<bot>/events/<OUTPUT_STREAM>`, where people and platform services see it.
+The value of a metric is the device's total over its nodes (a multi-node Robot reports one
+entry per node). The summary goes out as `toe/events/<OUTPUT_STREAM>` on the local broker; TOE
+republishes it to `/devices/tb-<bot>/events/<OUTPUT_STREAM>`, where people and platform services
+see it.
 
 Two input modes:
 
@@ -17,11 +19,13 @@ Settings come from the environment: MQTT_HOST, MQTT_PORT, INPUT_TOPIC (default
 in/devices/+/state), METRIC (default node_cpu_usage, in millicores), WINDOW_SECONDS (default 60)
 and OUTPUT_STREAM (default cpu-summary).
 
-Exit codes: 0 at the end of stdin or after SIGTERM, 2 a usage error (a bad OUTPUT_STREAM).
+Exit codes: 0 at the end of stdin or after SIGTERM, 1 reading stdin failed, 2 a usage error (a bad
+OUTPUT_STREAM).
 """
 
 import base64
 import json
+import math
 import os
 import re
 import signal
@@ -52,6 +56,7 @@ RESERVED_STREAMS = (
 )
 
 STOP = threading.Event()
+LOCK = threading.Lock()
 WINDOWS = {}
 SKIPPED = 0
 
@@ -84,7 +89,7 @@ def device_of(topic):
 
 
 def metric_value(doc, metric_id):
-    """The value of the first metric with this id in a Metrics document, or None."""
+    """The device's total for this metric id (one entry per node), or None."""
     if not isinstance(doc, dict):
         return None
     spec = doc.get("spec")
@@ -93,14 +98,22 @@ def metric_value(doc, metric_id):
     metrics = spec.get("metrics")
     if not isinstance(metrics, list):
         return None
+    total, found = 0.0, False
     for item in metrics:
         if not isinstance(item, dict) or item.get("metricId") != metric_id:
             continue
         value = item.get("value")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        return float(value)
-    return None
+            continue
+        try:
+            number = float(value)
+        except OverflowError:
+            continue
+        if not math.isfinite(number):
+            continue
+        total += number
+        found = True
+    return total if found else None
 
 
 def payload_of(doc):
@@ -126,7 +139,7 @@ def ingest(topic, payload):
         return
     try:
         doc = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         SKIPPED += 1
         return
     value = metric_value(doc, METRIC)
@@ -137,14 +150,15 @@ def ingest(topic, payload):
 
 
 def add_sample(device, value, now):
-    window = WINDOWS.get(device)
-    if window is None:
-        window = {"start": now, "count": 0, "sum": 0.0, "min": value, "max": value}
-        WINDOWS[device] = window
-    window["count"] += 1
-    window["sum"] += value
-    window["min"] = min(window["min"], value)
-    window["max"] = max(window["max"], value)
+    with LOCK:
+        window = WINDOWS.get(device)
+        if window is None:
+            window = {"start": now, "count": 0, "sum": 0.0, "min": value, "max": value}
+            WINDOWS[device] = window
+        window["count"] += 1
+        window["sum"] += value
+        window["min"] = min(window["min"], value)
+        window["max"] = max(window["max"], value)
 
 
 def summary(device, window):
@@ -165,20 +179,15 @@ def summary(device, window):
     }
 
 
-def flush_devices(devices):
-    out = []
-    for device in sorted(devices):
-        out.append(summary(device, WINDOWS.pop(device)))
-    return out
-
-
 def flush_due(now):
-    due = [device for device, window in WINDOWS.items() if now - window["start"] >= WINDOW_SECONDS]
-    return flush_devices(due)
+    with LOCK:
+        due = [d for d, w in WINDOWS.items() if now - w["start"] >= WINDOW_SECONDS]
+        return [summary(d, WINDOWS.pop(d)) for d in sorted(due)]
 
 
 def flush_all():
-    return flush_devices(list(WINDOWS))
+    with LOCK:
+        return [summary(d, WINDOWS.pop(d)) for d in sorted(WINDOWS)]
 
 
 class Output:
@@ -200,7 +209,6 @@ class Output:
         self.client.on_message = on_message
         if hasattr(self.client, "reconnect_delay_set"):
             self.client.reconnect_delay_set(1, 30)
-        self.client.subscribe(INPUT_TOPIC, 0)
         self.client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=30)
         self.client.loop_start()
 
@@ -244,6 +252,8 @@ def on_connect(client, *args):
     if reason_failed(code):
         print(f"processor: the broker refused the connection (reason "
               f"{getattr(code, 'value', code)})", file=sys.stderr, flush=True)
+        return
+    client.subscribe(INPUT_TOPIC, 0)  # on every connect: a clean session forgets subscriptions
 
 
 def on_disconnect(client, *args):
@@ -254,7 +264,11 @@ def on_disconnect(client, *args):
 
 
 def on_message(client, userdata, message):
-    ingest(message.topic, message.payload)
+    try:
+        ingest(message.topic, message.payload)
+    except Exception as exc:  # noqa: BLE001 - an exception here would kill paho's network thread
+        print(f"processor: a message on {message.topic} failed: {exc!r}", file=sys.stderr,
+              flush=True)
 
 
 def on_signal(signum, frame):
@@ -262,29 +276,46 @@ def on_signal(signum, frame):
 
 
 def run_stdin(out):
-    global SKIPPED
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    done = threading.Event()
+    failed = threading.Event()
+
+    def reader():
+        global SKIPPED
         try:
-            doc = json.loads(line)
-        except ValueError:
-            SKIPPED += 1
-            continue
-        if not isinstance(doc, dict):
-            SKIPPED += 1
-            continue
-        topic = doc.get("topic")
-        payload = payload_of(doc)
-        if not isinstance(topic, str) or payload is None:
-            SKIPPED += 1
-            continue
-        ingest(topic, payload)
-    # The end of the input flushes every window that still has messages in it.
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    doc = json.loads(line)
+                except (ValueError, RecursionError):
+                    SKIPPED += 1
+                    continue
+                if not isinstance(doc, dict):
+                    SKIPPED += 1
+                    continue
+                topic = doc.get("topic")
+                payload = payload_of(doc)
+                if not isinstance(topic, str) or payload is None:
+                    SKIPPED += 1
+                    continue
+                ingest(topic, payload)
+        except Exception as exc:
+            print(f"processor: reading stdin failed: {exc!r}", file=sys.stderr, flush=True)
+            failed.set()
+            raise
+        finally:
+            done.set()  # a reader that dies must not leave the main loop waiting forever
+
+    threading.Thread(target=reader, daemon=True).start()
+    # The same timer as the broker path: a quiet stream still closes its windows.
+    while not done.wait(0.5) and not STOP.is_set():
+        for doc in flush_due(time.monotonic()):
+            out.send(doc)
+    # The end of the input, or a SIGTERM, flushes every window that still has messages in it.
     for doc in flush_all():
         out.send(doc)
-    return 0
+    return 1 if failed.is_set() else 0
 
 
 def run_broker(out):

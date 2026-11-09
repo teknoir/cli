@@ -15,7 +15,7 @@ PYTHON="${PYTHON:-python3}"
 orig_home="$HOME"
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$work"' EXIT
 
 bin="$work/bin"
 mkdir -p "$bin"
@@ -159,6 +159,9 @@ fake_paho() {
     printf 'import json, os\n\n'
     if [ "$variant" = v2 ]; then
       printf 'class CallbackAPIVersion:\n    VERSION1 = 1\n    VERSION2 = 2\n\n'
+      printf 'CALL_EXTRA = (None,)  # the v2 callback takes the properties as a fifth argument\n\n'
+    else
+      printf 'CALL_EXTRA = ()\n\n'
     fi
     cat <<'PY'
 def _log(**kw):
@@ -173,10 +176,17 @@ class Message:
         self.payload = payload
 
 class Client:
+    on_connect = None
+    on_disconnect = None
+    on_message = None
+
     def __init__(self, *args, **kwargs):
+        self._connected = False
+        self._subs = []
         _log(event="init", args=list(args), kwargs=kwargs)
 
     def connect(self, host, port):
+        self._connected = True  # connect() is synchronous in real paho
         _log(event="connect", host=host, port=port)
         return 0
 
@@ -185,9 +195,12 @@ class Client:
         return 0
 
     def loop_start(self):
+        self._connected = True
         _log(event="loop_start")
+        if self.on_connect is not None:
+            self.on_connect(self, None, {}, 0, *CALL_EXTRA)
         message = os.environ.get("FAKE_PAHO_MESSAGE")
-        if message:
+        if message and self._subs:
             topic = os.environ.get("FAKE_PAHO_TOPIC", "in/devices/d1/state")
             self.on_message(self, None, Message(topic, message.encode("utf-8")))
 
@@ -201,7 +214,12 @@ class Client:
         _log(event="reconnect_delay_set")
 
     def subscribe(self, topic, qos=0):
+        if not self._connected:
+            _log(event="subscribe_no_conn", topic=topic)
+            return (4, None)
+        self._subs.append(topic)
         _log(event="subscribe", topic=topic, qos=qos)
+        return (0, 1)
 
     def publish(self, topic, payload, qos=0, retain=False):
         text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
@@ -279,6 +297,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if mode in ("retry0", "retryinf"):
+            body = b'{"message":"busy"}'
+            self.send_response(429)
+            self.send_header("Retry-After", "0" if mode == "retry0" else "inf")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -289,6 +315,22 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(MESSAGE.encode())
             self.wfile.write(ERROR.encode())
             self.wfile.flush()
+            return
+        if mode == "cuterror":  # an error event that the end of the stream cuts off
+            self.wfile.write(MESSAGE.encode())
+            self.wfile.write(ERROR.rstrip("\n").encode() + b"\n")
+            self.wfile.flush()
+            return
+        if mode == "bigline":  # one 1.5 MiB comment line: only the line cap catches it
+            self.wfile.write(b": " + b"x" * (3 << 19) + b"\n\n")
+            self.wfile.flush()
+            time.sleep(30)
+            return
+        if mode == "bigutf8":  # 2.7 MB of data in 900 K characters
+            line = ("data: " + "\u20ac" * 300000 + "\n").encode()
+            self.wfile.write(b"event: message\n" + line * 3 + b"\n")
+            self.wfile.flush()
+            time.sleep(30)
             return
         self.wfile.write(MESSAGE.encode())
         self.wfile.write(BINARY.encode())
@@ -365,6 +407,27 @@ check_eq "sample.sh: --summary counts per topic" \
 TNCTL_EXIT=7 "$sample" '/devices/+/state/#' >/dev/null 2>&1
 check_eq "sample.sh: exit code passed through" 7 "$?"
 
+TNCTL_EXIT=7 TNCTL_OUTPUT="$work/tnctl.jsonl" "$sample" --summary '/devices/+/state/#' >/dev/null 2>&1
+check_eq "sample.sh: --summary passes the exit code through" 7 "$?"
+
+printf '#!/usr/bin/env bash\ncat > /dev/null\nexit 5\n' > "$work/jq-fail"
+printf '#!/usr/bin/env bash\nexit 5\n' > "$work/jq-early"
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\nsleep 0.5\nprintf "%%s\\n" "{\\"topic\\":\\"/devices/d1/state\\"}"\n' \
+  > "$work/tnctl-late"
+chmod +x "$work/jq-fail" "$work/jq-early" "$work/tnctl-late"
+JQ="$work/jq-fail" TNCTL_OUTPUT="$work/tnctl.jsonl" "$sample" --summary '/devices/+/state/#' \
+  > /dev/null 2> "$work/sample-jq.err"
+check_eq "sample.sh: a jq failure exits 1" 1 "$?"
+check_contains "sample.sh: a jq failure is named" "$work/sample-jq.err" "jq failed (exit 5)"
+JQ="$work/jq-early" TNCTL="$work/tnctl-late" "$sample" --summary '/devices/+/state/#' \
+  > /dev/null 2> "$work/sample-jq-early.err"
+check_eq "sample.sh: a jq that ends before tnctl writes exits 1, not 141" 1 "$?"
+check_contains "sample.sh: an early jq failure is named" "$work/sample-jq-early.err" "jq failed (exit 5)"
+JQ="$work/no-such-jq" "$sample" --summary '/devices/+/state/#' > /dev/null 2> "$work/sample-nojq.err"
+check_eq "sample.sh: --summary without jq exits 2" 2 "$?"
+check_contains "sample.sh: --summary without jq says so" "$work/sample-nojq.err" "needs jq"
+
 # ---------------------------------------------------------------- mqtt-relay.py: stdin
 
 relay="$mqtt/scripts/mqtt-relay.py"
@@ -424,15 +487,15 @@ check_eq "relay --sse: exactly one dropped line" 1 "$dropped_lines"
 check_eq "relay --sse: the topic query values are the --topic values" \
   "$(printf '/devices/+/state/#\n/devices/d1/events/alerts')" \
   "$("$PYTHON" -c 'import sys, urllib.parse
-q = open(sys.argv[1], encoding="utf-8").read().split("&")
-print("\n".join(urllib.parse.unquote(v.split("=", 1)[1]) for v in q))' "$work/query")"
+print("\n".join(urllib.parse.parse_qs(open(sys.argv[1], encoding="utf-8").readline().strip())["topic"]))' "$work/query")"
+check_contains "relay --sse: + and # are percent-encoded" "$work/query" "%2B"
 if grep -qF "Bearer sse-fixture-key" "$work/auth"; then ok "relay --sse: sends the key as a Bearer token"; else fail "relay --sse: no Bearer token"; fi
 if [ -e "$FAKE_PAHO_MARKER" ]; then fail "relay --sse --dry-run: imported paho"; else ok "relay --sse --dry-run: imports no paho"; fi
 
 start_server error
 : > "$work/count"
 err="$work/sse-error.err"
-PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo \
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 20 \
   "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
   --topic '/devices/+/state/#' > /dev/null 2> "$err"
 rc=$?
@@ -443,7 +506,7 @@ check_eq "relay --sse: exactly one connection after an error event" 1 "$(grep -c
 
 start_server unauthorized
 err="$work/sse-401.err"
-PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo \
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 20 \
   "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
   --topic '/devices/+/state/#' > /dev/null 2> "$err"
 rc=$?
@@ -453,7 +516,7 @@ check_contains "relay --sse: 401 names the key" "$err" "key"
 
 start_server badrequest
 err="$work/sse-400.err"
-PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo \
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 20 \
   "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
   --topic '/devices/+/state/#' > /dev/null 2> "$err"
 rc=$?
@@ -461,15 +524,93 @@ stop_server
 check_eq "relay --sse: HTTP 400 exits 2" 2 "$rc"
 check_contains "relay --sse: 400 prints the server's message" "$err" "is not a stream topic"
 
-PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo \
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 20 \
   "$PYTHON" "$relay" --sse --dry-run --api "http://192.0.2.10:8080" --key-file "$work/sse-key" \
   --topic '/devices/+/state/#' > /dev/null 2>&1
 check_eq "relay --sse: http to a non-loopback host is refused" 2 "$?"
 
-PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo \
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 20 \
   "$PYTHON" "$relay" --sse --dry-run --api "https://tb-api.example:8085" --key-file "$work/sse-key" \
   --topic '/devices/+/state' > /dev/null 2>&1
 check_eq "relay --sse: a concrete topic above the subtree is refused" 2 "$?"
+
+printf 'SECRETAAA\nSECRETBBB\n' > "$work/key-multi"
+printf 'tbk1.ns.bot.SECRET\377DDD\n' > "$work/key-binary"
+for kind in multi binary; do
+  PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 20 \
+    "$PYTHON" "$relay" --sse --dry-run --api "http://127.0.0.1:1" --key-file "$work/key-$kind" \
+    --topic '/devices/+/state/#' > /dev/null 2> "$work/key-$kind.err"
+  check_eq "relay --sse: a $kind key file exits 3" 3 "$?"
+  check_contains "relay --sse: a $kind key file is named" "$work/key-$kind.err" "single-line key"
+  check_absent "relay --sse: a $kind key file is not printed" "$work/key-$kind.err" "SECRET"
+  check_absent "relay --sse: a $kind key file gives no traceback" "$work/key-$kind.err" "Traceback"
+done
+
+tls_result="$(PYTHONPATH="$work/nopaho" "$PYTHON" -B -c '
+import http.client, importlib.util, ssl, sys
+spec = importlib.util.spec_from_file_location("relay", sys.argv[1])
+relay = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(relay)
+def refuse(self, *args, **kwargs):
+    raise ssl.SSLCertVerificationError("certificate verify failed")
+http.client.HTTPConnection.request = refuse
+try:
+    relay.sse_open("http://127.0.0.1:1", "teknoir-demo", ["/devices/+/state/#"], sys.argv[2], 5)
+except relay.Fatal as exc:
+    print("fatal %d" % exc.code)
+except OSError:
+    print("retried")
+' "$relay" "$work/sse-key" 2>&1)"
+check_eq "relay --sse: a TLS failure is retried, not blamed on the key" retried "$tls_result"
+
+start_server retry0
+err="$work/sse-retry0.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+stop_server
+connections="$(grep -c . "$work/count")"
+if [ "$connections" -le 4 ]; then
+  ok "relay --sse: Retry-After: 0 waits at least 1 s"
+else
+  fail "relay --sse: Retry-After: 0 made $connections connections in 3 s"
+fi
+
+start_server retryinf
+err="$work/sse-retryinf.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+rc=$?
+stop_server
+check_eq "relay --sse: Retry-After: inf keeps the relay running" 124 "$rc"
+check_absent "relay --sse: Retry-After: inf gives no traceback" "$err" "Traceback"
+check_contains "relay --sse: Retry-After is capped at 300 s" "$err" "in 300"
+
+start_server cuterror
+err="$work/sse-cuterror.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 4 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+rc=$?
+stop_server
+check_eq "relay --sse: an error event cut off by the end of the stream is dropped" 124 "$rc"
+if [ "$(grep -c . "$work/count")" -ge 2 ]; then
+  ok "relay --sse: it connects again after a cut-off event"
+else
+  fail "relay --sse: no second connection after a cut-off event"
+fi
+check_contains "relay --sse: a cut-off stream counts as ended" "$err" "the stream ended"
+
+for mode in bigline bigutf8; do
+  start_server "$mode"
+  err="$work/sse-$mode.err"
+  PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+    "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+    --topic '/devices/+/state/#' > /dev/null 2> "$err"
+  stop_server
+  check_contains "relay --sse: $mode is capped at 1 MiB" "$err" "larger than 1 MiB"
+done
 
 # ---------------------------------------------------------------- mqtt-relay.py: broker
 
@@ -486,6 +627,14 @@ for line in open(sys.argv[1], encoding="utf-8"):
         print("%s %s %s" % (d["topic"], d["qos"], d["retain"]))' "$FAKE_PAHO_LOG")"
   check_eq "relay ($variant): publishes in/devices/d1/state, qos 0, no retain" \
     "in/devices/d1/state 0 False" "$published"
+  connect_to="$("$PYTHON" -c 'import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    d = json.loads(line)
+    if d.get("event") == "connect":
+        print("%s %s" % (d["host"], d["port"]))
+        break' "$FAKE_PAHO_LOG")"
+  check_eq "relay ($variant): connects to the local broker by default" \
+    "mqtt.kube-system.svc.cluster.local 1883" "$connect_to"
   init_args="$("$PYTHON" -c 'import json, sys
 for line in open(sys.argv[1], encoding="utf-8"):
     d = json.loads(line)
@@ -558,6 +707,10 @@ check_absent "app-key: the base64 key is not on stdout" "$work/appkey.out" "$key
 check_absent "app-key: the key value is not on stderr" "$work/appkey.err" "$keyvalue"
 check_absent "app-key: the base64 key is not on stderr" "$work/appkey.err" "$keyb64"
 check_contains "app-key: it prints how to mount the Secret" "$work/appkey.out" "mountPath: /run/teknoirbot-app"
+check_contains "app-key: the mount snippet carries a --topic" "$work/appkey.out" "--topic"
+check_contains "app-key: the mount snippet sets TEKNOIRBOT_API" "$work/appkey.out" "TEKNOIRBOT_API"
+check_contains "app-key: the mount snippet carries the bot API URL" "$work/appkey.out" \
+  "https://tb-api.example:8085/api/device/bot/v1"
 
 # ---------------------------------------------------------------- teknoirbot-build
 
@@ -628,7 +781,7 @@ this is not json
 {"topic":"/devices/d2/state","payload":"not json","retain":false,"ts":"t"}
 JSON
 
-out="$(PYTHONPATH="$work/nopaho" "$PYTHON" "$processor" --stdin < "$work/state.jsonl" 2>"$work/proc.err")"
+out="$(PYTHONPATH="$work/nopaho" timeout -k 5 20 "$PYTHON" "$processor" --stdin < "$work/state.jsonl" 2>"$work/proc.err")"
 check_eq "processor: --stdin exits 0" 0 "$?"
 printf '%s\n' "$out" > "$work/proc.out"
 check_contains "processor: the summary goes to toe/events/cpu-summary" "$work/proc.out" "toe/events/cpu-summary"
@@ -645,6 +798,116 @@ check_eq "processor: one summary per device with count, min, max, mean" \
 check_contains "processor: it counts the messages it skipped" "$work/proc.err" "skipped 2 message(s)"
 if [ -e "$FAKE_PAHO_MARKER" ]; then fail "processor: --stdin imported paho"; else ok "processor: --stdin imports no paho"; fi
 
+multi='{"topic":"/devices/d1/state","payload":"{\"spec\":{\"metrics\":[{\"metricId\":\"node_cpu_usage\",\"labels\":{\"name\":\"node-1\"},\"value\":100},{\"metricId\":\"node_cpu_usage\",\"labels\":{\"name\":\"node-2\"},\"value\":50}]}}","retain":false,"ts":"t"}'
+multi_out="$(printf '%s\n' "$multi" | PYTHONPATH="$work/nopaho" timeout 20 "$PYTHON" "$processor" --stdin 2>/dev/null \
+  | sed 's/^toe\/events\/cpu-summary //' | "$PYTHON" -c 'import json, sys
+d = json.loads(sys.stdin.readline())["data"]
+print("%d %g %g" % (d["count"], d["min"], d["max"]))')"
+check_eq "processor: a multi-node device is the sum of its nodes" "1 150 150" "$multi_out"
+
+"$PYTHON" -c 'import json
+big = "{\"spec\":{\"metrics\":[{\"metricId\":\"node_cpu_usage\",\"value\":%s}]}}" % ("9" * 400)
+good = "{\"spec\":{\"metrics\":[{\"metricId\":\"node_cpu_usage\",\"value\":5}]}}"
+print(json.dumps({"topic": "/devices/d1/state", "payload": big}))
+print(json.dumps({"topic": "/devices/d2/state", "payload": good}))' > "$work/poison.jsonl"
+PYTHONPATH="$work/nopaho" timeout 20 "$PYTHON" "$processor" --stdin < "$work/poison.jsonl" \
+  > "$work/poison.out" 2> "$work/poison.err"
+check_eq "processor: a value too large for a float exits 0" 0 "$?"
+check_eq "processor: the message after a too-large value is summarized" 1 \
+  "$(grep -c '"device":"d2"' "$work/poison.out")"
+check_contains "processor: a too-large value is skipped" "$work/poison.err" "skipped 1 message(s)"
+
+lock_result="$(PYTHONPATH="$work/nopaho" "$PYTHON" -B -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("processor", sys.argv[1])
+proc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(proc)
+
+class Guarded(dict):
+    def _check(self):
+        if not proc.LOCK.locked():
+            raise AssertionError("WINDOWS used without LOCK")
+    def get(self, *args):
+        self._check()
+        return super().get(*args)
+    def __setitem__(self, key, value):
+        self._check()
+        super().__setitem__(key, value)
+    def items(self):
+        self._check()
+        return super().items()
+    def pop(self, *args):
+        self._check()
+        return super().pop(*args)
+    def __iter__(self):
+        self._check()
+        return super().__iter__()
+
+proc.WINDOWS = Guarded()
+proc.add_sample("d1", 1.0, 0.0)
+proc.add_sample("d2", 2.0, 0.0)
+assert len(proc.flush_due(1e12)) == 2
+proc.add_sample("d3", 3.0, 0.0)
+assert len(proc.flush_all()) == 1
+print("ok")
+' "$processor" 2>&1 | tail -1)"
+check_eq "processor: WINDOWS is used only under LOCK" ok "$lock_result"
+
+# --stdin closes its windows on the same timer as the broker path: lines 0.5 s apart with
+# WINDOW_SECONDS=1 print more than one summary while the input is still open.
+one_line='{"topic":"/devices/d1/state","payload":"{\"spec\":{\"metrics\":[{\"metricId\":\"node_cpu_usage\",\"value\":100}]}}","retain":false,"ts":"t"}'
+mkfifo "$work/slow.fifo"
+(
+  for _ in $(seq 1 10); do
+    printf '%s\n' "$one_line"
+    sleep 0.5
+  done
+  sleep 5  # keep stdin open: the windows must close on the timer, not at EOF
+) > "$work/slow.fifo" &
+writer_pid=$!
+PYTHONPATH="$work/nopaho" WINDOW_SECONDS=1 timeout 25 "$PYTHON" "$processor" --stdin \
+  < "$work/slow.fifo" > "$work/slow.out" 2> "$work/slow.err" &
+proc_pid=$!
+early=0
+for _ in $(seq 1 60); do
+  early="$(grep -c 'toe/events/cpu-summary' "$work/slow.out" 2>/dev/null)"
+  [ "${early:-0}" -ge 2 ] && break
+  sleep 0.1
+done
+if kill -0 "$writer_pid" 2>/dev/null; then
+  ok "processor: --stdin still reads when the second window closes"
+else
+  fail "processor: --stdin: the input ended before the timer could be tested"
+fi
+if [ "${early:-0}" -ge 2 ]; then
+  ok "processor: --stdin prints more than one summary before the input ends"
+else
+  fail "processor: --stdin printed [$early] summar(ies) before the input ended"
+fi
+wait "$proc_pid"
+check_eq "processor: --stdin ends 0 when the input ends" 0 "$?"
+
+# SIGTERM ends --stdin too: one window open and stdin held open, exactly one summary, exit 0.
+mkfifo "$work/hold.fifo"
+( printf '%s\n' "$one_line"; sleep 40 ) > "$work/hold.fifo" &  # outlasts timeout 20
+writer_pid=$!
+# The single-quoted script runs in the child bash, where "$@" is the real argv. The FIFO reaches
+# the processor on fd 3: a non-interactive shell gives a background job /dev/null on fd 0.
+# shellcheck disable=SC2016
+PYTHONPATH="$work/nopaho" timeout 20 bash -c '
+  "$@" <&3 &
+  p=$!
+  sleep 0.8
+  kill -TERM "$p" 2>/dev/null || true
+  wait "$p"
+' _ "$PYTHON" "$processor" --stdin 3< "$work/hold.fifo" > "$work/hold.out" 2> "$work/hold.err"
+rc=$?
+kill "$writer_pid" 2>/dev/null || true
+wait "$writer_pid" 2>/dev/null || true
+check_eq "processor: --stdin exits 0 on SIGTERM" 0 "$rc"
+held="$(grep -c 'toe/events/cpu-summary' "$work/hold.out" 2>/dev/null)"
+check_eq "processor: --stdin flushes its one window on SIGTERM" 1 "${held:-0}"
+
 out="$(OUTPUT_STREAM=alerts "$PYTHON" "$processor" --stdin < "$work/state.jsonl" > /dev/null 2>&1)"
 check_eq "processor: OUTPUT_STREAM=alerts exits 2" 2 "$?"
 OUTPUT_STREAM=Bad_Name "$PYTHON" "$processor" --stdin < "$work/state.jsonl" > /dev/null 2>&1
@@ -654,7 +917,7 @@ export FAKE_PAHO_LOG="$work/paho-processor.log"
 : > "$FAKE_PAHO_LOG"
 export FAKE_PAHO_MESSAGE='{"spec":{"metrics":[{"metricId":"node_cpu_usage","value":250}]}}'
 export FAKE_PAHO_TOPIC='in/devices/d9/state'
-PYTHONPATH="$work/fake-v2" OUTPUT_STREAM=cpu-summary WINDOW_SECONDS=1 \
+PYTHONPATH="$work/fake-v2" OUTPUT_STREAM=cpu-summary WINDOW_SECONDS=1 timeout -k 5 20 \
   "$PYTHON" "$processor" > /dev/null 2> "$work/proc-broker.err" &
 proc_pid=$!
 wait_for "$FAKE_PAHO_LOG" "toe/events/cpu-summary"
@@ -667,6 +930,20 @@ for line in open(sys.argv[1], encoding="utf-8"):
         print(d["topic"])' "$FAKE_PAHO_LOG")"
 check_eq "processor: the broker path publishes toe/events/cpu-summary" "toe/events/cpu-summary" "$published"
 check_contains "processor: it subscribes to the local broker" "$FAKE_PAHO_LOG" '"event": "subscribe"'
+check_absent "processor: no subscribe before the connection" "$FAKE_PAHO_LOG" subscribe_no_conn
+
+# A window that the timer has not closed yet goes out on SIGTERM (WINDOW_SECONDS is far away).
+: > "$FAKE_PAHO_LOG"
+PYTHONPATH="$work/fake-v2" OUTPUT_STREAM=cpu-summary WINDOW_SECONDS=3600 timeout -k 5 20 \
+  "$PYTHON" "$processor" > /dev/null 2> "$work/proc-sigterm.err" &
+proc_pid=$!
+wait_for "$FAKE_PAHO_LOG" '"event": "subscribe"'
+kill -TERM "$proc_pid" 2>/dev/null || true
+wait "$proc_pid"
+rc=$?
+sigterm_published="$(grep -c '"event": "publish"' "$FAKE_PAHO_LOG" 2>/dev/null)"
+check_eq "processor: SIGTERM exits 0" 0 "$rc"
+check_eq "processor: SIGTERM flushes the open window once" 1 "$sigterm_published"
 export FAKE_PAHO_MESSAGE=
 export FAKE_PAHO_TOPIC=
 

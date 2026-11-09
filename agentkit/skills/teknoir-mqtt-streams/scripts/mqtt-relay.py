@@ -26,6 +26,7 @@ import argparse
 import base64
 import http.client
 import json
+import math
 import os
 import re
 import ssl
@@ -35,6 +36,7 @@ import urllib.parse
 
 MAX_TOPICS = 8
 MAX_TOPIC_LEN = 256
+MAX_EVENT = 1 << 20
 IDLE_TIMEOUT = 90.0
 BACKOFF_START = 1.0
 BACKOFF_MAX = 30.0
@@ -179,8 +181,12 @@ def read_key(path):
             key = handle.read().strip()
     except OSError as exc:
         raise Fatal(3, f"cannot read the bot key file {path}: {exc.strerror or exc}") from None
+    except UnicodeDecodeError:
+        raise Fatal(3, f"the bot key file {path} does not hold a single-line key") from None
     if not key:
         raise Fatal(3, f"the bot key file {path} is empty")
+    if any(not (0x21 <= ord(c) <= 0x7e) for c in key):
+        raise Fatal(3, f"the bot key file {path} does not hold a single-line key")
     return key
 
 
@@ -205,9 +211,12 @@ def retry_after_seconds(value):
     if not value:
         return None
     try:
-        return max(0, int(float(value)))
+        seconds = float(value)
     except ValueError:
         return None
+    if math.isnan(seconds):
+        return None
+    return min(max(seconds, BACKOFF_START), 300.0)
 
 
 def response_message(response):
@@ -252,7 +261,14 @@ def sse_open(api, namespace, topics, key_file, idle_timeout):
         "Authorization": "Bearer " + key,
         "User-Agent": "teknoir-mqtt-relay",
     }
-    connection.request("GET", path, headers=headers)
+    try:
+        connection.request("GET", path, headers=headers)
+    except OSError:
+        connection.close()
+        raise  # network and TLS failures (ssl.SSLCertVerificationError is also a ValueError): retried
+    except (ValueError, UnicodeError):
+        connection.close()
+        raise Fatal(3, "the bot key cannot be sent as an HTTP header") from None
     response = connection.getresponse()
     status = response.status
     if status in (401, 403):
@@ -283,17 +299,18 @@ def sse_events(response):
     """Yield (event, data) as tnctl parses Server-Sent Events."""
     event = ""
     data = []
+    size = 0
     while True:
-        raw = response.readline()  # raises OSError on a read timeout
+        raw = response.readline(MAX_EVENT + 2)  # raises OSError on a read timeout
         if not raw:
-            if data:
-                yield event or "message", "\n".join(data)
-            return
+            return  # an event cut off by the end of the stream is dropped, as tnctl does
+        if len(raw) > MAX_EVENT and not raw.endswith(b"\n"):
+            raise OSError("a stream line is larger than 1 MiB")
         line = raw.decode("utf-8", "replace").removesuffix("\n").removesuffix("\r")
         if line == "":
             if data:
                 yield event or "message", "\n".join(data)
-            event, data = "", []
+            event, data, size = "", [], 0
             continue
         if line.startswith(":"):
             continue  # keepalive
@@ -303,6 +320,9 @@ def sse_events(response):
             event = value
         elif field == "data":
             data.append(value)
+            size += len(value.encode("utf-8")) + 1
+            if size > MAX_EVENT:
+                raise OSError("a stream event is larger than 1 MiB")
 
 
 def payload_of(doc):

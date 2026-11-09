@@ -31,6 +31,9 @@ Only runs on a TeknoirBot's computer: TEKNOIRBOT_API must be set and the key fil
 The copy is as sensitive as the key itself and stays inside the bot's own computer:
 
   - never read it with kubectl get or describe and -o yaml, -o json or -o jsonpath;
+    nor with any other output format (-o go-template, -o template, -o
+    custom-columns), nor by listing the Secrets of apps with an output format,
+    nor with kubectl edit: list Secrets only with the default table or -o name;
   - never exec into a pod that mounts it;
   - never print its env or its files;
   - mount it read-only, only into the relay, and delete the Secret when the relay is
@@ -87,7 +90,11 @@ Mount it read-only into the relay only:
   spec:
     containers:
       - name: mqtt-relay
-        args: ["--sse", "--key-file", "/run/teknoirbot-app/key"]
+        args: ["--sse", "--key-file", "/run/teknoirbot-app/key", "--topic", "/devices/+/state/#"]
+        env:
+          - {name: TEKNOIRBOT_API, value: "$TEKNOIRBOT_API"}
+          - {name: TEKNOIRBOT_NAMESPACE, value: "${TEKNOIRBOT_NAMESPACE:-<teamspace>}"}
+          - {name: TEKNOIRBOT_NAME, value: "${TEKNOIRBOT_NAME:-<bot>}"}
         volumeMounts:
           - {name: bot-key, mountPath: /run/teknoirbot-app, readOnly: true}
     volumes:

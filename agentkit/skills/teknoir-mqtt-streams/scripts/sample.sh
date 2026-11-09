@@ -99,6 +99,9 @@ esac
 [ "$count" -le "$max_count" ] || die "--count is at most $max_count"
 [ "${#topics[@]}" -ge 1 ] || die "name at least one topic (see --help)"
 [ "${#topics[@]}" -le 8 ] || die "at most 8 topics"
+if [ "$summary" -eq 1 ] && ! command -v "$JQ" >/dev/null 2>&1; then
+  die "--summary needs jq ($JQ not found)"
+fi
 
 rc=0
 set +e
@@ -106,7 +109,12 @@ if [ "$summary" -eq 1 ]; then
   "$TNCTL" mqtt stream "${topics[@]}" --json --seconds "$seconds" --count "$count" \
     | "$JQ" -s -r 'group_by(.topic) | map({topic: .[0].topic, count: length})
                    | sort_by(-.count) | .[] | "\(.count)\t\(.topic)"'
-  rc=${PIPESTATUS[0]}
+  st=("${PIPESTATUS[@]}")
+  rc=${st[0]}
+  if [ "${st[1]}" -ne 0 ] && { [ "$rc" -eq 0 ] || [ "$rc" -eq 141 ]; }; then
+    echo "sample.sh: jq failed (exit ${st[1]})" >&2
+    rc=1
+  fi
 else
   "$TNCTL" mqtt stream "${topics[@]}" --json --seconds "$seconds" --count "$count"
   rc=$?
