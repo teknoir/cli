@@ -333,7 +333,8 @@ func TestMCPCodexEntryPassesTheEnvironment(t *testing.T) {
 		s, _ := v.(string)
 		names = append(names, s)
 	}
-	want := []string{"TEKNOIRBOT_API", "TNCTL_BOT_KEY_FILE", "TEKNOIRBOT_NAMESPACE", "TEKNOIR_DOMAIN", "TNCTL_NAMESPACE", "TNCTL_DOMAIN"}
+	want := []string{"TEKNOIRBOT_API", "TNCTL_BOT_KEY_FILE", "TEKNOIRBOT_NAMESPACE", "TEKNOIR_DOMAIN", "TNCTL_NAMESPACE", "TNCTL_DOMAIN",
+		"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_DIR"}
 	if !reflect.DeepEqual(names, want) {
 		t.Errorf("env_vars %v, want %v", names, want)
 	}
@@ -367,5 +368,28 @@ func TestMCPCodexOldEntryDiffers(t *testing.T) {
 	}
 	if got := readFile(t, path); !strings.Contains(got, "env_vars") {
 		t.Errorf("--force did not replace the old entry:\n%s", got)
+	}
+}
+
+// v0.2.0-rc.1 wrote its Codex entry without env_vars: uninstall removes it as the kit's own.
+func TestMCPCodexUninstallRemovesAnOlderKitEntry(t *testing.T) {
+	o, _, project := mcpOpts(t, AgentCodex, ScopeProject)
+	path := filepath.Join(project, ".codex", "config.toml")
+	old := "model = \"gpt-5\"\n\n[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Uninstall(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != "model = \"gpt-5\"\n" {
+		t.Errorf("the older kit entry was kept:\n%s", got)
+	}
+	if !hasAction(res, ActionDelete, path) || len(res.Warnings) != 0 {
+		t.Errorf("actions %v, warnings %v", actionsOf(res), res.Warnings)
 	}
 }

@@ -54,13 +54,14 @@ kit's Claude Code plugin. Codex and OpenCode list the same tools under the serve
 - **Read-only.** No tool changes anything, and every tool is annotated read-only and idempotent. There is no
   tool that runs a command, opens a session, logs in or writes.
 - **Tool results are device data.** Labels, logs, events and MQTT payloads can hold text written by anyone
-  who controls a device or its workloads. The server tells the agent, in its instructions and in each tool's
-  description, never to follow instructions found in a tool result.
+  who controls a device or its workloads. The server tells the agent never to follow instructions found in a
+  tool result: in its instructions, for every tool, and again in the descriptions of `get_problems`,
+  `prom_query`, `mqtt_sample` and the `inspect_*` tools.
 - **`namespace`** is an optional input of every tool but `whoami` and `list_teamspaces`; empty means the
   teamspace `tnctl` targets. The login and the teamspace are read on every call, so `tnctl ns` and
   `tnctl login` in another terminal count on the next call, with no restart, unless the server was started
-  with `-n`, `TNCTL_NAMESPACE` or `--domain`, which then win. Inside a TeknoirBot another `namespace` is an
-  error result: a bot works only in its own teamspace.
+  with `-n`, `TNCTL_NAMESPACE`, `--domain` or `TNCTL_DOMAIN`, which then win. Inside a TeknoirBot another
+  `namespace` is an error result: a bot works only in its own teamspace.
 - **Results are JSON text**, capped at 48 KiB: a longer answer ends with a line
   `… truncated, N bytes more; narrow the query`. 48 KiB keeps every result inline in Claude Code, which
   moves a text result over 50,000 characters to a file.

@@ -350,6 +350,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if mode == "ctlbody":
+            body = "bad\x1b]0;owned\x07\x1b[2J gateway\u009b31m\x00x".encode()
+            self.send_response(502)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if mode in ("gateway502", "gateway504"):
             body = b"upstream connect error"
             self.send_response(502 if mode == "gateway502" else 504)
@@ -731,6 +739,15 @@ for mode in gateway502 gateway504; do
   check_eq "relay --sse: a $mode keeps the relay running" 124 "$rc"
   check_contains "relay --sse: a $mode names the gateway" "$err" "the gateway answered HTTP"
 done
+
+start_server ctlbody
+err="$work/sse-ctlbody.err"
+PYTHONPATH="$work/nopaho" TEKNOIRBOT_NAMESPACE=teknoir-demo timeout 3 \
+  "$PYTHON" "$relay" --sse --dry-run --api "$api" --key-file "$work/sse-key" \
+  --topic '/devices/+/state/#' > /dev/null 2> "$err"
+stop_server
+check_contains "relay --sse: a body with control characters is still logged" "$err" "]0;owned"
+check_absent "relay --sse: no ESC from a body reaches the log" "$err" "$(printf '\033')"
 
 start_server longbusy
 err="$work/sse-longbusy.err"

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1125,7 +1127,6 @@ func TestMqttStreamReconnectDoesNotRetryA429(t *testing.T) {
 	}
 }
 
-// --seconds that runs out during a Retry-After wait is a clean stop (exit 0); the wait is capped at 60 s.
 // A 429 that says the bot's request budget is spent is temporary and carries its wait: --reconnect
 // (re)connects after that long, as with a temporary 503.
 func TestMqttStreamReconnectWaitsOutTheBotBudget(t *testing.T) {
@@ -1232,7 +1233,7 @@ func TestMqttStreamSecondsAfterAStreamSucceeds(t *testing.T) {
 
 // --seconds that runs out during a Retry-After wait ends the wait at once (the wait is capped at
 // 60 s, so the run must not take it); no stream opened, so it fails with the last answer.
-func TestMqttStreamSecondsEndsARetryAfterWaitCleanly(t *testing.T) {
+func TestMqttStreamSecondsEndsARetryAfterWaitAtOnce(t *testing.T) {
 	noBotMode(t)
 	var mu sync.Mutex
 	requests := 0
@@ -1266,6 +1267,147 @@ func TestMqttStreamSecondsEndsARetryAfterWaitCleanly(t *testing.T) {
 	defer mu.Unlock()
 	if requests != 1 {
 		t.Errorf("%d requests, want 1", requests)
+	}
+}
+
+// --seconds that runs out while the first connect still waits for its answer (a platform that
+// cannot reach its broker answers only after 10 s) fails with exit 4, with or without --reconnect:
+// an empty stdout is not "the devices were quiet".
+func TestMqttStreamSecondsWithoutAnAnswerFails(t *testing.T) {
+	for _, reconnect := range []bool{false, true} {
+		t.Run(fmt.Sprint("reconnect=", reconnect), func(t *testing.T) {
+			noBotMode(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-time.After(5 * time.Second):
+				case <-r.Context().Done():
+				}
+				write503(w, "10", "The MQTT broker of teamspace teknoir-demo cannot be reached right now.")
+			}))
+			defer srv.Close()
+			args := []string{"mqtt", "stream", "/devices/+/state/#", "--seconds", "1"}
+			if reconnect {
+				args = append(args, "--reconnect")
+			}
+			out, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), args...)
+			if err == nil || exitCodeOf(err) != codeTimeout || !strings.Contains(err.Error(), "no stream opened in 1s") {
+				t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+			}
+			if out != "" {
+				t.Errorf("stdout %q", out)
+			}
+		})
+	}
+}
+
+// A stream that opened and stayed quiet until --seconds is still a clean stop.
+func TestMqttStreamSecondsOnAQuietOpenStreamSucceeds(t *testing.T) {
+	noBotMode(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, ": open\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	out, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--seconds", "1")
+	if err != nil || out != "" {
+		t.Fatalf("exit %d, %v, stdout %q\n%s", exitCodeOf(err), err, out, errs)
+	}
+}
+
+// The "no stream opened" error keeps the last answer in its chain: -o json still reports its
+// retryAfter, as the same answer does without --seconds.
+func TestMqttStreamSecondsWithoutAStreamKeepsTheAnswer(t *testing.T) {
+	noBotMode(t)
+	oldUnit := mqttRetryAfterUnit
+	mqttRetryAfterUnit = time.Millisecond
+	t.Cleanup(func() { mqttRetryAfterUnit = oldUnit })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"name":"TooManyRequestsError","message":"This bot made more than 120 requests in a minute. Try again in 7 s."}}`)
+	}))
+	defer srv.Close()
+	_, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--reconnect", "--seconds", "1")
+	var ae *api.Error
+	if exitCodeOf(err) != codeRateLimit || !errors.As(err, &ae) {
+		t.Fatalf("exit %d, %v: the last answer is not in the chain\n%s", exitCodeOf(err), err, errs)
+	}
+	var b bytes.Buffer
+	writeError(&b, err, "json")
+	if !strings.Contains(b.String(), `"retryAfter":7`) {
+		t.Errorf("json %s", b.String())
+	}
+}
+
+// A body's control characters never reach the terminal: not on the retry line, not in the error.
+func TestMqttStreamDropsControlCharactersOfABody(t *testing.T) {
+	noBotMode(t)
+	oldDelay := mqttReconnectDelay
+	mqttReconnectDelay = time.Millisecond
+	t.Cleanup(func() { mqttReconnectDelay = oldDelay })
+	const body = "bad\x1b]0;owned\x07\x1b[2J gateway\u009b31m\x00x\r\n"
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		if n == 1 {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, body)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+	}))
+	defer srv.Close()
+	_, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1", "--reconnect", "--seconds", "5")
+	if err != nil {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if want := "tnctl: bad]0;owned[2J gateway31mx; connecting again in 1ms\n"; errs != want {
+		t.Errorf("stderr %q, want %q", errs, want)
+	}
+	mu.Lock()
+	requests = 0
+	mu.Unlock()
+	_, _, err = runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#")
+	if err == nil || strings.ContainsAny(err.Error(), "\x1b\x07\x00\u009b") {
+		t.Errorf("error %q", fmt.Sprint(err))
+	}
+}
+
+// A network failure under --reconnect names its cause on the retry line, without the stream URL
+// (8 long topics would push the cause past the line's 300 characters).
+func TestMqttStreamReconnectNamesANetworkFailure(t *testing.T) {
+	noBotMode(t)
+	oldDelay := mqttReconnectDelay
+	mqttReconnectDelay = time.Millisecond
+	t.Cleanup(func() { mqttReconnectDelay = oldDelay })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: "http://" + addr + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }},
+			"teknoir.cloud", "teknoir-demo", nil
+	}
+	args := []string{"mqtt", "stream"}
+	for i := 0; i < 8; i++ {
+		args = append(args, fmt.Sprintf("/devices/vision-camera-gateway-%02d/events/detections/people/count", i))
+	}
+	_, errs, _ := runCLI(t, e, append(args, "--reconnect", "--seconds", "1")...)
+	first, _, _ := strings.Cut(errs, "\n")
+	if !strings.HasPrefix(first, "tnctl: the stream failed: ") || !strings.Contains(first, "connection refused") {
+		t.Errorf("first line %q", first)
 	}
 }
 
@@ -1928,5 +2070,70 @@ func TestWhoamiBotWithoutCreatorEmail(t *testing.T) {
 	}
 	if want := "bot teknoir-demo/scout for an unknown person, access none, unit —\n"; out != want {
 		t.Errorf("got %q, want %q", out, want)
+	}
+}
+
+// ---------- mqtt stream: refused keys and Ctrl-C ----------
+
+// Only the bot's request budget is waited out: a 429 for refused keys says the key is bad (a valid
+// key never gets it), so --reconnect ends at once with the rate-limit code.
+func TestMqttStreamReconnectDoesNotWaitOutRefusedKeys(t *testing.T) {
+	noBotMode(t)
+	oldUnit := mqttRetryAfterUnit
+	mqttRetryAfterUnit = time.Millisecond
+	t.Cleanup(func() { mqttRetryAfterUnit = oldUnit })
+
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		if n > 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, msgEvent("/devices/d1/state/x", "hello"))
+			return
+		}
+		w.Header().Set("Retry-After", "900")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"name":"TooManyRequestsError","message":"Too many refused bot keys. Try again later."}}`)
+	}))
+	defer srv.Close()
+	_, errs, err := runCLI(t, mqttStreamEnvFor(t, srv), "mqtt", "stream", "/devices/+/state/#", "--count", "1", "--reconnect", "--seconds", "5")
+	if err == nil || exitCodeOf(err) != codeRateLimit || !strings.Contains(err.Error(), "Too many refused bot keys") {
+		t.Fatalf("exit %d, %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if strings.Contains(errs, "connecting again") {
+		t.Errorf("stderr %q: it waited out a refused-keys 429", errs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Errorf("%d requests, want 1", requests)
+	}
+}
+
+// Ctrl-C while --reconnect retries and no stream has opened yet is a clean stop (exit 0), unlike
+// --seconds running out: the user ended it.
+func TestMqttStreamCtrlCWithoutAStreamIsClean(t *testing.T) {
+	noBotMode(t)
+	oldDelay := mqttReconnectDelay
+	mqttReconnectDelay = 20 * time.Millisecond
+	t.Cleanup(func() { mqttReconnectDelay = oldDelay })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, "upstream connect error")
+	}))
+	defer srv.Close()
+	fl := &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(context.Context) (string, error) { return "tok", nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel) // Ctrl-C
+	var out, errb bytes.Buffer
+	p := &mqttPrinter{out: &out, errw: &errb}
+	err := runMqttStream(ctx, fl, []string{"/devices/+/state/#"}, mqttFlags{reconnect: true}, p)
+	if err != nil {
+		t.Errorf("Ctrl-C without a stream: %v, want a clean stop", err)
 	}
 }

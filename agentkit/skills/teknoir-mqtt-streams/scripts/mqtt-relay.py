@@ -246,6 +246,8 @@ def response_message(response):
                 text = value
                 break
     # One log line per answer, however the body was shaped: the relay's log is the operator's only clue.
+    # No control character (ESC, BEL, NUL, C1) reaches the log: a body never drives a terminal.
+    text = "".join(ch if ch.isprintable() else " " for ch in text)
     return " ".join(text.split())[:300] or "(no message)"
 
 

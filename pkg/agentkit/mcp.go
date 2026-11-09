@@ -385,11 +385,14 @@ func jsonEqual(a, b []byte) bool {
 
 // codexEnvVars are the variables the kit's Codex entry passes to `tnctl mcp`. Codex starts a stdio MCP
 // server with a cleared environment but for a few defaults, so without them `tnctl mcp` misses bot mode
-// (TEKNOIRBOT_API, TNCTL_BOT_KEY_FILE, TEKNOIRBOT_NAMESPACE and TEKNOIR_DOMAIN, cmd/botmode.go) and the
-// teamspace and domain a person targets (TNCTL_NAMESPACE, and TNCTL_DOMAIN through viper's TNCTL prefix).
+// (TEKNOIRBOT_API, TNCTL_BOT_KEY_FILE, TEKNOIRBOT_NAMESPACE and TEKNOIR_DOMAIN, cmd/botmode.go), the
+// teamspace and domain a person targets (TNCTL_NAMESPACE, and TNCTL_DOMAIN through viper's TNCTL prefix),
+// and what Go's net/http and crypto/x509 read to reach the platform: the proxy variables and a CA
+// directory (Codex passes SSL_CERT_FILE on its own, not SSL_CERT_DIR). Codex passes only the ones set.
 var codexEnvVars = []string{
 	"TEKNOIRBOT_API", "TNCTL_BOT_KEY_FILE", "TEKNOIRBOT_NAMESPACE", "TEKNOIR_DOMAIN",
 	"TNCTL_NAMESPACE", "TNCTL_DOMAIN",
+	"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_DIR",
 }
 
 // tomlEntryBlock is the codex config entry of the MCP server, with the environment variables of
@@ -508,7 +511,7 @@ func (p *op) removeCodexMCP() error {
 	case !present:
 		p.r.act(ActionSkip, path, agent, "no mcp_servers."+mcpServerName)
 		return nil
-	case !isTable || !tomlServerIsOurs(existing):
+	case !isTable || !tomlServerIsKits(existing):
 		p.r.act(ActionSkip, path, agent, "a different mcp_servers."+mcpServerName+": kept it")
 		p.r.warn("%s has a [mcp_servers.%s] that is not the kit's; kept it", path, mcpServerName)
 		return nil
@@ -601,6 +604,28 @@ func tomlServerIsOurs(srv map[string]any) bool {
 		return false
 	}
 	return reflect.DeepEqual(srv, kit)
+}
+
+// tomlLegacyEntries are the entries an earlier tnctl wrote: v0.2.0-rc.1's had no env_vars. Install
+// still reports one as differing (--force replaces it); uninstall removes it as the kit's own, and
+// list says what it is.
+var tomlLegacyEntries = []string{"[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"}
+
+// tomlServerIsKits reports whether the table is the kit's entry of this tnctl or of an earlier one.
+func tomlServerIsKits(srv map[string]any) bool {
+	if tomlServerIsOurs(srv) {
+		return true
+	}
+	for _, block := range tomlLegacyEntries {
+		m, err := tomlParse(block)
+		if err != nil {
+			continue
+		}
+		if old, ok := tomlServer(m); ok && reflect.DeepEqual(srv, old) {
+			return true
+		}
+	}
+	return false
 }
 
 // tomlKitEntry is the kit's own table, parsed, for the edit invariant.

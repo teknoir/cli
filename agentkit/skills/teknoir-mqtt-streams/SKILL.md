@@ -73,10 +73,10 @@ tnctl mqtt stream /devices/+/state/# /devices/+/events/alerts --seconds 60 --rec
   not UTF-8 arrives as `payloadBase64`.
 - Without `--json` each message is one line, `<topic> <payload>`, and a binary payload shows as
   `<base64:N bytes>`.
-- `--count N` and `--seconds S` stop cleanly (exit 0). Dropped messages are reported on stderr,
-  with why: `rate` (the platform forwards at most 200 messages per second per stream), `size`
-  (a message over 256 KiB) or `slow` (the reader did not keep up). A message over 1 MiB never
-  arrives: the broker drops it, and no dropped report counts it.
+- `--count N` and `--seconds S` stop cleanly (exit 0) once a stream opened. Dropped messages are
+  reported on stderr, with why: `rate` (the platform forwards at most 200 messages per second per
+  stream), `size` (a message over 256 KiB) or `slow` (the reader did not keep up). A message over
+  1 MiB never arrives: the broker drops it, and no dropped report counts it.
 - `--reconnect` connects again when the stream ends, the network fails, or the gateway answers
   `502`, `503` or `504` while the portal is being replaced (1 s doubling to 30 s; after a
   connection that delivered messages the wait starts at 1 s again), and waits out a `503` that
@@ -86,8 +86,10 @@ tnctl mqtt stream /devices/+/state/# /devices/+/events/alerts --seconds 60 --rec
   refused request (a bad topic, no access, a device that is not there: `400`, `403`, `404`), a
   `429` that says too many live streams are open, `live MQTT is not configured`, a missing key, or
   an error the platform reported on the stream (`access_lost`, `broker_closed`). If no stream
-  opened before `--seconds` ends, it exits with the last answer's code. Run a long stream under a
-  supervisor (Kubernetes, or a shell loop) so that an error ends and restarts the whole pipeline.
+  opened before `--seconds` ends, with or without `--reconnect`, it exits with the last answer's
+  code, or 4 when no answer came (a platform that cannot reach its broker answers after 10 s): an
+  empty output is then never "the devices were quiet". Run a long stream under a supervisor
+  (Kubernetes, or a shell loop) so that an error ends and restarts the whole pipeline.
   The platform ends every stream cleanly after 60 minutes and when the portal restarts, so a
   long-running reader always uses `--reconnect` or the relay.
 - Four streams at once per caller (per bot for a bot). `ts` is when the platform received the
@@ -99,10 +101,11 @@ tnctl mqtt stream /devices/+/state/# /devices/+/events/alerts --seconds 60 --rec
   outside what you may see. Any other 404 from `tnctl mqtt stream` means this platform has no
   stream route yet: tell the person (a bot has no other read path).
 - Exit 9 (429) on start: read tnctl's message. If it says to try again in N s, the bot made too
-  many requests in a minute: wait that long and try once more. Otherwise you already hold 4
-  streams: stop a pipeline you started for this task; before you stop or delete a relay
-  Deployment, ask the person which one may go. Never retry in a loop. A relay Deployment refused
-  this way keeps running and logs `the platform asked the stream to wait (HTTP 429)`.
+  many requests in a minute: wait that long and try once more. If it says `Too many refused bot
+  keys`, the bot's key is not accepted: tell the person (the bot needs a new key). Otherwise you
+  already hold 4 streams: stop a pipeline you started for this task; before you stop or delete a
+  relay Deployment, ask the person which one may go. Never retry in a loop. A relay Deployment
+  refused this way keeps running and logs `the platform asked the stream to wait (HTTP 429)`.
 - Exit 1 with `live MQTT is not configured`: the platform cannot stream this teamspace's MQTT.
   Tell the person; there is nothing to retry.
 

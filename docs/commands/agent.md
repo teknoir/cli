@@ -52,9 +52,11 @@ With no `--agent` every agent is installed for, in the user scope.
   file, merging into what is there: every other server and key survives. A `teknoir` entry that differs is kept and
   warned about unless `--force` replaces it. Codex starts an MCP server with a cleared environment, so the
   kit's Codex entry names the variables `tnctl` reads in `env_vars` (bot mode's `TEKNOIRBOT_API`,
-  `TNCTL_BOT_KEY_FILE`, `TEKNOIRBOT_NAMESPACE` and `TEKNOIR_DOMAIN`, and `TNCTL_NAMESPACE` and
-  `TNCTL_DOMAIN`); an install from an older `tnctl` has no `env_vars` line, so `tnctl agent install --mcp
-  --force` updates it.
+  `TNCTL_BOT_KEY_FILE`, `TEKNOIRBOT_NAMESPACE` and `TEKNOIR_DOMAIN`, `TNCTL_NAMESPACE` and
+  `TNCTL_DOMAIN`, and the proxy variables `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` in either case and
+  `SSL_CERT_DIR`); an install from an older `tnctl` has no `env_vars` line, so
+  `tnctl agent install --agent codex --mcp --force` updates it (`--force` also overwrites the kit files you
+  changed).
 - `--hooks` installs the guard hook for Claude Code and adds a `PreToolUse` entry for `Bash` and the
   `teknoir` MCP tools (`mcp__teknoir__*`, or `mcp__plugin_teknoir_teknoir__*` when the server comes from
   the kit's plugin) to `~/.claude/settings.json` (project: `.claude/settings.json`), keeping the other
@@ -132,7 +134,8 @@ tnctl agent uninstall --project --mcp --agents-md
 
 Deletes exactly the files the manifests record, while they still match (a file you changed is kept and
 reported), removes the skill directories that become empty and the manifests. With `--mcp` it removes the
-`teknoir` MCP entry from the config files, with `--hooks` the guard and its `PreToolUse` entry, with
+`teknoir` MCP entry from the config files (also the entry of an older tnctl: v0.2.0-rc.1 wrote it without
+`env_vars`), with `--hooks` the guard and its `PreToolUse` entry, with
 `--agents-md` the section from `./AGENTS.md`. A managed install always holds the guard, so it goes with or
 without `--hooks`.
 

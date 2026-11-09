@@ -3,6 +3,7 @@ package agentkit
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -204,5 +205,27 @@ func TestListOutdatedAndExtra(t *testing.T) {
 	}
 	if len(r.Changed) != 1 || r.Changed[0] != skillRel {
 		t.Errorf("changed %v", r.Changed)
+	}
+}
+
+// list says why an older tnctl's Codex entry is not registered, and how to update it.
+func TestListCodexOlderKitEntry(t *testing.T) {
+	o, _, project := testOpts(t)
+	o.Agents = []Agent{AgentCodex}
+	o.Scope = ScopeProject
+	o.MCP = true
+	path := filepath.Join(project, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := List(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.MCP) != 1 || res.MCP[0].Registered || !strings.Contains(res.MCP[0].Note, "tnctl agent install --mcp --force") {
+		t.Errorf("mcp %+v", res.MCP)
 	}
 }

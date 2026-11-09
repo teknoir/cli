@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -60,13 +62,14 @@ Each message is one line: "<topic> <payload>"; with --json, each message's data 
 A message that is not text shows as <base64:N bytes>. When the platform had to drop messages it
 says so on stderr; when it reports an error the command prints it and exits non-zero.
 
---count stops after N messages and --seconds after S seconds (exit 0); Ctrl-C stops cleanly as
-well. --reconnect connects again after the stream ends, the network fails, or the gateway answers
-502, 503 or 504 while the portal restarts, waiting 1 s and doubling to 30 s, and waits out a 503
-with Retry-After for that long (at most 60 s), and a 429 that says the bot's request budget is
-spent; it does not reconnect after an error the platform reports, a refused request (400, 401,
-403, 404, a 429 about too many live streams, 500) or "live MQTT is not configured". If no stream
-opened before --seconds ends, it exits with the last answer's code.`,
+--count stops after N messages and --seconds after S seconds (exit 0 once a stream opened); Ctrl-C
+stops cleanly as well. --reconnect connects again after the stream ends, the network fails, or the
+gateway answers 502, 503 or 504 while the portal restarts, waiting 1 s and doubling to 30 s, and
+waits out a 503 with Retry-After for that long (at most 60 s), and a 429 that says the bot's request
+budget (more than 120 requests in a minute) is spent; it does not reconnect after an error the
+platform reports, a refused request (400, 401, 403, 404, a 429 about too many live streams or refused
+bot keys, 500) or "live MQTT is not configured". If no stream opened before --seconds ends, it exits
+with the last answer's code, or 4 (timeout) when no answer came.`,
 		Example: `  tnctl mqtt stream /devices/+/state/#
   tnctl mqtt stream /devices/vision-01/events/# --count 5 --json
   tnctl mqtt stream /devices/+/state/# --seconds 60 --reconnect`,
@@ -100,7 +103,7 @@ opened before --seconds ends, it exits with the last answer's code.`,
 	c.Flags().IntVar(&f.count, "count", 0, "stop after this many messages (0: never)")
 	c.Flags().IntVar(&f.seconds, "seconds", 0, "stop after this many seconds (0: never)")
 	c.Flags().BoolVar(&f.json, "json", false, "print each message's data as one JSON line")
-	c.Flags().BoolVar(&f.reconnect, "reconnect", false, "connect again when the stream ends, the network fails, the portal restarts (502, 503, 504) or a bot's request budget says wait (429); a --seconds run that never connected then fails")
+	c.Flags().BoolVar(&f.reconnect, "reconnect", false, "connect again when the stream ends, the network fails, the portal restarts (502, 503, 504) or a bot's request budget (more than 120 requests in a minute) says wait (429); a --seconds run that never connected then fails")
 	return c
 }
 
@@ -172,12 +175,13 @@ func streamEndedError(e *api.StreamError) error {
 // runMqttStream follows the topics until --count, --seconds or Ctrl-C stops it. With --reconnect it
 // connects again after the stream ended, the network failed, or the gateway answered 502, 503 or 504
 // while the portal's pod is being replaced: never after a refused request (400, 401, 403, 404, 500),
-// a 429 about too many live streams, an error event, or a 503 that says live MQTT is not configured.
-// A 503 or a 429 that the platform marks as temporary (Retry-After) waits that long instead of the
-// backoff. Without --reconnect only a clean end of the stream, --count or --seconds ends the command
-// with 0; a network failure is an error. --seconds that runs out before any stream opened is an
-// error too: its exit code and answer are the last failed round's, since no messages is otherwise
-// indistinguishable from "the stream was up and quiet".
+// a 429 about too many live streams or refused bot keys, an error event, or a 503 that says live MQTT
+// is not configured. A 503 that the platform marks as temporary, or a 429 that says the bot's request
+// budget is spent (Retry-After), waits that long instead of the backoff. Without --reconnect only a
+// clean end of the stream, --count or --seconds after a stream opened ends the command with 0; a
+// network failure is an error. --seconds that runs out before any stream opened is an error too: its
+// exit code and answer are the last failed round's (a timeout when the platform had not answered at
+// all), since no messages is otherwise indistinguishable from "the stream was up and quiet".
 func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFlags, p *mqttPrinter) error {
 	// The key is read once before the loop: a missing key answers at once, with or without
 	// --reconnect, and no request is sent.
@@ -190,10 +194,15 @@ func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFl
 	// stop ends a run its context ended: --seconds without a stream in the window is a failure,
 	// Ctrl-C is a clean stop.
 	stop := func() error {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) && !opened && lastErr != nil {
-			return newErr(exitCodeOf(lastErr), "no stream opened in %ds; last answer: %v", f.seconds, lastErr)
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) || opened {
+			return nil // Ctrl-C, or --seconds after a stream opened
 		}
-		return nil
+		if lastErr != nil {
+			return newErr(exitCodeOf(lastErr), "no stream opened in %ds; last answer: %w", f.seconds, lastErr)
+		}
+		// The first connect still waited for its answer: a platform that cannot reach its broker
+		// answers only after its 10 s connect timeout.
+		return newErr(codeTimeout, "no stream opened in %ds: the platform did not answer in time (its MQTT broker may be unreachable)", f.seconds)
 	}
 	for {
 		before := p.events
@@ -244,6 +253,15 @@ func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFl
 		var ae *api.Error
 		if errors.As(err, &ae) {
 			msg = retryReason(ae)
+		} else if err != nil {
+			// The cause, without the stream URL: it repeats every topic and would push the cause
+			// past the 300 characters of the line.
+			cause := err
+			var ue *url.Error
+			if errors.As(err, &ue) {
+				cause = ue.Err
+			}
+			msg = "the stream failed: " + retryReason(&api.Error{Message: cause.Error()})
 		}
 		_, _ = fmt.Fprintf(p.errw, "tnctl: %s; connecting again in %s\n", msg, delay)
 		if err := realSleep(ctx, delay); err != nil {
@@ -259,7 +277,18 @@ func runMqttStream(ctx context.Context, fl *api.Fleet, topics []string, f mqttFl
 // retryReason is the answer's message for the "connecting again" line: one line (a gateway's text
 // body may have several), at most 300 characters, or "HTTP <status>" when it has none.
 func retryReason(ae *api.Error) string {
-	msg := strings.Join(strings.Fields(ae.Message), " ")
+	// Whitespace becomes a space and other control characters (ESC, BEL, NUL, C1 such as U+009B)
+	// are dropped: a body never drives the terminal.
+	msg := strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, ae.Message)
+	msg = strings.Join(strings.Fields(msg), " ")
 	if msg == "" {
 		return fmt.Sprintf("HTTP %d", ae.Status)
 	}
@@ -285,7 +314,7 @@ func retryAfterWait(ae *api.Error) time.Duration {
 // no reconnect cures: its error is returned). retry says --reconnect may connect again; err then is
 // the network failure, the gateway's 502/503/504, or nil for a clean end of the stream. opened says
 // the platform returned a subscription (the round got a stream). wait is a pause the platform asked
-// for (a 503 or a 429 with Retry-After, 0: use the backoff).
+// for (a temporary 503, or a 429 that says the bot's request budget is spent; 0: use the backoff).
 func runMqttStreamOnce(ctx context.Context, fl *api.Fleet, topics []string, f mqttFlags, p *mqttPrinter) (done, retry, opened bool, wait time.Duration, err error) {
 	sub, err := fl.MqttStream(ctx, topics)
 	if err != nil {
@@ -302,10 +331,11 @@ func runMqttStreamOnce(ctx context.Context, fl *api.Fleet, topics []string, f mq
 				return false, true, false, retryAfterWait(ae), classify(err)
 			}
 			if ae.Status == http.StatusTooManyRequests && f.reconnect && ae.RetryAfter > 0 &&
-				!strings.Contains(ae.Message, "live MQTT streams open") {
+				strings.Contains(ae.Message, "requests in a minute") {
 				// A bot's request budget (more than 120 requests in a minute) is temporary and
 				// says how long: --reconnect waits it out like a temporary 503. Too many live
-				// streams open is not: only closing one helps.
+				// streams open is not (only closing one helps), and neither is "Too many refused
+				// bot keys" (a valid key never gets it: the key is bad).
 				return false, true, false, retryAfterWait(ae), classify(err)
 			}
 			switch ae.Status {

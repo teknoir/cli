@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/teknoir/cli/pkg/config"
 )
@@ -311,8 +312,19 @@ func stripQuery(u string) string {
 }
 
 // parseErrorBody extracts (code, message) from the error shapes of the Backstage
-// backend: {"error":{"name","message"}}, or the fleet access shape {"code","message"}.
+// backend: {"error":{"name","message"}}, or the fleet access shape {"code","message"}. The message
+// keeps no control characters but newline and tab: tnctl prints it on a terminal.
 func parseErrorBody(body []byte) (code, message string) {
+	code, message = parseErrorBodyRaw(body)
+	return code, strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, message)
+}
+
+func parseErrorBodyRaw(body []byte) (code, message string) {
 	var v struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
