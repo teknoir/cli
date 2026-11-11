@@ -120,7 +120,7 @@ A refusal comes back as a tool error with the platform's message; match it by me
 
 | The error says | What it means | What to do |
 |---|---|---|
-| `Nobody can open this computer while its agent acts as its creator: it has no recorded creator.`, or another sentence on who may open the bot's computer; or `Your account has no email address, so the chat cannot record who you are.` | You may not chat with this bot: you may chat when you may open its computer. `council_info` gives the same sentence as `reason`. | Give the person the reason and stop. |
+| `Nobody can open this computer while its council acts as its creator: it has no recorded creator.`, or another sentence on who may open the bot's computer; or `Your account has no email address, so the chat cannot record who you are.` | You may not chat with this bot: you may chat when you may open its computer. `council_info` gives the same sentence as `reason`. | Give the person the reason and stop. |
 | `Resume the bot to chat.` | The bot is suspended. | A person resumes the bot. |
 | `The bot is starting.` or `The bot is being removed.` | The bot cannot run a turn yet. | Wait, then call `council_info` again. |
 | `This chat already has a turn in progress.` | A turn of that conversation still runs. | Call `council_result` for it first. |
