@@ -6,6 +6,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/teknoir/cli/pkg/council/internal/textsafe"
 )
 
 // ellipsis marks text the package cut.
@@ -15,10 +17,10 @@ const ellipsis = "…"
 // its terminator is not read as a two-character escape.
 var ansiPattern = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]`)
 
-// The secrets that must never leave the package.
+// The secrets that must never leave the package. The bot's own key is the pattern of
+// internal/textsafe, which the council's text stream shares: a key cut in two would pass the
+// merger's redaction otherwise.
 var (
-	// botKeyPattern is a TeknoirBot key: tbk1.<id>.<id>.<43 characters>.
-	botKeyPattern = regexp.MustCompile(`tbk1\.[a-z0-9-]{1,63}\.[a-z0-9-]{1,63}\.[A-Za-z0-9_-]{43}`)
 	// anthropicKeyPattern is an Anthropic API key.
 	anthropicKeyPattern = regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{10,}`)
 )
@@ -43,7 +45,7 @@ func sanitize(s string) string {
 		}
 		s = b.String()
 	}
-	s = botKeyPattern.ReplaceAllString(s, redacted)
+	s = textsafe.RedactBotKeys(s)
 	return anthropicKeyPattern.ReplaceAllString(s, redacted)
 }
 

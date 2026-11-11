@@ -470,6 +470,62 @@ func TestStreamRetriesOn429(t *testing.T) {
 	}
 }
 
+// TestStreamFailedStreamCostsTokens: a stream that fails after its first event was still charged by
+// the proxy, so what message_start said was read travels with the error.
+func TestStreamFailedStreamCostsTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// More than is sent: the body ends before the connection is done, which is a dropped
+		// connection to the client.
+		w.Header().Set("Content-Length", "100000")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for _, ev := range []string{
+			`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1000,"output_tokens":0}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
+		} {
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType(ev), ev)
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(server.Close)
+	c := newClient(t, server.URL, keyFile(t, "k"))
+
+	var got []string
+	msg, u, err := c.Stream(context.Background(), simple(), func(s string) { got = append(got, s) })
+	if err == nil {
+		t.Fatal("Stream reported no error for a dropped connection")
+	}
+	if msg != nil {
+		t.Errorf("message %+v, want none", msg)
+	}
+	if u.Input != 1000 || u.Calls != 1 {
+		t.Errorf("usage %+v, want input 1000 and calls 1", u)
+	}
+	if len(got) != 1 || got[0] != "partial" {
+		t.Errorf("text deltas %q", got)
+	}
+}
+
+// TestStreamNoEventNoUsage: a stream that fails before any event cost nothing it can name.
+func TestStreamNoEventNoUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", "100000")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	c := newClient(t, server.URL, keyFile(t, "k"))
+	if _, u, err := c.Stream(context.Background(), simple(), nil); err == nil {
+		t.Fatal("Stream reported no error for a dropped connection")
+	} else if u != (Usage{}) {
+		t.Errorf("usage %+v, want none", u)
+	}
+}
+
 func TestNewBaseRules(t *testing.T) {
 	kf := keyFile(t, "k")
 	for _, base := range []string{"http://example.com", "ftp://example.com", "example.com", ""} {

@@ -235,6 +235,29 @@ func TestCodeAsked(t *testing.T) {
 	}
 }
 
+func TestChangeAsked(t *testing.T) {
+	for _, tc := range []struct {
+		prompt string
+		want   bool
+	}{
+		{"why is the app on r2 slow", false},
+		{"make a dashboard", true},
+		{"what makes r2 slow", false},
+		{"update the image", true},
+		{"which robots are offline?", false},
+		{"deploy it to the fleet", true},
+		{"set the edge limit to 0", true},
+	} {
+		if got := changeAsked(tc.prompt); got != tc.want {
+			t.Errorf("changeAsked(%q) = %v, want %v", tc.prompt, got, tc.want)
+		}
+	}
+	// codeAsked keeps its "app": the same prompt is code for a route that read nothing.
+	if !codeAsked("why is the app on r2 slow") {
+		t.Error("codeAsked lost its app")
+	}
+}
+
 func TestParseConveneFleetNeedsALevel(t *testing.T) {
 	fleet := json.RawMessage(`{"tasks":[{"member":"fleet","task":"look","why":""}]}`)
 	for _, level := range []string{"", "none", "admin", "Read"} {

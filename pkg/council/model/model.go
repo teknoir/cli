@@ -196,16 +196,27 @@ func (c *Client) Stream(ctx context.Context, req Request, onText func(string)) (
 	defer func() { _ = stream.Close() }()
 
 	msg := anthropic.Message{}
+	// A stream that fails after its first event was still charged by the proxy: what
+	// message_start said it read is reported with the error, so the turn's budget sees it.
+	events := 0
 	for stream.Next() {
 		event := stream.Current()
+		events++
 		if onText != nil && event.Type == "content_block_delta" && event.Delta.Type == "text_delta" {
 			onText(event.Delta.Text)
 		}
 		if err := msg.Accumulate(event); err != nil {
-			return nil, Usage{}, fmt.Errorf("council model: unexpected stream event: %w", err)
+			err = fmt.Errorf("council model: unexpected stream event: %w", err)
+			if events > 0 {
+				return nil, usage(&msg), err
+			}
+			return nil, Usage{}, err
 		}
 	}
 	if err := stream.Err(); err != nil {
+		if events > 0 {
+			return nil, usage(&msg), err
+		}
 		return nil, Usage{}, err
 	}
 	return &msg, usage(&msg), nil

@@ -45,7 +45,9 @@ the turn's own outcome, whose resends get a failure window of their own, still b
 A turn ends `done` with its answer, or `failed` with a code: `bad_turn` (a kind or a member the bot does not
 know), `turn_closed`, `events_lost`, `events_rejected` (the platform dropped the turn or refused its
 progress), `bot_restarting`, `platform_unavailable`, `no_access` (a Fleet turn at access level `none`),
-`model_error`, `model_refused` (the model declined).
+`model_error` (the model could not be reached), `model_refused` (the model declined),
+`model_unavailable` (the platform has no model for the bot), `model_budget` (the bot used its tokens for
+today), `model_busy` (too many model calls at once), `model_rejected` (the platform refused the request).
 
 ## Flags
 
@@ -108,6 +110,16 @@ delegating to one member) — and, for an ask, a `mode`:
 | `council` | The Captain always convenes. When it answers without a convene call, the daemon builds the plan itself: Fleet with the person's question, and the Coder too when the question asks for code. |
 | `auto` (the default, and anything empty or unknown) | The Captain decides. The turn starts on the quick budget and is upgraded to the council budget when it convenes. |
 | a member turn (`member` `fleet` or `coder`) | That member alone, with the thread's earlier question and answer pairs in its prompt for Fleet. No Captain, no Critic. |
+
+The Coder is convened only for what the person asked. Before the Captain has read anything, its own
+`convene_council` decides; once it has read platform data — a log, a configuration, an MQTT sample, any tool
+result, which devices and apps wrote; in this turn or in the thread's earlier answers — a Coder task is
+accepted only when the person's own prompt asks for code or a change, and the council-mode plan the daemon
+builds itself convenes it only for a prompt that asks for a change. Otherwise the convene is refused with a
+tool result that says so, and the Captain answers from what it found or convenes Fleet alone. The Coder's
+prompt puts the person's request first, whole when it fits; after the Captain has read platform data the prompt holds none
+of the Captain's notes — the data asked, not the person — only the sentence that it reads what it needs
+itself, and otherwise the notes follow the request as data.
 
 A council turn runs the plan's tasks at once — Fleet's and the Coder's work in parallel — and then the
 Critic reads their reports and tool digests (it is skipped when there are no reports). The Captain writes the
@@ -172,6 +184,7 @@ Its limits and what a task that hits one reports:
 | A non-zero exit | `exit` |
 | A signal the council did not send | `crash` |
 | A prompt over 32 KiB, a bad turn or thread id | `bad_task` (nothing is started) |
+| Less than 2 GiB free under the work root before it starts, or less than 512 MiB while it runs | `disk` (nothing is started; a run that hits it is stopped as a cancel stops it) |
 
 The processes a task left running are killed when it ends, so a dev server or a watcher does not outlive it.
 The report carries the last text of the answer, the changed files (at most 200 lines), the session, the steps,

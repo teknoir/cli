@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -35,6 +36,13 @@ const (
 	DefaultSkillsDir  = "/etc/teknoirbot/kit/skills"
 	DefaultTimeout    = 10 * time.Minute
 	DefaultKillGrace  = 10 * time.Second
+	// DefaultMinFreeBytes is the least free space under the work root a task may start with, and
+	// DefaultStopFreeBytes the least it may go on with: the work root is on the bot's own disk, and
+	// a full disk breaks everything else the bot does.
+	DefaultMinFreeBytes  = 2 << 30
+	DefaultStopFreeBytes = 512 << 20
+	// DefaultDiskCheckEvery is how often the free space is read while a task runs.
+	DefaultDiskCheckEvery = 5 * time.Second
 	// DefaultEffort is what an effort outside "low" and "medium" becomes: the coder is never given
 	// more than high.
 	DefaultEffort = "high"
@@ -109,6 +117,17 @@ const (
 	ReasonExit = "exit"
 	// ReasonCrash is a process killed by a signal the runner did not send.
 	ReasonCrash = "crash"
+	// ReasonDisk is a disk with too little free space: nothing was started, or the run was
+	// stopped before the disk filled.
+	ReasonDisk = "disk"
+)
+
+// The Coder's disk messages.
+const (
+	// msgDiskBefore names the least free space, the root and what to do about it.
+	msgDiskBefore = "The bot's disk has less than %s free: free space under %s before asking for this."
+	// msgDiskStopped is what a run stopped by the disk reports.
+	msgDiskStopped = "Stopped: the bot's disk is almost full."
 )
 
 // Config is fixed per daemon. Zero fields take the defaults.
@@ -129,6 +148,17 @@ type Config struct {
 	Timeout time.Duration
 	// KillGrace is how long SIGTERM is given before SIGKILL.
 	KillGrace time.Duration
+	// Statfs reports the free bytes of the volume at path. Nil means the platform's own; a
+	// platform without one reports an error, and the disk checks are skipped.
+	Statfs func(path string) (free uint64, err error)
+	// MinFreeBytes is the least free space under WorkRoot a task may start with: below it no
+	// process starts and the report is disk.
+	MinFreeBytes uint64
+	// StopFreeBytes is the least free space a running task may go on with: below it the process
+	// group is stopped and the report is disk.
+	StopFreeBytes uint64
+	// DiskCheckEvery is how often a running task's free space is read.
+	DiskCheckEvery time.Duration
 	// Environ is where the pass-through variables are read from; nil means os.Environ.
 	Environ func() []string
 	// Logf is the operator log: ids, counts, exit codes and reasons only.
@@ -245,6 +275,9 @@ type Runner struct {
 	cfg Config
 	// sem is the lock: a buffered channel, so waiting for it can select on the turn's context.
 	sem chan struct{}
+	// mu guards the once-only log of a statfs that fails.
+	mu            sync.Mutex
+	diskErrLogged bool
 }
 
 // New returns the coder runner of a daemon. Zero Config fields take the defaults.
@@ -272,6 +305,18 @@ func New(cfg Config) *Runner {
 	}
 	if cfg.KillGrace <= 0 {
 		cfg.KillGrace = DefaultKillGrace
+	}
+	if cfg.Statfs == nil {
+		cfg.Statfs = defaultStatfs
+	}
+	if cfg.MinFreeBytes == 0 {
+		cfg.MinFreeBytes = DefaultMinFreeBytes
+	}
+	if cfg.StopFreeBytes == 0 {
+		cfg.StopFreeBytes = DefaultStopFreeBytes
+	}
+	if cfg.DiskCheckEvery <= 0 {
+		cfg.DiskCheckEvery = DefaultDiskCheckEvery
 	}
 	if cfg.Environ == nil {
 		cfg.Environ = os.Environ
@@ -309,6 +354,14 @@ func (r *Runner) Run(ctx context.Context, task Task) Report {
 	if ctx.Err() != nil {
 		rep.Reason = ReasonCancelled
 		r.cfg.Logf("coder: turn %s: cancelled before the start", turn)
+		return rep
+	}
+
+	// The work root is on the bot's own disk: a task that would fill it must not start.
+	if free, ok := r.diskFree(); ok && free < r.cfg.MinFreeBytes {
+		rep.Reason = ReasonDisk
+		rep.Error = fmt.Sprintf(msgDiskBefore, humanBytes(r.cfg.MinFreeBytes), r.cfg.WorkRoot)
+		r.cfg.Logf("coder: turn %s: disk: %d bytes free under %s", turn, free, r.cfg.WorkRoot)
 		return rep
 	}
 
@@ -391,7 +444,18 @@ func (r *Runner) Run(ctx context.Context, task Task) Report {
 		close(procDone)
 	}()
 
-	reason, exited := r.watch(ctx, procDone, budget)
+	// The disk is watched while the process runs: one that fills it stops like a cancel.
+	diskStop := make(chan struct{})
+	diskFull := make(chan struct{}, 1)
+	diskDone := make(chan struct{})
+	go func() {
+		defer close(diskDone)
+		r.watchDisk(ctx, procDone, diskStop, diskFull)
+	}()
+	defer func() { <-diskDone }()
+	defer close(diskStop)
+
+	reason, exited := r.watch(ctx, procDone, budget, diskFull)
 	if reason != "" {
 		r.stop(pgid, procDone)
 		select {
@@ -425,6 +489,9 @@ func (r *Runner) Run(ctx context.Context, task Task) Report {
 	switch {
 	case reason != "":
 		rep.Reason = reason
+		if reason == ReasonDisk {
+			rep.Error = msgDiskStopped
+		}
 	case st.failed():
 		rep.Reason = ReasonError
 		rep.Error = cutTotal(sanitize(st.errorText()), MaxErrorBytes)
@@ -476,9 +543,9 @@ func (r *Runner) acquire(ctx context.Context, task Task) bool {
 // release gives the runner's lock back.
 func (r *Runner) release() { <-r.sem }
 
-// watch waits for the process to end and for the three things that stop it early. It returns the
+// watch waits for the process to end and for the four things that stop it early. It returns the
 // reason of an early stop, and whether the process was seen to exit.
-func (r *Runner) watch(ctx context.Context, procDone <-chan struct{}, budget <-chan struct{}) (string, bool) {
+func (r *Runner) watch(ctx context.Context, procDone <-chan struct{}, budget <-chan struct{}, disk <-chan struct{}) (string, bool) {
 	timer := time.NewTimer(r.cfg.Timeout)
 	defer timer.Stop()
 	for {
@@ -497,8 +564,65 @@ func (r *Runner) watch(ctx context.Context, procDone <-chan struct{}, budget <-c
 			return ReasonTimeout, false
 		case <-budget:
 			return ReasonBudget, false
+		case <-disk:
+			return ReasonDisk, false
 		}
 	}
+}
+
+// watchDisk reads the free space under the work root while the process runs, and signals full once
+// it falls below StopFreeBytes. It ends with the process, the context, or the runner's stop.
+func (r *Runner) watchDisk(ctx context.Context, procDone <-chan struct{}, stop <-chan struct{}, full chan<- struct{}) {
+	ticker := time.NewTicker(r.cfg.DiskCheckEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-procDone:
+			return
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-ticker.C:
+			free, ok := r.diskFree()
+			if !ok || free >= r.cfg.StopFreeBytes {
+				continue
+			}
+			select {
+			case full <- struct{}{}:
+			default:
+			}
+			return
+		}
+	}
+}
+
+// diskFree is the free space under the work root. A statfs that fails is logged once and the disk
+// checks are skipped: a platform that cannot tell is not a full disk, and never fails a task.
+func (r *Runner) diskFree() (uint64, bool) {
+	free, err := r.cfg.Statfs(r.cfg.WorkRoot)
+	if err != nil {
+		r.mu.Lock()
+		first := !r.diskErrLogged
+		r.diskErrLogged = true
+		r.mu.Unlock()
+		if first {
+			r.cfg.Logf("coder: free space under %s is unknown: %v", r.cfg.WorkRoot, err)
+		}
+		return 0, false
+	}
+	return free, true
+}
+
+// humanBytes is a count of bytes as the disk messages say it: whole GiB, then MiB, then bytes.
+func humanBytes(n uint64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%d GiB", n>>30)
+	case n >= 1<<20:
+		return fmt.Sprintf("%d MiB", n>>20)
+	}
+	return fmt.Sprintf("%d bytes", n)
 }
 
 // stop ends the process: SIGTERM to its group, then SIGKILL to its group after KillGrace. It

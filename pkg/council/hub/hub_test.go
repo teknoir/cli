@@ -217,6 +217,41 @@ func turn() *WorkTurn {
 	return &WorkTurn{ID: "trn_1", ClaimID: "clm_1"}
 }
 
+// TestWorkTurnHistoryAuthor: a thread's history item may name who asked it, and an older
+// platform's item may not.
+func TestWorkTurnHistoryAuthor(t *testing.T) {
+	const body = `{"id":"trn_1","claimId":"clm_1","kind":"ask","prompt":"and now?",
+		"author":{"email":"a@b.c","displayName":"Anders"},
+		"history":[
+			{"prompt":"q1","final":"a1","author":{"email":"x@y.z","displayName":"X"}},
+			{"prompt":"q2","final":"a2"}
+		]}`
+	var work WorkTurn
+	if err := json.Unmarshal([]byte(body), &work); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(work.History) != 2 {
+		t.Fatalf("%d history items", len(work.History))
+	}
+	a := work.History[0].Author
+	if a == nil || a.Email != "x@y.z" || a.DisplayName != "X" {
+		t.Errorf("the first item's author %+v", a)
+	}
+	if work.History[1].Author != nil {
+		t.Errorf("the second item's author %+v, want none", work.History[1].Author)
+	}
+	raw, err := json.Marshal(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"author":{"email":"x@y.z"`) {
+		t.Errorf("the re-encoded turn has no author: %s", raw)
+	}
+	if strings.Count(string(raw), `"author"`) != 2 {
+		t.Errorf("the re-encoded turn names an author where there was none: %s", raw)
+	}
+}
+
 // posterOpts is a fast poster: the tests do not wait seconds for a retry.
 func posterOpts() PosterOptions {
 	return PosterOptions{

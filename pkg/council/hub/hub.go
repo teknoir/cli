@@ -112,10 +112,12 @@ type Author struct {
 	DisplayName string `json:"displayName"`
 }
 
-// History is one earlier exchange of the thread.
+// History is one earlier exchange of the thread. Author is who asked it: a thread may hold turns
+// by several people, and an item without one is by someone the platform did not name.
 type History struct {
-	Prompt string `json:"prompt"`
-	Final  string `json:"final"`
+	Prompt string  `json:"prompt"`
+	Final  string  `json:"final"`
+	Author *Author `json:"author,omitempty"`
 }
 
 // Usage is what a turn cost, as K3 reports it.
