@@ -19,9 +19,8 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// kitVersion is the version every skill's metadata.teknoir-kit-version must carry. A later job switches
-// this to the package's Version; until then it is a constant.
-const kitVersion = "0.1.0"
+// kitVersion is the version every skill's metadata.teknoir-kit-version must carry: the package's Version.
+const kitVersion = Version
 
 var (
 	// nameRE is a skill name: lower-case words joined by single dashes.

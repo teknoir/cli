@@ -13,4 +13,4 @@ var FS embed.FS
 
 // Version is the version of the embedded kit. The skills carry it in their frontmatter
 // (metadata.teknoir-kit-version) and an install records it in its manifest.
-const Version = "0.1.0"
+const Version = "0.2.0"

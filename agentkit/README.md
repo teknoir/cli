@@ -37,6 +37,17 @@ tnctl agent install --agent opencode --mcp
 With no `--agent` the kit is installed for all three. Skills go to `~/.claude/skills` (Claude Code) and
 `~/.agents/skills` (Codex, OpenCode) by default.
 
+### The council server
+
+`--council` (with `--mcp`) registers `tnctl mcp --council` instead of the read-only `tnctl mcp`: the read
+tools plus `council_info`, `council_ask`, `council_run` and `council_result`, which hand work to a
+TeknoirBot's council (skill `teknoir-council`). An install switches between the two forms without
+`--force`.
+
+```bash
+tnctl agent install --agent claude --mcp --council
+```
+
 ### Project scope
 
 `--project` installs into the current directory instead of your home: `.claude/skills`, plus `.mcp.json` with
@@ -53,9 +64,11 @@ agents get the skills and the MCP server.
 
 ### Managed directory (images)
 
-`--managed DIR` always installs the skills to `DIR/skills` and the guard to `DIR/hooks/teknoir-guard`, and
-touches nothing else — no MCP entry and no settings file. `--hooks` only adds the settings entry to copy
-into Claude Code's managed settings. This is how the TeknoirBot image installs the kit.
+`--managed DIR` installs the skills to `DIR/skills`, and for Claude Code the guard to
+`DIR/hooks/teknoir-guard`, and touches nothing else — no MCP entry and no settings file. `--hooks` only
+adds the settings entry to copy into Claude Code's managed settings. A managed install without `claude` in
+`--agent` writes no guard: `tnctl agent install --agent opencode --managed /etc/teknoirbot/kit` is how the
+TeknoirBot's council image installs the kit.
 
 ## Where it goes
 
@@ -72,8 +85,8 @@ file is never overwritten without `--force`.
 
 ```bash
 tnctl agent install [--agent claude|codex|opencode|all] [--user|--project|--managed DIR]
-                    [--mcp] [--hooks] [--agents-md] [--dry-run] [--force]
-tnctl agent list [--check] [--user|--project|--managed DIR]
+                    [--mcp] [--council] [--hooks] [--agents-md] [--dry-run] [--force]
+tnctl agent list [--agent ...] [--check] [--user|--project|--managed DIR]
 tnctl agent uninstall [--agent ...] [--user|--project|--managed DIR] [--mcp] [--hooks] [--agents-md]
 ```
 
@@ -89,6 +102,7 @@ See [`docs/commands/agent.md`](../docs/commands/agent.md).
 | `teknoir-debug` | Why a robot or workload is unhealthy: problems, `tnctl inspect`, logs, PromQL, `scripts/triage.sh`. |
 | `teknoir-mqtt-streams` | Reading, processing and publishing devices' MQTT telemetry with `tnctl mqtt stream`: sampling, the relay, a processor template. |
 | `teknoir-k3s-apps` | Building an app in a TeknoirBot's computer and running it on its k3s, or delivering it to robots. |
+| `teknoir-council` | Leading a TeknoirBot's council from your own agent with the `council_*` tools: when to ask one member, when to ask the bot, how to judge and wait for the reports. |
 
 Also in the kit:
 

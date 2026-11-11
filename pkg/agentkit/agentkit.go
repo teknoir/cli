@@ -1,5 +1,5 @@
 // Package agentkit installs the Teknoir agent kit into the directories a coding agent reads: the Agent
-// Skills, the guard hook and the registration of the read-only `tnctl mcp` server. It holds no cobra
+// Skills, the guard hook and the registration of the `tnctl mcp` server. It holds no cobra
 // code, so the install rules are testable on their own and the commands in cmd/ only parse flags and
 // print the result.
 package agentkit
@@ -32,7 +32,8 @@ const (
 	ScopeUser Scope = iota
 	// ScopeProject installs below the current directory: .claude, .agents, .codex, opencode.json.
 	ScopeProject
-	// ScopeManaged installs only skills and the guard, below one directory (an image's home).
+	// ScopeManaged installs only skills, and the guard for Claude Code, below one directory (an image's
+	// home).
 	ScopeManaged
 )
 
@@ -135,6 +136,7 @@ type Options struct {
 	Scope  Scope
 
 	MCP      bool // register the teknoir MCP server
+	Council  bool // register its council form, `tnctl mcp --council` (needs MCP)
 	Hooks    bool // install the guard hook and its PreToolUse entry (Claude Code only)
 	AgentsMD bool // add the AGENTS.md snippet (project scope only)
 	DryRun   bool // print the plan, write nothing
@@ -194,7 +196,7 @@ type op struct {
 
 func newOp(o *Options) *op {
 	if o.KitVersion == "" {
-		o.KitVersion = "0.1.0"
+		o.KitVersion = "0.2.0"
 	}
 	if o.TnctlVersion == "" {
 		o.TnctlVersion = "dev"
@@ -384,11 +386,14 @@ func (p *op) refuseProjectSymlinks() bool {
 }
 
 // allRoots are the roots `tnctl agent list` and `uninstall` visit: the skills of every agent, and the
-// guard's hooks directory of Claude Code. A managed install always holds the guard, so its hooks root is
-// always visited, --hooks or not.
+// guard's hooks directory of Claude Code. A managed install of Claude Code always holds the guard, so its
+// hooks root is always visited, --hooks or not; one without Claude Code has no hooks root.
 func (p *op) allRoots(withHooks bool) []root {
 	out := p.skillRoots()
-	if p.o.Scope == ScopeManaged || (withHooks && p.has(AgentClaude)) {
+	if !p.has(AgentClaude) {
+		return out
+	}
+	if p.o.Scope == ScopeManaged || withHooks {
 		out = append(out, root{Dir: filepath.Join(p.claudeDir(), "hooks"), Agents: []Agent{AgentClaude}})
 	}
 	return out

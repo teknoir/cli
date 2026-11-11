@@ -6,9 +6,10 @@ import (
 )
 
 // Uninstall removes the kit from the scope of the options: the files its manifests record, while they
-// still match, and the manifests; with MCP the teknoir MCP server, with Hooks the guard hook and its
-// PreToolUse entry, with AgentsMD the AGENTS.md section. A file the user changed is kept and reported.
-// A managed install always holds the guard, so it goes with or without --hooks.
+// still match, and the manifests; with MCP the teknoir MCP server, in either of its forms, with Hooks the
+// guard hook and its PreToolUse entry, with AgentsMD the AGENTS.md section. A file the user changed is
+// kept and reported. A managed install of Claude Code holds the guard, so it goes with or without
+// --hooks.
 func Uninstall(o *Options) (*Result, error) {
 	p := newOp(o)
 	if err := p.validate(); err != nil {

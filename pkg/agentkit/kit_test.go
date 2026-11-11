@@ -18,6 +18,7 @@ import (
 func TestEmbeddedKit(t *testing.T) {
 	for _, name := range []string{
 		"skills/teknoir-platform/SKILL.md",
+		"skills/teknoir-council/SKILL.md",
 		"hooks/teknoir-guard",
 		".claude-plugin/plugin.json",
 		".mcp.json",

@@ -3,7 +3,7 @@ name: teknoir-config
 description: Read and change what a Teknoir robot or device runs - chart values, chart version, container images, local Kubernetes items, which apps are off on one robot, and the git revision an app runs. Use it for tnctl config (get, diff, links, kinds, set, unset, delete, on, off, add, remove, reset, promote, try, wait), for an effective configuration, an override, a local item, or a robot that runs the wrong version or misses an app. Not for a broken or unhealthy robot, for its logs or for missing metrics (teknoir-debug), and not for robots, robot types and fleets themselves (teknoir-robots).
 license: Apache-2.0
 metadata:
-  teknoir-kit-version: "0.1.0"
+  teknoir-kit-version: "0.2.0"
 ---
 
 # The configuration of a robot

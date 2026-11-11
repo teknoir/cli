@@ -66,13 +66,13 @@ func TestListCleanAndBroken(t *testing.T) {
 		t.Errorf("missing %d, want 1: %+v", missing, res.Roots)
 	}
 	// Another kit version too.
-	o.KitVersion = "0.2.0"
+	o.KitVersion = "0.3.0"
 	res, err = List(o)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range res.Roots {
-		if !r.VersionOutdated || r.EmbeddedVersion != "0.2.0" {
+		if !r.VersionOutdated || r.EmbeddedVersion != "0.3.0" {
 			t.Errorf("version: %+v", r)
 		}
 	}

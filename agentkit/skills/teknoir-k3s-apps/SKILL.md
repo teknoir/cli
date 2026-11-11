@@ -3,7 +3,7 @@ name: teknoir-k3s-apps
 description: Build and run your own apps on a TeknoirBot computer. It covers the inner k3s, the apps namespace and its admission rules, buildctl to the bot builder, the bot registry, Deployments and Services, port-forward into the bot browser, and cleanup. Use when asked to build an image, write a Dockerfile, deploy, run, restart, scale or debug an app inside a TeknoirBot, or to view a service on the bot computer. For a robot configuration use teknoir-config; for device telemetry use teknoir-mqtt-streams.
 license: Apache-2.0
 metadata:
-  teknoir-kit-version: "0.1.0"
+  teknoir-kit-version: "0.2.0"
 ---
 
 # Apps on a TeknoirBot's computer

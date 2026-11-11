@@ -781,7 +781,7 @@ func TestHooksManifestRefusedNoEntry(t *testing.T) {
 	o, home, _ := testOpts(t)
 	o.Agents, o.Hooks = []Agent{AgentClaude}, true
 	hooksDir := filepath.Join(home, ".claude", "hooks")
-	writeAt(t, filepath.Join(hooksDir, manifestName), `{"kitVersion":"0.1.0","files":{"../x":"`+hashOf("x\n")+`"}}`+"\n", 0o644)
+	writeAt(t, filepath.Join(hooksDir, manifestName), `{"kitVersion":"0.2.0","files":{"../x":"`+hashOf("x\n")+`"}}`+"\n", 0o644)
 	res, err := Install(o)
 	if _, ok := Refused(err); !ok {
 		t.Fatalf("err %v, want a refusal", err)

@@ -3,7 +3,7 @@ name: teknoir-mqtt-streams
 description: Read, process and publish the MQTT telemetry of Teknoir devices and robots with tnctl mqtt stream. Follow device state and events, sample topics, aggregate per device, alert with hysteresis, join two streams, and publish your own stream from a TeknoirBot. Use when asked to watch, sample, process or publish device, robot or fleet MQTT data, topics or telemetry, or to build a stream processor. For configuration writes use teknoir-config; to run the app itself on a bot computer use teknoir-k3s-apps; for device problems use teknoir-debug.
 license: Apache-2.0
 metadata:
-  teknoir-kit-version: "0.1.0"
+  teknoir-kit-version: "0.2.0"
 ---
 
 # Teknoir MQTT streams

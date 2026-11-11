@@ -33,7 +33,8 @@ func (p *op) guardCommand() string {
 func (p *op) absGuardPath() string { return filepath.Join(p.claudeDir(), "hooks", guardName) }
 
 // installHooks installs the guard hook for Claude Code and registers it as a PreToolUse handler in its
-// settings.json. The managed scope installs the guard on its own (install) and only prints the entry.
+// settings.json. The managed scope installs the guard on its own, for Claude Code only, and only prints
+// the entry.
 func (p *op) installHooks() error {
 	hooksDir := filepath.Join(p.claudeDir(), "hooks")
 	content, err := fs.ReadFile(p.o.FS, "hooks/"+guardName)

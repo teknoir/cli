@@ -435,7 +435,7 @@ func TestListProjectRootSymlink(t *testing.T) {
 	outside := t.TempDir()
 	mustSymlink(t, outside, filepath.Join(project, ".claude"))
 	// Something below the link that looks installed: it must not be read.
-	writeAt(t, filepath.Join(outside, "skills", manifestName), `{"kitVersion":"0.1.0","files":{}}`, 0o644)
+	writeAt(t, filepath.Join(outside, "skills", manifestName), `{"kitVersion":"0.2.0","files":{}}`, 0o644)
 	// A Codex config below a symlinked .codex that registers the server: it must not be read either.
 	codexDir := t.TempDir()
 	writeAt(t, filepath.Join(codexDir, "config.toml"), codexOurs, 0o644)
@@ -589,11 +589,11 @@ func TestRootErrorsRefusedNotFatal(t *testing.T) {
 					t.Fatal(err)
 				}
 				outside := filepath.Join(t.TempDir(), "m.json")
-				writeAt(t, outside, `{"kitVersion":"0.1.0","files":{}}`, 0o644)
+				writeAt(t, outside, `{"kitVersion":"0.2.0","files":{}}`, 0o644)
 				link := filepath.Join(root, manifestName)
 				mustSymlink(t, outside, link)
 				return func(t *testing.T) {
-					if got := readFile(t, outside); got != `{"kitVersion":"0.1.0","files":{}}` {
+					if got := readFile(t, outside); got != `{"kitVersion":"0.2.0","files":{}}` {
 						t.Errorf("the manifest outside the root was written: %q", got)
 					}
 					if fi, err := os.Lstat(link); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
@@ -610,7 +610,7 @@ func TestRootErrorsRefusedNotFatal(t *testing.T) {
 				if err := os.MkdirAll(root, 0o755); err != nil {
 					t.Fatal(err)
 				}
-				body := `{"kitVersion":"0.1.0","tnctl":"x","files":{"teknoir-platform/a\u0000b":"sha256:00"}}`
+				body := `{"kitVersion":"0.2.0","tnctl":"x","files":{"teknoir-platform/a\u0000b":"sha256:00"}}`
 				writeAt(t, filepath.Join(root, manifestName), body, 0o644)
 				return func(t *testing.T) {
 					if got := readFile(t, filepath.Join(root, manifestName)); got != body {
@@ -1672,7 +1672,7 @@ func TestProjectSkillRootSymlinkTargetUntouched(t *testing.T) {
 			// What the link points at already holds a kit-like tree.
 			writeAt(t, filepath.Join(outside, "teknoir-platform", "SKILL.md"), "outside\n", 0o644)
 			writeAt(t, filepath.Join(outside, manifestName),
-				`{"kitVersion":"0.1.0","tnctl":"x","files":{"teknoir-platform/SKILL.md":"`+hashOf("outside\n")+`"}}`, 0o644)
+				`{"kitVersion":"0.2.0","tnctl":"x","files":{"teknoir-platform/SKILL.md":"`+hashOf("outside\n")+`"}}`, 0o644)
 			mustSymlink(t, outside, filepath.Join(project, ".claude", "skills"))
 			before := snapshotTree(t, outside)
 			run := func() (*Result, error) {
@@ -2241,10 +2241,10 @@ func TestRootErrorUninstallGoesOn(t *testing.T) {
 			switch damage {
 			case "manifest-link":
 				outside := filepath.Join(t.TempDir(), "m.json")
-				writeAt(t, outside, `{"kitVersion":"0.1.0","files":{}}`, 0o644)
+				writeAt(t, outside, `{"kitVersion":"0.2.0","files":{}}`, 0o644)
 				mustSymlink(t, outside, filepath.Join(root, manifestName))
 			case "nul-key":
-				writeAt(t, filepath.Join(root, manifestName), `{"kitVersion":"0.1.0","files":{"teknoir-platform/a\u0000b":"sha256:00"}}`, 0o644)
+				writeAt(t, filepath.Join(root, manifestName), `{"kitVersion":"0.2.0","files":{"teknoir-platform/a\u0000b":"sha256:00"}}`, 0o644)
 			}
 			res, err := Uninstall(o)
 			if _, ok := Refused(err); !ok {

@@ -3,7 +3,7 @@ name: teknoir-debug
 description: Find out why a Teknoir robot, device or app is unhealthy - offline, Degraded, waiting for its device, an app that crash-loops, restarts, cannot pull its image or fails its readiness check, or a robot whose Shell or Tunneling is off. Use it when a task says a robot is broken, down, offline, degraded, erroring, OOM-killed or not running, or asks for its logs, pods, events, metrics or a root cause. Triage in order with tnctl whoami, the fleet API overview and problems, robot access, config state, tnctl inspect and Prometheus. Not for changing what a robot runs (teknoir-config) and not for creating robots or onboarding a computer (teknoir-robots).
 license: Apache-2.0
 metadata:
-  teknoir-kit-version: "0.1.0"
+  teknoir-kit-version: "0.2.0"
 ---
 
 # Why a robot is unhealthy

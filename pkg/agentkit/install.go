@@ -27,6 +27,9 @@ func (p *op) validate() error {
 	if p.o.FS == nil {
 		return errors.New("agentkit: no kit filesystem")
 	}
+	if p.o.Council && !p.o.MCP {
+		return errors.New("--council needs --mcp")
+	}
 	switch p.o.Scope {
 	case ScopeManaged:
 		if p.o.ManagedDir == "" {
@@ -70,8 +73,15 @@ func (p *op) install() error {
 	}
 	switch {
 	case p.o.Scope == ScopeManaged:
-		// A managed install is the TeknoirBot image's Claude Code, and the image's managed settings
-		// point at the guard: it is always written, and --hooks only adds the entry to add by hand.
+		// A managed install of Claude Code is the TeknoirBot image's, and the image's managed settings
+		// point at the guard: it is always written, and --hooks only adds the entry to add by hand. An
+		// image with another agent alone has no Claude Code and gets the skills only.
+		if !p.has(AgentClaude) {
+			if p.o.Hooks {
+				p.r.warn("hooks are installed for Claude Code only")
+			}
+			break
+		}
 		if err := p.installManagedGuard(); err != nil {
 			return err
 		}
@@ -97,7 +107,7 @@ func (p *op) install() error {
 
 // installManagedGuard writes the guard below the managed directory's hooks root, and with Hooks records
 // the settings entry the image adds to Claude Code's managed settings by hand. Each run writes the guard
-// exactly once, with or without --hooks.
+// exactly once, with or without --hooks. Its caller installs for Claude Code only.
 func (p *op) installManagedGuard() error {
 	content, err := fs.ReadFile(p.o.FS, "hooks/"+guardName)
 	if err != nil {

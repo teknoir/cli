@@ -32,11 +32,13 @@ func (r *RootStatus) InSync() bool {
 		len(r.Outdated) == 0 && len(r.Extra) == 0
 }
 
-// MCPStatus is one agent config file, and whether it registers the teknoir MCP server.
+// MCPStatus is one agent config file, and whether it registers the teknoir MCP server, and in which of
+// the kit's two forms: the read-only one or the council one.
 type MCPStatus struct {
 	Path       string `json:"path"`
 	Agent      string `json:"agent"`
 	Registered bool   `json:"registered"`
+	Council    bool   `json:"council,omitempty"`
 	Note       string `json:"note,omitempty"`
 }
 
@@ -256,8 +258,13 @@ func (p *op) mcpStatus(a Agent) MCPStatus {
 			return st
 		}
 		srv, found := tomlServer(parsed)
-		st.Registered = found && tomlServerIsOurs(srv)
-		if found && !st.Registered && tomlServerIsKits(srv) {
+		switch {
+		case !found:
+		case tomlServerIs(srv, true):
+			st.Registered, st.Council = true, true
+		case tomlServerIs(srv, false):
+			st.Registered = true
+		case tomlServerIsKits(srv):
 			fix := "tnctl agent install --agent codex --mcp --force"
 			if p.o.Scope == ScopeProject {
 				fix = "tnctl agent install --project --agent codex --mcp --force"
@@ -265,11 +272,21 @@ func (p *op) mcpStatus(a Agent) MCPStatus {
 			st.Note = "the entry of an older tnctl, without env_vars: run " + fix
 		}
 	case AgentClaude:
-		st.Registered = p.jsonHasEntry(data, []string{"mcpServers"}, claudeMCPEntry)
+		p.setJSONEntryForm(&st, data, []string{"mcpServers"}, claudeMCPForms)
 	case AgentOpencode:
-		st.Registered = p.jsonHasEntry(data, []string{"mcp", "servers"}, opencodeMCPEntry)
+		p.setJSONEntryForm(&st, data, []string{"mcp", "servers"}, opencodeMCPForms)
 	}
 	return st
+}
+
+// setJSONEntryForm records which of the kit's forms the JSON file registers, if either.
+func (p *op) setJSONEntryForm(st *MCPStatus, data []byte, container []string, forms jsonEntryForms) {
+	switch {
+	case p.jsonHasEntry(data, container, forms.council):
+		st.Registered, st.Council = true, true
+	case p.jsonHasEntry(data, container, forms.readOnly):
+		st.Registered = true
+	}
 }
 
 // jsonHasEntry reports whether data registers the entry where it belongs; a JSONC file with comments is

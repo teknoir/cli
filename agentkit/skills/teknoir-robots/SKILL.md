@@ -3,7 +3,7 @@ name: teknoir-robots
 description: Read, create and change Teknoir robots, their types and fleets, and hand a person the exact steps to put a real computer online. Use it when a task mentions a robot, a robot type, a fleet, a device that backs a robot, node roles, a robot that is waiting or offline, adding a robot, adopting a device, or bootstrapping a computer. Not for changing what runs on a robot (teknoir-config) or for a robot that is broken (teknoir-debug).
 license: Apache-2.0
 metadata:
-  teknoir-kit-version: "0.1.0"
+  teknoir-kit-version: "0.2.0"
 ---
 
 # Robots, types and fleets

@@ -32,7 +32,7 @@ func (f *agentFlags) addScopeFlags(c *cobra.Command, withAgents bool, userHelp s
 	c.Flags().BoolVar(&f.user, "user", false, userHelp)
 	c.Flags().BoolVar(&f.project, "project", false,
 		"Project scope: ./.claude, ./.agents and the agent config files of this directory")
-	c.Flags().StringVar(&f.managed, "managed", "", "Managed scope: skills and hooks below DIR, and nothing else")
+	c.Flags().StringVar(&f.managed, "managed", "", "Managed scope: skills below DIR, and the guard for Claude Code (nothing else)")
 }
 
 // options builds the agentkit options of the scope the flags name.
@@ -111,7 +111,7 @@ func newAgentCmd(e *cliEnv) *cobra.Command {
 		Use:   "agent",
 		Short: "Install the Teknoir agent kit for coding agents (Claude Code, Codex, OpenCode)",
 		Long: `Install the Teknoir agent kit: the Agent Skills, the guard hook and the registration of the
-read-only tnctl MCP server, for the coding agents on this computer.
+tnctl MCP server (read-only, or the council one with --council), for the coding agents on this computer.
 
 The kit ships inside tnctl, so it installs offline and matches the tnctl that installs it.`,
 		Example: `  tnctl agent install --agent claude --mcp
@@ -126,20 +126,22 @@ func newAgentListCmd(_ *cliEnv) *cobra.Command {
 	var check bool
 	c := &cobra.Command{
 		SilenceUsage: true,
-		Use:          "list [--check] [--user|--project|--managed DIR]",
+		Use:          "list [--agent ...] [--check] [--user|--project|--managed DIR]",
 		Short:        "Show the agent kit installs of this computer and whether they match this tnctl",
 		Long: `Show the agent kit installs of this computer: every root that has a manifest, the kit version
 it holds and the one this tnctl carries, the files missing, changed or outdated, and which agent config
 files register the teknoir MCP server.
 
-Both scopes are visited unless --user, --project or --managed names one.
+Both scopes are visited unless --user, --project or --managed names one, and the roots of every agent
+unless --agent names some.
 
 --check exits non-zero when anything differs from the kit this tnctl carries (a missing or changed file,
 another kit version, or nothing installed at all); a managed install is checked as a whole. It is for CI
 and for the TeknoirBot image test.`,
 		Example: `  tnctl agent list
   tnctl agent list --check
-  tnctl agent list --managed /etc/claude-code/.claude --check`,
+  tnctl agent list --managed /etc/claude-code/.claude --check
+  tnctl agent list --agent opencode --managed /etc/teknoirbot/kit --check`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			format, err := outputFormat()
@@ -181,7 +183,7 @@ and for the TeknoirBot image test.`,
 			return nil
 		},
 	}
-	f.addScopeFlags(c, false, "Only the user scope (default: both scopes)")
+	f.addScopeFlags(c, true, "Only the user scope (default: both scopes)")
 	c.Flags().BoolVar(&check, "check", false, "Exit non-zero when an install differs from this tnctl's kit, or nothing is installed")
 	return c
 }
@@ -334,9 +336,12 @@ func printAgentList(w io.Writer, res *agentkit.ListResult) {
 	}
 	for _, m := range res.MCP {
 		state := "teknoir not registered"
-		if m.Registered {
+		switch {
+		case m.Registered && m.Council:
+			state = "teknoir registered (council)"
+		case m.Registered:
 			state = "teknoir registered"
-		} else if m.Note != "" {
+		case m.Note != "":
 			state = "not registered: " + m.Note
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\n", m.Path, m.Agent, state)

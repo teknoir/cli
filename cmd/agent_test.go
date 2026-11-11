@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -556,7 +557,7 @@ func TestAgentListManifestProblem(t *testing.T) {
 	}
 	root := filepath.Join(home, ".claude", "skills")
 	mf := filepath.Join(root, ".tnctl-agent-kit.json")
-	body := `{"kitVersion":"0.1.0","tnctl":"test","files":{"../x":"sha256:00"}}`
+	body := `{"kitVersion":"0.2.0","tnctl":"test","files":{"../x":"sha256:00"}}`
 	if err := os.WriteFile(mf, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -763,5 +764,148 @@ func TestAgentCommandsSynopsis(t *testing.T) {
 	}
 	if !strings.Contains(out, "Only the user scope (default: both scopes)") {
 		t.Errorf("the --user help does not say what list visits:\n%s", out)
+	}
+}
+
+// --council without --mcp is a usage error; with it, the council entry is registered, list marks it,
+// uninstall removes it, and --help names the flag.
+func TestAgentInstallCouncil(t *testing.T) {
+	home, _ := agentHome(t)
+	if _, _, err := runCLI(t, nil, "agent", "install", "--agent", "claude", "--council"); err == nil || exitCodeOf(err) != codeUsage {
+		t.Errorf("--council without --mcp: %v, want exit %d", err, codeUsage)
+	}
+	if _, _, err := runCLI(t, nil, "agent", "install", "--agent", "claude", "--mcp", "--council"); err != nil {
+		t.Fatal(err)
+	}
+	claudeJSON := filepath.Join(home, ".claude.json")
+	if b, err := os.ReadFile(claudeJSON); err != nil || !strings.Contains(string(b), `"--council"`) {
+		t.Errorf(".claude.json does not carry the council entry: %s %v", b, err)
+	}
+	out, _, err := runCLI(t, nil, "agent", "list", "--user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "registered (council)") {
+		t.Errorf("list does not mark the council entry:\n%s", out)
+	}
+	if _, _, err := runCLI(t, nil, "agent", "uninstall", "--user", "--agent", "claude", "--mcp"); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(claudeJSON); err != nil || strings.Contains(string(b), "teknoir") {
+		t.Errorf(".claude.json still names teknoir: %s %v", b, err)
+	}
+	out, _, err = runCLI(t, nil, "agent", "install", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--council", "tnctl mcp --council"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--help does not name %q:\n%s", want, out)
+		}
+	}
+	// The flag takes no value: its help text follows the flag name, with no backticked command in the
+	// name's place.
+	if !regexp.MustCompile(`(?m)^\s+--council\s{2,}With --mcp`).MatchString(out) {
+		t.Errorf("the --council usage line reads as a flag with a value:\n%s", out)
+	}
+}
+
+// A TeknoirBot cannot drive a council, and `tnctl mcp --council` refuses to start inside one: an install
+// there is refused before anything is written.
+func TestAgentInstallCouncilInBotMode(t *testing.T) {
+	t.Setenv(envBotAPI, "https://bot.example.com")
+	t.Setenv(envBotKeyFile, "/nonexistent/key")
+	t.Setenv(envBotNamespace, "teknoir-demo")
+	home, _ := agentHome(t)
+	_, _, err := runCLI(t, nil, "agent", "install", "--agent", "claude", "--mcp", "--council")
+	if err == nil || exitCodeOf(err) != codeUsage {
+		t.Fatalf("--council in bot mode: %v, want exit %d", err, codeUsage)
+	}
+	if !strings.Contains(err.Error(), "a TeknoirBot cannot drive a council") {
+		t.Errorf("the refusal reads %q", err)
+	}
+	if _, serr := os.Stat(filepath.Join(home, ".claude")); !os.IsNotExist(serr) {
+		t.Errorf("the refused install wrote: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(serr) {
+		t.Errorf("the refused install wrote an MCP entry: %v", serr)
+	}
+	// The read-only form is still installed in bot mode.
+	if _, _, err := runCLI(t, nil, "agent", "install", "--agent", "claude", "--mcp"); err != nil {
+		t.Fatalf("--mcp in bot mode: %v", err)
+	}
+}
+
+// `agent list` visits the roots of every agent by default, as --agent all does.
+func TestAgentListDefaultAgents(t *testing.T) {
+	agentHome(t)
+	if _, _, err := runCLI(t, nil, "agent", "install", "--user", "--mcp"); err != nil {
+		t.Fatal(err)
+	}
+	all, _, err := runCLI(t, nil, "agent", "list", "--user", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	named, _, err := runCLI(t, nil, "agent", "list", "--user", "--agent", "all", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all != named {
+		t.Errorf("list without --agent:\n%s\nlist --agent all:\n%s", all, named)
+	}
+}
+
+// `agent list --agent opencode` reports the shared skills root and OpenCode's config file only.
+func TestAgentListOneAgent(t *testing.T) {
+	home, _ := agentHome(t)
+	if _, _, err := runCLI(t, nil, "agent", "install", "--user"); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runCLI(t, nil, "agent", "list", "--user", "--agent", "opencode", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Roots []struct {
+			Root  string
+			Agent string
+		}
+		MCP []struct {
+			Path       string
+			Agent      string
+			Registered bool
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if len(v.Roots) != 1 || v.Roots[0].Root != filepath.Join(home, ".agents", "skills") || v.Roots[0].Agent != "opencode" {
+		t.Errorf("roots %+v, want the ~/.agents one only", v.Roots)
+	}
+	want := filepath.Join(home, ".config", "opencode", "opencode.json")
+	if len(v.MCP) != 1 || v.MCP[0].Agent != "opencode" || v.MCP[0].Path != want || v.MCP[0].Registered {
+		t.Errorf("mcp %+v, want OpenCode's %s, not registered", v.MCP, want)
+	}
+}
+
+// A managed install of OpenCode alone has no hooks root: --check passes on the skills, and uninstall
+// removes them. This is the council image's install.
+func TestAgentManagedWithoutClaude(t *testing.T) {
+	agentHome(t)
+	dir := t.TempDir()
+	if _, _, err := runCLI(t, nil, "agent", "install", "--agent", "opencode", "--managed", dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hooks")); !os.IsNotExist(err) {
+		t.Errorf("a managed install of opencode wrote the hooks root: %v", err)
+	}
+	if _, _, err := runCLI(t, nil, "agent", "list", "--agent", "opencode", "--managed", dir, "--check"); err != nil {
+		t.Errorf("--check on a clean managed install of opencode: %v", err)
+	}
+	if _, _, err := runCLI(t, nil, "agent", "uninstall", "--agent", "opencode", "--managed", dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "skills")); !os.IsNotExist(err) {
+		t.Errorf("the skills root survived the uninstall: %v", err)
 	}
 }
