@@ -71,6 +71,7 @@ var chatSignals = func() (<-chan os.Signal, func()) {
 type chatFlags struct {
 	thread    string
 	newThread bool
+	follow    bool
 	mode      string
 	member    string
 	effort    string
@@ -91,9 +92,13 @@ Without one, in a terminal, it starts a conversation: /new starts a new thread, 
 thread's open turn, /quit ends it, and @fleet <text> or @coder <text> asks one member alone.
 
 The chat's thread is printed on stderr when it is made, so it can be continued later with
---thread <id>. Ctrl-C cancels the running turn (a second one leaves at once).`,
+--thread <id>. Ctrl-C cancels the running turn (a second one leaves at once).
+
+With --thread <id> --follow the command does not ask anything: it follows the thread's last turn,
+picking up the answer where it is when that turn still runs, and printing it when it already ended.`,
 		Example: `  tnctl chat scout "what is running on my robot?"
   tnctl chat scout --thread thr_123 "and the pods?"
+  tnctl chat scout --thread thr_123 --follow
   tnctl chat scout --mode quick "list the devices"
   tnctl chat threads scout`,
 		Args: argsRange(1, -1, "chat needs a bot, for example: tnctl chat scout \"what is running?\""),
@@ -103,7 +108,9 @@ The chat's thread is printed on stderr when it is made, so it can be continued l
 			}
 			bot := args[0]
 			prompt := strings.Join(args[1:], " ")
-			if prompt == "" && !stdinIsTerminal() {
+			// --follow asks nothing, so it never reads stdin: through ssh or inside a while-read loop
+			// stdin is an open pipe that would block it, or swallow the loop's own input.
+			if prompt == "" && !f.follow && !stdinIsTerminal() {
 				b, err := io.ReadAll(cmd.InOrStdin())
 				if err != nil {
 					return err
@@ -113,7 +120,10 @@ The chat's thread is printed on stderr when it is made, so it can be continued l
 			if utf8.RuneCountInString(prompt) > chatMaxPrompt {
 				return usageErr("the prompt is longer than %d characters", chatMaxPrompt)
 			}
-			repl := prompt == ""
+			if f.follow && prompt != "" {
+				return usageErr("--follow follows the thread's last turn: give no prompt")
+			}
+			repl := prompt == "" && !f.follow
 			if repl {
 				if f.json {
 					return usageErr("--json needs a prompt: the conversation is not available with --json")
@@ -140,6 +150,9 @@ The chat's thread is printed on stderr when it is made, so it can be continued l
 			}
 			sigs, stopSigs := chatSignals()
 			defer stopSigs()
+			if f.follow {
+				return chatFollow(ctx, cmd, fl, bot, f.thread, f, sigs)
+			}
 			if !repl {
 				return chatOnce(ctx, cmd, fl, bot, prompt, f, sigs)
 			}
@@ -148,6 +161,7 @@ The chat's thread is printed on stderr when it is made, so it can be continued l
 	}
 	c.Flags().StringVar(&f.thread, "thread", "", "continue this thread (the default is a new one)")
 	c.Flags().BoolVar(&f.newThread, "new", false, "start a new thread (with --thread: a usage error)")
+	c.Flags().BoolVar(&f.follow, "follow", false, "follow the thread's last turn instead of asking (needs --thread, and no prompt)")
 	c.Flags().StringVar(&f.mode, "mode", "", "how the council answers: auto, quick or council")
 	c.Flags().StringVar(&f.member, "member", "", "ask one member alone: fleet or coder")
 	c.Flags().StringVar(&f.effort, "effort", "", "how hard the members think: low, medium or high")
@@ -215,6 +229,9 @@ func chatValidate(f chatFlags) error {
 	if f.newThread && f.thread != "" {
 		return usageErr("--new and --thread cannot be used together")
 	}
+	if f.follow && f.thread == "" {
+		return usageErr("--follow needs --thread")
+	}
 	return nil
 }
 
@@ -232,7 +249,7 @@ func chatInfoError(err error) error {
 func chatTurnError(err error, bot, thread string) error {
 	var ae *api.Error
 	if errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Code == "turn_open" {
-		return newErr(codeConflict, "this chat already has a turn in progress (tnctl chat %s --thread %s, then /cancel)", bot, escapeLine(cleanBotText(thread)))
+		return newErr(codeConflict, "this chat already has a turn in progress (tnctl chat %s --thread %s --follow, then Ctrl-C cancels it)", bot, escapeLine(cleanBotText(thread)))
 	}
 	return classify(err)
 }
@@ -268,8 +285,63 @@ func chatRunTurn(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, th
 	if err != nil {
 		return chatTurnError(err, bot, thread)
 	}
-	p := &chatTurnPrinter{out: cmd.OutOrStdout(), errw: cmd.ErrOrStderr(), json: f.json, tty: !f.json && stdoutIsTerminal()}
-	return runChatTurn(ctx, fl, bot, thread, turn.ID, after, p, sigs)
+	return runChatTurn(ctx, fl, bot, thread, turn.ID, after, newChatTurnPrinter(cmd, f), sigs)
+}
+
+// newChatTurnPrinter is the printer of one turn.
+func newChatTurnPrinter(cmd *cobra.Command, f chatFlags) *chatTurnPrinter {
+	return &chatTurnPrinter{out: cmd.OutOrStdout(), errw: cmd.ErrOrStderr(), json: f.json, tty: !f.json && stdoutIsTerminal()}
+}
+
+// chatFollow follows the thread's last turn, asking nothing: a turn that still runs is followed from
+// its first event, and one that already ended is printed from the thread's own record. With --json
+// both are followed: a turn that ended replays its stored events, whose turn_end gives the exit code.
+func chatFollow(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, thread string, f chatFlags, sigs <-chan os.Signal) error {
+	d, _, err := fl.ChatThread(ctx, bot, thread)
+	if err != nil {
+		return classify(err)
+	}
+	last := chatLastTurn(d)
+	if last == nil {
+		return newErr(codeError, "thread %s has no turn yet", escapeLine(cleanBotText(thread)))
+	}
+	p := newChatTurnPrinter(cmd, f)
+	if last.State == "queued" || last.State == "running" || f.json {
+		// From 0: the turn's own events, and only those, as runChatTurn leaves other turns' out.
+		return runChatTurn(ctx, fl, bot, thread, last.ID, 0, p, sigs)
+	}
+	if last.Final != nil {
+		p.final(*last.Final)
+	}
+	return chatTurnState(last.State, last.Error)
+}
+
+// chatFollowOpenTurn follows the thread's last turn when it has not ended: a conversation opened on
+// a thread picks up where the person left it. A thread whose last turn ended, or that has none, is
+// left alone. read says the thread could be read at all: one the platform will not give has nothing
+// to follow, and cannot be posted on either, so the conversation ends with that error.
+func chatFollowOpenTurn(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, thread string, f chatFlags, sigs <-chan os.Signal) (read bool, err error) {
+	d, _, err := fl.ChatThread(ctx, bot, thread)
+	if err != nil {
+		return false, classify(err)
+	}
+	last := chatLastTurn(d)
+	if last == nil || (last.State != "queued" && last.State != "running") {
+		return true, nil
+	}
+	return true, runChatTurn(ctx, fl, bot, thread, last.ID, 0, newChatTurnPrinter(cmd, f), sigs)
+}
+
+// chatLastTurn is the thread's newest turn: the one with the highest index, or nil for a thread
+// with none.
+func chatLastTurn(d *api.ChatThreadDetail) *api.ChatTurn {
+	var last *api.ChatTurn
+	for i := range d.Turns {
+		if last == nil || d.Turns[i].Index > last.Index {
+			last = &d.Turns[i]
+		}
+	}
+	return last
 }
 
 // chatRepl talks until /quit, EOF or Ctrl-C at the prompt. Its thread is made at the first prompt.
@@ -278,6 +350,18 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 	printChatInfo(out, bot, info)
 	if f.thread != "" {
 		_, _ = fmt.Fprintf(errw, "thread %s\n", escapeLine(cleanBotText(f.thread)))
+		// A conversation opened on a thread with a turn still running follows it first.
+		if read, err := chatFollowOpenTurn(ctx, cmd, fl, bot, f.thread, f, sigs); err != nil {
+			if !read || errors.Is(err, errChatInterrupted) {
+				// The thread cannot be read: no turn can be posted on it either (each one reads the
+				// thread first), so the conversation ends with the platform's error.
+				return err
+			}
+			_, _ = fmt.Fprintf(errw, "Error: %v\n", err)
+			if exitCodeOf(err) == codeAuth {
+				return err // the person may no longer chat: the next turn would fail too
+			}
+		}
 	}
 
 	lines := make(chan string)
@@ -617,7 +701,7 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 	delay := chatReconnectDelay
 	failures := 0
 	lost := func() error {
-		return newErr(codeTimeout, "lost the chat stream; the turn goes on: tnctl chat %s --thread %s", bot, escapeLine(cleanBotText(thread)))
+		return newErr(codeTimeout, "lost the chat stream; the turn goes on: tnctl chat %s --thread %s --follow", bot, escapeLine(cleanBotText(thread)))
 	}
 	countFail := func() error {
 		failures++
@@ -667,6 +751,10 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 
 	var turnErr *api.ChatError
 	var usage *api.ChatUsage
+	// cutFinal is the text of a final the platform shortened for the stream; cutPending says it is
+	// the last final seen, so the answer is not printed until the thread's own record is read.
+	var cutFinal string
+	cutPending := false
 	for {
 		if cur == nil {
 			err := open()
@@ -786,15 +874,31 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 				if err := json.Unmarshal(ev.Data, &d); err != nil {
 					return fmt.Errorf("malformed chat event: %w", err)
 				}
+				// A shortened final is never printed as the answer: with --json the events are the
+				// output, and the frame says it was cut. The whole answer is printed first, so the
+				// turn's summary is the last line; its read of the thread's record is also what a
+				// failure the stream did not carry comes from.
+				var record *api.ChatThreadDetail
+				if cutPending && !p.json {
+					record = chatPrintWholeFinal(ctx, fl, bot, thread, turnID, cutFinal, p)
+				}
 				p.summary(usage)
-				return chatTurnEnd(ctx, fl, bot, thread, turnID, d.State, turnErr)
+				return chatTurnEnd(ctx, fl, bot, thread, turnID, d.State, turnErr, record)
 			case "final":
 				var d struct {
 					Text string `json:"text"`
+					Cut  bool   `json:"cut"`
 				}
 				if err := json.Unmarshal(ev.Data, &d); err != nil {
 					return fmt.Errorf("malformed chat event: %w", err)
 				}
+				if d.Cut {
+					// The platform shortened the answer for the stream; the thread's record has it
+					// whole, and that is printed when the turn ends.
+					cutFinal, cutPending = d.Text, true
+					continue
+				}
+				cutFinal, cutPending = "", false
 				p.final(d.Text)
 			case "text_delta":
 				var d struct {
@@ -924,22 +1028,33 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 	}
 }
 
-// chatTurnEnd is the exit of a turn: 0 for done, 1 for failed, expired and cancelled.
-func chatTurnEnd(ctx context.Context, fl *api.Fleet, bot, thread, turnID, state string, ce *api.ChatError) error {
+// chatTurnEnd is the exit of a turn: 0 for done, 1 for failed, expired and cancelled. A failure the
+// stream did not carry is read from the thread's own record: the one record a shortened final already
+// read, or one read here when it read none.
+func chatTurnEnd(ctx context.Context, fl *api.Fleet, bot, thread, turnID, state string, ce *api.ChatError, record *api.ChatThreadDetail) error {
+	if (state == "failed" || state == "expired") && ce == nil {
+		d := record
+		if d == nil {
+			// The failure was not in a frame this run saw, and no read of the record has happened.
+			d, _, _ = fl.ChatThread(context.WithoutCancel(ctx), bot, thread)
+		}
+		if d != nil {
+			for _, t := range d.Turns {
+				if t.ID == turnID {
+					ce = t.Error
+				}
+			}
+		}
+	}
+	return chatTurnState(state, ce)
+}
+
+// chatTurnState is the exit of a turn in state, with its failure ce.
+func chatTurnState(state string, ce *api.ChatError) error {
 	switch state {
 	case "cancelled":
 		return newErr(codeError, "the turn was cancelled")
 	case "failed", "expired":
-		if ce == nil {
-			// The failure was not in a frame this run saw: the thread's own record has it.
-			if d, _, err := fl.ChatThread(context.WithoutCancel(ctx), bot, thread); err == nil {
-				for _, t := range d.Turns {
-					if t.ID == turnID {
-						ce = t.Error
-					}
-				}
-			}
-		}
 		// The code and the message are the bot's own text: neither may drive the terminal.
 		code, msg := "", ""
 		if ce != nil {
@@ -954,6 +1069,29 @@ func chatTurnEnd(ctx context.Context, fl *api.Fleet, bot, thread, turnID, state 
 		return newErr(codeError, "the turn failed (%s)", state)
 	}
 	return nil
+}
+
+// chatPrintWholeFinal prints the answer of a turn whose stream carried a shortened final: the
+// thread's own record has it whole. It returns that record when it could be read — the turn's end
+// takes its failure from it rather than reading the thread again — and nil when it could not. When
+// the record cannot be read, or holds no final for the turn, the shortened text is printed after all,
+// with a line on stderr saying how to read the answer whole.
+func chatPrintWholeFinal(ctx context.Context, fl *api.Fleet, bot, thread, turnID, cutText string, p *chatTurnPrinter) *api.ChatThreadDetail {
+	d, _, err := fl.ChatThread(context.WithoutCancel(ctx), bot, thread)
+	if err != nil {
+		d = nil
+	}
+	if d != nil {
+		for _, t := range d.Turns {
+			if t.ID == turnID && t.Final != nil {
+				p.final(*t.Final)
+				return d
+			}
+		}
+	}
+	p.final(cutText)
+	p.errLine(fmt.Sprintf("the answer was shortened by the stream; read it whole with: tnctl chat %s --thread %s --follow", bot, escapeLine(cleanBotText(thread))))
+	return d
 }
 
 // chatTurnCtxErr is why the turn stopped when its context ended: a second Ctrl-C (or the cancel
