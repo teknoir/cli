@@ -188,7 +188,7 @@ the last turn and when it last changed. Continue one with tnctl chat <bot> --thr
 			}
 			threads, raw, err := fl.ChatThreads(cmd.Context(), args[0])
 			if err != nil {
-				return classify(err)
+				return chatInfoError(err)
 			}
 			out := cmd.OutOrStdout()
 			if asJSON {
@@ -235,8 +235,8 @@ func chatValidate(f chatFlags) error {
 	return nil
 }
 
-// chatInfoError names the two answers of the chat's own route: the chat being off on the platform,
-// and a bot that is not there, which classify covers.
+// chatInfoError names the two answers of the chat's own routes (info and threads): the chat being
+// off on the platform, and a bot that is not there, which classify covers.
 func chatInfoError(err error) error {
 	var ae *api.Error
 	if errors.As(err, &ae) && ae.Status == http.StatusNotFound && ae.Code == "council_off" {

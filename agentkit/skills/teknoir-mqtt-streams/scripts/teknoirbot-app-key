@@ -25,8 +25,9 @@ Arguments:
 Options:
   -h, --help      print this help
 
-Only runs on a TeknoirBot's computer: TEKNOIRBOT_API must be set and the key file
-($TNCTL_BOT_KEY_FILE, /run/teknoirbot/key on a bot) must be readable and non-empty.
+Only runs on a TeknoirBot's computer: TEKNOIRBOT_API, TEKNOIRBOT_NAME and
+TEKNOIRBOT_NAMESPACE must be set, and the key file ($TNCTL_BOT_KEY_FILE,
+/run/teknoirbot/key on a bot) must be readable and non-empty.
 
 The copy is as sensitive as the key itself and stays inside the bot's own computer:
 
@@ -58,6 +59,12 @@ name="$1"
 
 if [ -z "${TEKNOIRBOT_API:-}" ]; then
   die "this runs only on a TeknoirBot's computer (TEKNOIRBOT_API is not set)"
+fi
+# The relay filters the platform's stream by the bot's own name and teamspace; without them it
+# would read its own output back. The council pod sets both.
+if [ -z "${TEKNOIRBOT_NAME:-}" ] || [ -z "${TEKNOIRBOT_NAMESPACE:-}" ]; then
+  echo "teknoirbot-app-key: TEKNOIRBOT_NAME and TEKNOIRBOT_NAMESPACE must be set (they are in the council pod)" >&2
+  exit 1
 fi
 keyfile="${TNCTL_BOT_KEY_FILE:-}"
 if [ -z "$keyfile" ]; then
@@ -93,8 +100,8 @@ Mount it read-only into the relay only:
         args: ["--sse", "--key-file", "/run/teknoirbot-app/key", "--topic", "/devices/+/state/#"]
         env:
           - {name: TEKNOIRBOT_API, value: "$TEKNOIRBOT_API"}
-          - {name: TEKNOIRBOT_NAMESPACE, value: "${TEKNOIRBOT_NAMESPACE:-<teamspace>}"}
-          - {name: TEKNOIRBOT_NAME, value: "${TEKNOIRBOT_NAME:-<bot>}"}
+          - {name: TEKNOIRBOT_NAMESPACE, value: "$TEKNOIRBOT_NAMESPACE"}
+          - {name: TEKNOIRBOT_NAME, value: "$TEKNOIRBOT_NAME"}
         volumeMounts:
           - {name: bot-key, mountPath: /run/teknoirbot-app, readOnly: true}
     volumes:

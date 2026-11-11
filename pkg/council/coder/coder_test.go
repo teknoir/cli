@@ -194,6 +194,31 @@ func TestEnvironmentDropsOutsiders(t *testing.T) {
 	}
 }
 
+// TestEnvironmentPassesTheBotName: the skills read TEKNOIRBOT_NAME (the relay's own-device filter,
+// teknoirbot-app-key), so the Coder's child gets it.
+func TestEnvironmentPassesTheBotName(t *testing.T) {
+	needUnix(t)
+	b := newBed(t)
+	cfg := b.Config()
+	cfg.Environ = func() []string {
+		return []string{
+			"PATH=" + b.Bin + ":" + os.Getenv("PATH"),
+			"TEKNOIRBOT_NAME=scout",
+			"TEKNOIRBOT_NAMESPACE=teknoir-demo",
+		}
+	}
+	rep := ctxRun(New(cfg), b.task("go"))
+	if rep.State != StateDone {
+		t.Fatalf("state %q reason %q error %q", rep.State, rep.Reason, rep.Error)
+	}
+	env := b.read("env")
+	for _, want := range []string{"TEKNOIRBOT_NAME=scout", "TEKNOIRBOT_NAMESPACE=teknoir-demo"} {
+		if !hasEnv(env, want) {
+			t.Errorf("environment lacks %q: %s", want, env)
+		}
+	}
+}
+
 func TestEffortMapping(t *testing.T) {
 	needUnix(t)
 	cases := []struct{ effort, want string }{

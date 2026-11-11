@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -61,6 +63,32 @@ func TestSkillsAreWellFormed(t *testing.T) {
 	}
 	for _, problem := range lintSkills(os.DirFS(".")) {
 		t.Error(problem)
+	}
+}
+
+// TestAppKeyNeedsTheBotName: teknoirbot-app-key writes the Secret a relay reads with, and the relay
+// filters the platform's stream by TEKNOIRBOT_NAME and TEKNOIRBOT_NAMESPACE. Without them it must
+// stop before touching the cluster rather than write a Secret with a made-up name.
+func TestAppKeyNeedsTheBotName(t *testing.T) {
+	const script = "skills/teknoir-mqtt-streams/scripts/teknoirbot-app-key"
+	content, err := os.ReadFile(filepath.FromSlash(script))
+	if err != nil {
+		t.Skipf("no %s next to the test: %v", script, err)
+	}
+	if bash, lookErr := exec.LookPath("bash"); lookErr != nil {
+		t.Log("bash is not installed: the script's syntax is not checked")
+	} else if out, runErr := exec.Command(bash, "-n", filepath.FromSlash(script)).CombinedOutput(); runErr != nil {
+		t.Fatalf("bash -n %s: %v\n%s", script, runErr, out)
+	}
+	const want = "TEKNOIRBOT_NAME and TEKNOIRBOT_NAMESPACE must be set (they are in the council pod)"
+	if !strings.Contains(string(content), want) {
+		t.Errorf("%s does not say %q", script, want)
+	}
+	// No made-up default for either: an empty name writes a Secret the relay cannot filter by.
+	for _, madeUp := range []string{":-<bot>", ":-<teamspace>"} {
+		if strings.Contains(string(content), madeUp) {
+			t.Errorf("%s still defaults a name with %q", script, madeUp)
+		}
 	}
 }
 

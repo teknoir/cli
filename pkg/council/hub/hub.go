@@ -1017,6 +1017,15 @@ func errCodeOf(code string) string {
 	return "bot_error"
 }
 
+// stripNUL removes every NUL from s: Postgres refuses \x00 in a text column, so a K3 body that
+// carries one is answered 500 every time it is sent.
+func stripNUL(s string) string {
+	if !strings.ContainsRune(s, 0) {
+		return s
+	}
+	return strings.ReplaceAll(s, "\x00", "")
+}
+
 // cutChars is s cut to at most n characters (runes).
 func cutChars(s string, n int) string {
 	count := 0
@@ -1093,6 +1102,10 @@ func (p *Poster) sendFinish(ctx context.Context, fr *finishReq) {
 // never waits longer than ctx allows: when ctx ends it returns ctx.Err(), leaving the rest pending
 // for a later call.
 func (p *Poster) Finish(ctx context.Context, state, final, errCode, errMsg string, usage Usage) error {
+	// Postgres refuses a NUL in a text column: one in an answer or an error message would make K3
+	// answer 500 for every resend until the turn's deadline. This is the one place the body is
+	// built, so every outcome is covered.
+	final, errMsg = stripNUL(final), stripNUL(errMsg)
 	p.mu.Lock()
 	if p.state == stateFinished {
 		err := p.finErr

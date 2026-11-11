@@ -1082,6 +1082,55 @@ func TestMCPCouncilFailedTurnIsAResult(t *testing.T) {
 	}
 }
 
+// A done turn carries no error: the mid-turn error event it emitted (too_many_events) is history.
+func TestMCPCouncilDoneTurnDropsAnEarlierError(t *testing.T) {
+	councilFast(t)
+	p := newChatAPI(t)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadBody("thr_council", "MCP: test council", ""))
+	p.on("POST", "/bots/scout/chat/threads/thr_council/turns", 202, chatTurnIn("trn_run", "thr_council", ""))
+	p.onStream("/bots/scout/chat/threads/thr_council/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frameOf("trn_run", 1, "error", `"code":"too_many_events","message":"more than 3000 events: the turn goes on without them"`),
+			frameOf("trn_run", 2, "final", `"text":"the answer"`),
+			frameOf("trn_run", 3, "turn_end", `"state":"done"`),
+		})
+	})
+	cs := councilHarness(t, p)
+
+	got := mcpMap(t, mcpCall(t, cs, "council_run", map[string]any{"bot": "scout", "question": "status?"}))
+	if got["state"] != "done" || got["answer"] != "the answer" {
+		t.Errorf("result %v", got)
+	}
+	if _, ok := got["error"]; ok {
+		t.Errorf("a done turn carries an error: %v", got["error"])
+	}
+}
+
+// A failed turn keeps the last error it reported, not the first.
+func TestMCPCouncilFailedTurnKeepsTheLastError(t *testing.T) {
+	councilFast(t)
+	p := newChatAPI(t)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadBody("thr_council", "MCP: test council", ""))
+	p.on("POST", "/bots/scout/chat/threads/thr_council/turns", 202, chatTurnIn("trn_run", "thr_council", ""))
+	p.onStream("/bots/scout/chat/threads/thr_council/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frameOf("trn_run", 1, "error", `"code":"too_many_events","message":"more than 3000 events: the turn goes on without them"`),
+			frameOf("trn_run", 2, "error", `"code":"timeout","message":"the turn ran past its deadline"`),
+			frameOf("trn_run", 3, "turn_end", `"state":"failed"`),
+		})
+	})
+	cs := councilHarness(t, p)
+
+	got := mcpMap(t, mcpCall(t, cs, "council_run", map[string]any{"bot": "scout", "question": "status?"}))
+	if got["state"] != "failed" {
+		t.Errorf("state %v", got["state"])
+	}
+	turnErr, _ := got["error"].(map[string]any)
+	if turnErr["code"] != "timeout" {
+		t.Errorf("error %v, want the last one (timeout)", got["error"])
+	}
+}
+
 // ---------- (p) a person only ----------
 
 func TestMCPCouncilRefusedInBotMode(t *testing.T) {

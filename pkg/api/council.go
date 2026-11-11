@@ -31,7 +31,7 @@ type ChatBot struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	UID       string `json:"uid"`
-	// Access is what this person may do with the bot: none, read or creator.
+	// Access is the bot's own council level: none, read or creator.
 	Access string `json:"access"`
 	// Phase is null while the bot has no computer yet.
 	Phase *string `json:"phase"`
@@ -115,7 +115,9 @@ type ChatTurn struct {
 	ID       string `json:"id"`
 	ThreadID string `json:"threadId"`
 	Index    int    `json:"index"`
-	// Kind is ask (the council, or one member, answers a person) or member (the Captain delegating).
+	// Kind is ask (a person asks the council, or one member) or member (a person's turn in a
+	// conversation with one member: a thread made with a member, from `tnctl chat --member` or
+	// council_ask).
 	Kind    string          `json:"kind"`
 	Member  *string         `json:"member"`
 	Prompt  string          `json:"prompt"`

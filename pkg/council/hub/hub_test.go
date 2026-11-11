@@ -813,6 +813,31 @@ func TestFinishWithoutRun(t *testing.T) {
 	}
 }
 
+// TestFinishDropsNUL: Postgres refuses \x00 in a text column, so the answer and the error message
+// reach K3 without it.
+func TestFinishDropsNUL(t *testing.T) {
+	ev := &recorder{}
+	b := newBotAPI(t, okHandler(ev))
+	c := newClient(t, b.server.URL, keyFile(t))
+	p := c.PosterWith(turn(), nil, posterOpts())
+
+	if err := p.Finish(context.Background(), "failed", "a\x00b", "bot_error", "x\x00y", Usage{}); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	k3 := ev.k3()
+	if len(k3) != 1 {
+		t.Fatalf("K3 requests = %d, want 1", len(k3))
+	}
+	body := k3[0].body
+	if body["final"] != "ab" {
+		t.Errorf("final = %q, want %q", body["final"], "ab")
+	}
+	errBody, _ := body["error"].(map[string]any)
+	if errBody["message"] != "xy" {
+		t.Errorf("error message = %q, want %q", errBody["message"], "xy")
+	}
+}
+
 // TestFinishAfterRunCtxEnded: Run's ctx ends first, then Finish, with a live ctx, takes over and
 // sends the rest and K3.
 func TestFinishAfterRunCtxEnded(t *testing.T) {

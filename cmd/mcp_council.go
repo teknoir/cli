@@ -376,6 +376,12 @@ func (s *councilState) apply(t *councilTurn, ev api.ChatEvent) (ended bool) {
 		}
 		if json.Unmarshal(ev.Data, &d) == nil && d.State != "" {
 			t.state = d.State
+			if d.State == "done" {
+				// A turn that answered is not a failed one: an error event it emitted while it
+				// ran (too_many_events, a member's timeout it recovered from) is history. A
+				// failed or expired turn keeps the last error.
+				t.err = nil
+			}
 		}
 		return true
 	}

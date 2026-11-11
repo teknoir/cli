@@ -34,12 +34,13 @@ The council image starts it as `tini -- tnctl council serve --work-dir /work`. F
 
 A batch of events, or the finish, that fails with a network error, a `429` or a `5xx` is resent with the same
 batch number and the same finish body, which the platform stores once: the waits grow from 1 s to 5 s, or as
-long as the server's `Retry-After` asks, and the resends continue for up to 3 minutes of failures in a row —
-but no resend goes out at or after `D + 50 s`, the deadline the finish is posted by. A platform restart,
-30–90 s with no answer, does not end a running turn; the events emitted meanwhile wait in a buffer of up to
-4 MiB, and the ones past it are dropped; the work goes on. Past that window a turn that is still working ends
-`events_lost`, as before. A turn that is finishing drops the batch it lost and still sends the finish with
-the turn's own outcome, whose resends get a failure window of their own, still bounded by `D + 50 s`. A `409`
+long as the server's `Retry-After` asks, but at most 30 s, and the resends continue for up to 3 minutes of
+failures in a row — but no resend goes out at or after `D + 50 s`, the deadline the finish is posted by. A
+platform restart, 30–90 s with no answer, does not end a running turn; the events emitted meanwhile wait in a
+buffer of up to 4 MiB, and the ones past it are dropped; the work goes on. Past that window a turn that is
+still working ends `events_lost`, as before. A turn that is finishing drops the batch it lost and still sends
+the finish with the turn's own outcome, whose resends get a failure window of their own, still bounded by
+`D + 50 s`. A `409`
 (`turn_closed`, `claim_mismatch`), a `404` and any other refusal are not resent.
 
 A turn ends `done` with its answer, or `failed` with a code: `bad_turn` (a kind or a member the bot does not
@@ -101,8 +102,9 @@ access level `none` a `fleet` task is refused.
 
 ## Turn modes
 
-A turn arrives with a `kind` — `ask` (a person asks the council, or one member) or `member` (the Captain
-delegating to one member) — and, for an ask, a `mode`:
+A turn arrives with a `kind` — `ask` (a person asks the council, or one member) or `member` (a person's
+turn in a conversation with one member: a thread made with `tnctl chat --member` or `council_ask`) — and,
+for an ask, a `mode`:
 
 | Mode | What runs |
 | --- | --- |

@@ -910,12 +910,26 @@ env -u TEKNOIRBOT_API -u TNCTL_BOT_KEY_FILE "$appkey" demo-key > /dev/null 2>&1
 check_eq "app-key: outside bot mode exits 2" 2 "$?"
 
 printf '%s\n' "$keyvalue" > "$work/key"
+
+# The relay filters the platform's stream by the bot's name and teamspace: without them the copy
+# would write a Secret the relay cannot use, so it stops before any kubectl call.
+: > "$KUBECTL_LOG"
+env -u TEKNOIRBOT_NAME -u TEKNOIRBOT_NAMESPACE \
+  TEKNOIRBOT_API="https://tb-api.example:8085/api/device/bot/v1" TNCTL_BOT_KEY_FILE="$work/key" \
+  "$appkey" demo-key > /dev/null 2> "$work/appkey-name.err"
+check_eq "app-key: no bot name exits 1" 1 "$?"
+check_contains "app-key: the missing-name message" "$work/appkey-name.err" \
+  "TEKNOIRBOT_NAME and TEKNOIRBOT_NAMESPACE must be set (they are in the council pod)"
+check_eq "app-key: no kubectl call without the bot name" "" "$(cat "$KUBECTL_LOG")"
+
 TEKNOIRBOT_API="https://tb-api.example:8085/api/device/bot/v1" TNCTL_BOT_KEY_FILE="$work/key" \
+  TEKNOIRBOT_NAME=scout TEKNOIRBOT_NAMESPACE=teknoir-demo \
   "$appkey" 'Bad_Name' > /dev/null 2>&1
 check_eq "app-key: a bad name exits 2" 2 "$?"
 
 : > "$KUBECTL_LOG"
 out="$(TEKNOIRBOT_API="https://tb-api.example:8085/api/device/bot/v1" TNCTL_BOT_KEY_FILE="$work/key" \
+  TEKNOIRBOT_NAME=scout TEKNOIRBOT_NAMESPACE=teknoir-demo \
   "$appkey" demo-key 2> "$work/appkey.err")"
 rc=$?
 check_eq "app-key: the copy exits 0" 0 "$rc"
@@ -960,6 +974,10 @@ check_contains "app-key: the mount snippet carries a --topic" "$work/appkey.out"
 check_contains "app-key: the mount snippet sets TEKNOIRBOT_API" "$work/appkey.out" "TEKNOIRBOT_API"
 check_contains "app-key: the mount snippet carries the bot API URL" "$work/appkey.out" \
   "https://tb-api.example:8085/api/device/bot/v1"
+check_contains "app-key: the mount snippet carries the bot's name" "$work/appkey.out" \
+  "- {name: TEKNOIRBOT_NAME, value: \"scout\"}"
+check_contains "app-key: the mount snippet carries the teamspace" "$work/appkey.out" \
+  "- {name: TEKNOIRBOT_NAMESPACE, value: \"teknoir-demo\"}"
 
 # ---------------------------------------------------------------- teknoirbot-build
 

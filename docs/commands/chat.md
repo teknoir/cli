@@ -168,7 +168,7 @@ stops at once with exit 6 and the platform's reason. A frame the command cannot 
 | 3 | not found (`404`): the bot or the thread is not there |
 | 4 | the chat stream could not be followed: 6 failed attempts in a row (the turn goes on) |
 | 6 | not logged in or not allowed; you may not chat with this bot (`chat_not_allowed`, with the reason), or your access ended mid-turn (`access_lost`) |
-| 8 | a turn is already open in this thread (`turn_open`): follow it with `--follow`, then Ctrl-C cancels it |
+| 8 | conflict (`409`): the thread already has a turn open (`turn_open`): follow it with `--follow`, then Ctrl-C cancels it; the bot is suspended (`bot_suspended`): resume the bot; the bot is starting or being removed (`bot_not_ready`): wait, then run it again |
 | 9 | rate limited (`429`): too many turns or too many streams; wait the `Retry-After` |
 
 ## Examples

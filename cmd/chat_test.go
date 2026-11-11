@@ -2111,6 +2111,18 @@ func TestChatThreadsTableAndJSON(t *testing.T) {
 	}
 }
 
+// chat threads on a platform with the chat off says so, like chat itself: exit 1.
+func TestChatThreadsCouncilOff(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat/threads", 404, `{"code":"council_off","message":"The chat is off."}`)
+	_, _, err := runCLI(t, p.env(t), "chat", "threads", "scout")
+	if err == nil || exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "the TeknoirBot chat is turned off on this platform") {
+		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
 // The chat's tables never carry a terminal escape either.
 func TestChatThreadsCleanTitles(t *testing.T) {
 	noBotMode(t)
