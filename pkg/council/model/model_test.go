@@ -357,9 +357,59 @@ func TestStreamRequestBodyWithoutToolsOrFormat(t *testing.T) {
 	if oc["effort"] != "medium" {
 		t.Errorf("output_config.effort = %v, want medium", oc["effort"])
 	}
-	// Only one cache breakpoint besides the system block: nothing else may carry it.
-	if raw, _ := json.Marshal(body); strings.Count(string(raw), `"cache_control"`) != 1 {
-		t.Errorf("body has %d cache_control breakpoints, want 1 (the system block): %s", strings.Count(string(raw), `"cache_control"`), raw)
+	// Two cache breakpoints: the system block and the conversation tail. Nothing else may carry one.
+	if raw, _ := json.Marshal(body); strings.Count(string(raw), `"cache_control"`) != 2 {
+		t.Errorf("body has %d cache_control breakpoints, want 2 (the system block and the top level): %s", strings.Count(string(raw), `"cache_control"`), raw)
+	}
+}
+
+func TestStreamRequestBodyTopLevelCacheControl(t *testing.T) {
+	p := newProxy(t, nil)
+	c := newClient(t, p.base(), keyFile(t, "k"))
+	if _, _, err := c.Stream(context.Background(), simple(), nil); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	body := p.requests()[0].body
+	cc, _ := body["cache_control"].(map[string]any)
+	if cc["type"] != "ephemeral" {
+		t.Errorf("top-level cache_control = %v, want {type: ephemeral}", body["cache_control"])
+	}
+}
+
+func TestStreamToolChoiceNone(t *testing.T) {
+	tools := []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{
+		Name:        "whoami",
+		InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}},
+	}}}
+	for _, tc := range []struct {
+		name  string
+		tools []anthropic.ToolUnionParam
+		want  bool
+	}{
+		{"with tools", tools, true},
+		{"without tools", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newProxy(t, nil)
+			c := newClient(t, p.base(), keyFile(t, "k"))
+			req := simple()
+			req.Tools = tc.tools
+			req.ToolChoiceNone = true
+			if _, _, err := c.Stream(context.Background(), req, nil); err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			body := p.requests()[0].body
+			choice, ok := body["tool_choice"].(map[string]any)
+			if !tc.want {
+				if ok {
+					t.Errorf("tool_choice = %v, want it absent without tools", body["tool_choice"])
+				}
+				return
+			}
+			if !ok || choice["type"] != "none" {
+				t.Errorf("tool_choice = %v, want {type: none}", body["tool_choice"])
+			}
+		})
 	}
 }
 

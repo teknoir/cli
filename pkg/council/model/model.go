@@ -3,7 +3,8 @@
 //
 // The proxy allows only claude-sonnet-5-5 and claude-haiku-5-5, effort low, medium or high, and
 // refuses forced tool use (tool_choice any or tool) on those two models, which is why Request has
-// no field for it: the council always runs with tools available and tool_choice auto.
+// no field for it: a request with tools runs with tool_choice auto, or none when ToolChoiceNone asks
+// for an answer.
 package model
 
 import (
@@ -80,6 +81,9 @@ type Request struct {
 	Messages []anthropic.MessageParam
 	// Tools are the tools the model may call; empty sends none.
 	Tools []anthropic.ToolUnionParam
+	// ToolChoiceNone sends tool_choice {"type":"none"} when there are tools: the model must answer
+	// rather than call one. Without tools it changes nothing.
+	ToolChoiceNone bool
 	// MaxTokens is the cap on the answer, 1 to MaxTokensLimit.
 	MaxTokens int64
 	// Format is an optional JSON schema the answer must follow.
@@ -236,6 +240,9 @@ func params(req Request) (anthropic.MessageNewParams, error) {
 		OutputConfig: anthropic.OutputConfigParam{
 			Effort: anthropic.OutputConfigEffort(req.Effort),
 		},
+		// The conversation tail is the third cache breakpoint, beside the system block and the last
+		// tool: the rounds of a tool loop then read it back instead of resending it.
+		CacheControl: ephem(),
 	}
 	if req.System != "" {
 		// The system prompt is the stable head of every request of a member, so it is the cache
@@ -257,7 +264,11 @@ func params(req Request) (anthropic.MessageNewParams, error) {
 			p.Tools[last].OfTool = &tool
 		}
 		// Never "any" or "tool": the two models the proxy allows reject forced tool use.
-		p.ToolChoice = anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{}}
+		if req.ToolChoiceNone {
+			p.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
+		} else {
+			p.ToolChoice = anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{}}
+		}
 	}
 	return p, nil
 }
