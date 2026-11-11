@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -144,6 +145,8 @@ type councilTurn struct {
 	members  []mcpCouncilMember
 	critique json.RawMessage
 	final    string
+	// finalCut says the stream carried a shortened final: the turn's own record has the answer whole.
+	finalCut bool
 	err      *api.ChatError
 	usage    json.RawMessage
 }
@@ -340,19 +343,22 @@ func (s *councilState) apply(t *councilTurn, ev api.ChatEvent) (ended bool) {
 			}
 			return false
 		}
-		var r struct {
-			Summary string `json:"summary"`
-		}
-		_ = json.Unmarshal(d.Report, &r)
-		t.members = append(t.members, mcpCouncilMember{Member: d.Member, Task: d.Task, Summary: r.Summary})
+		t.members = append(t.members, mcpCouncilMember{Member: d.Member, Task: d.Task, Summary: councilMemberSummary(d.Member, d.Report)})
 	case "critique":
 		t.critique = councilObject(ev.Data, "turnId", "at")
 	case "final":
 		var d struct {
 			Text string `json:"text"`
+			Cut  bool   `json:"cut"`
 		}
+		// A shortened final is not the answer: leaving t.final empty has councilFinish read the
+		// turn's own record, which has it whole. t.finalCut says so, for a turn that did not end
+		// done: councilFinish reads the record for it too.
 		if json.Unmarshal(ev.Data, &d) == nil {
-			t.final = d.Text
+			t.final, t.finalCut = "", d.Cut
+			if !d.Cut {
+				t.final = d.Text
+			}
 		}
 	case "usage":
 		t.usage = councilObject(ev.Data, "turnId", "at")
@@ -412,6 +418,8 @@ type councilSnapshot struct {
 	report, critique, usage                     json.RawMessage
 	members                                     []mcpCouncilMember
 	err                                         *api.ChatError
+	// finalCut says the stream's final was shortened: the record has the whole answer.
+	finalCut bool
 }
 
 func (s *councilState) snapshot(t *councilTurn) councilSnapshot {
@@ -420,7 +428,7 @@ func (s *councilState) snapshot(t *councilTurn) councilSnapshot {
 	snap := councilSnapshot{
 		id: t.id, bot: t.bot, thread: t.thread, kind: t.kind, member: t.member,
 		state: t.state, final: t.final, report: t.report, critique: t.critique, usage: t.usage,
-		err: t.err,
+		err: t.err, finalCut: t.finalCut,
 	}
 	snap.members = append(snap.members, t.members...)
 	if snap.state == "" {
@@ -958,13 +966,14 @@ func councilPoll(ctx context.Context, fl *api.Fleet, st *councilState, t *counci
 }
 
 // councilFinish completes t from the thread's own record when its stream ended without saying how:
-// the wait may have run out just as the turn ended. A call its agent cancelled reads nothing more.
+// the wait may have run out just as the turn ended, or its final was shortened. A call its agent
+// cancelled reads nothing more.
 func councilFinish(ctx context.Context, fl *api.Fleet, st *councilState, t *councilTurn) error {
 	if state := st.stateOf(t); state == "" {
 		st.setState(t, "queued")
 	}
 	snap := st.snapshot(t)
-	if snap.state != "done" || snap.final != "" || ctx.Err() != nil {
+	if snap.final != "" || ctx.Err() != nil || (snap.state != "done" && !snap.finalCut) {
 		return nil
 	}
 	d, _, err := fl.ChatThread(ctx, t.bot, t.thread)
@@ -1071,6 +1080,53 @@ func councilRunResult(s councilSnapshot) mcpCouncilRunResult {
 		Usage:     s.usage,
 		Next:      councilNext(s),
 	}
+}
+
+// councilSummaryRunes is how much of the Coder's answer a member's summary carries.
+const councilSummaryRunes = 1000
+
+// councilMemberSummary is one member's line in a council turn's members. Fleet's report carries a
+// summary of its own; the Coder's is its task's record, so its summary is the start of its answer,
+// with how the task ended when it did not finish.
+func councilMemberSummary(member string, report json.RawMessage) string {
+	if member != "coder" {
+		var f struct {
+			Summary string `json:"summary"`
+		}
+		_ = json.Unmarshal(report, &f)
+		return f.Summary
+	}
+	// The Coder's report: a coder.Report, or the cut map the platform sends instead of a long one.
+	var r struct {
+		State  string `json:"state"`
+		Reason string `json:"reason"`
+		Text   string `json:"text"`
+		Error  string `json:"error"`
+	}
+	if json.Unmarshal(report, &r) != nil {
+		return ""
+	}
+	// The text is the bot's own: no control characters, one line, and only its start.
+	text := terminalText(cleanBotText(r.Text))
+	if text == "" {
+		// A task that failed without an answer says why, rather than only how it ended.
+		text = terminalText(cleanBotText(r.Error))
+	}
+	if utf8.RuneCountInString(text) > councilSummaryRunes {
+		text = string([]rune(text)[:councilSummaryRunes]) + "…"
+	}
+	if r.State != "" && r.State != "done" {
+		state := " (" + strings.TrimSpace(cleanBotText(r.State))
+		if r.Reason != "" {
+			state += ": " + strings.TrimSpace(cleanBotText(r.Reason))
+		}
+		state += ")"
+		if text == "" {
+			state = state[1:] // no text to separate it from
+		}
+		text += state
+	}
+	return text
 }
 
 // councilNext is the hint of a turn that has not ended: it says how to wait for it.

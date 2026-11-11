@@ -366,6 +366,23 @@ func stripAnchor(target string) string {
 	return target
 }
 
+// TestK3sAppsSkillIsForTheCouncilPod checks that the skill does not send the Coder to the desktop
+// pod: it runs in the council pod, which has no browser, no X server and no screenshot tool.
+func TestK3sAppsSkillIsForTheCouncilPod(t *testing.T) {
+	if _, err := fs.Stat(os.DirFS("."), "skills"); err != nil {
+		t.Skip("no skills/ next to the test")
+	}
+	text, err := fs.ReadFile(os.DirFS("."), "skills/teknoir-k3s-apps/SKILL.md")
+	if err != nil {
+		t.Fatalf("skills/teknoir-k3s-apps/SKILL.md: %v", err)
+	}
+	for _, banned := range []string{"desktop-browser", "scrot", "/home/desktop", "not that 20 GiB", "ask for approval", "permission rules"} {
+		if strings.Contains(string(text), banned) {
+			t.Errorf("skills/teknoir-k3s-apps/SKILL.md names %q: the Coder runs in the council pod, which has neither a browser nor a screenshot tool", banned)
+		}
+	}
+}
+
 // TestLintCatchesBadSkills runs the checker over in-memory skills: each bad one must be reported, and a
 // good one, with a link to a sibling skill, must pass.
 func TestLintCatchesBadSkills(t *testing.T) {

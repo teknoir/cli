@@ -861,7 +861,7 @@ func TestMCPCouncilRun(t *testing.T) {
 			frameOf("trn_run", 2, "turn_start", `"mode":"council"`),
 			frameOf("trn_run", 3, "plan", `"mode":"council","tasks":[{"member":"fleet","task":"look"},{"member":"coder","task":"check"}]`),
 			frameOf("trn_run", 4, "member_done", `"member":"fleet","task":0,"report":{"summary":"two robots","findings":[],"proposals":[],"confidence":"high","open_questions":[]}`),
-			frameOf("trn_run", 5, "member_done", `"member":"coder","task":1,"report":{"summary":"all green","findings":[],"proposals":[],"confidence":"high","open_questions":[]}`),
+			frameOf("trn_run", 5, "member_done", `"member":"coder","task":1,"report":{"state":"done","text":"all green"}`),
 			frameOf("trn_run", 6, "critique", `"issues":[{"member":"fleet","severity":"minor","claim":"x","why":"y"}],"note":"one issue"`),
 			frameOf("trn_run", 7, "final", `"text":"## Answer\neverything is fine"`),
 			frameOf("trn_run", 8, "usage", `"calls":3,"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"ms":900`),
@@ -916,6 +916,144 @@ func TestMCPCouncilRun(t *testing.T) {
 	}
 	if body["mode"] != "council" || body["effort"] != "high" || body["prompt"] != "status?" {
 		t.Errorf("turn body %s", p.seen("POST", "/bots/scout/chat/threads/thr_council/turns")[0].Body)
+	}
+}
+
+// A final the platform shortened is not the answer: the turn's own record has it whole, and
+// councilFinish reads it from there.
+func TestMCPCouncilRunCutFinalComesFromTheThread(t *testing.T) {
+	councilFast(t)
+	p := newChatAPI(t)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadBody("thr_council", "MCP: test council", ""))
+	p.on("POST", "/bots/scout/chat/threads/thr_council/turns", 202, chatTurnIn("trn_run", "thr_council", ""))
+	p.onStream("/bots/scout/chat/threads/thr_council/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frameOf("trn_run", 1, "turn_queued", `"index":1,"kind":"ask","member":null`),
+			frameOf("trn_run", 2, "turn_start", `"mode":"council"`),
+			frameOf("trn_run", 3, "final", `"text":"the whole…","cut":true,"type":"final","bytes":40960`),
+			frameOf("trn_run", 4, "turn_end", `"state":"done"`),
+		})
+	})
+	p.on("GET", "/bots/scout/chat/threads/thr_council", 200, chatDetailBody("thr_council", 4,
+		chatTurnRecord("trn_run", "thr_council", "done", "the whole answer", "")))
+	cs := councilHarness(t, p)
+
+	got := mcpMap(t, mcpCall(t, cs, "council_run", map[string]any{"bot": "scout", "question": "status?"}))
+	if got["state"] != "done" {
+		t.Errorf("state %v", got["state"])
+	}
+	if want := "the whole answer"; got["answer"] != want {
+		t.Errorf("answer %v, want %q (the record's whole answer)", got["answer"], want)
+	}
+}
+
+// A shortened final of a turn that did not end done is not the answer either: councilFinish reads the
+// thread's record, which has it whole.
+func TestMCPCouncilRunCutFinalOnAFailedTurn(t *testing.T) {
+	councilFast(t)
+	p := newChatAPI(t)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadBody("thr_council", "MCP: test council", ""))
+	p.on("POST", "/bots/scout/chat/threads/thr_council/turns", 202, chatTurnIn("trn_run", "thr_council", ""))
+	p.onStream("/bots/scout/chat/threads/thr_council/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frameOf("trn_run", 1, "turn_start", `"mode":"council"`),
+			frameOf("trn_run", 2, "final", `"text":"the whole…","cut":true,"type":"final","bytes":40960`),
+			frameOf("trn_run", 3, "turn_end", `"state":"failed"`),
+		})
+	})
+	p.on("GET", "/bots/scout/chat/threads/thr_council", 200, chatDetailBody("thr_council", 3,
+		chatTurnRecord("trn_run", "thr_council", "failed", "the whole answer", "")))
+	cs := councilHarness(t, p)
+
+	got := mcpMap(t, mcpCall(t, cs, "council_run", map[string]any{"bot": "scout", "question": "status?"}))
+	if got["state"] != "failed" {
+		t.Errorf("state %v", got["state"])
+	}
+	if want := "the whole answer"; got["answer"] != want {
+		t.Errorf("answer %v, want %q (the record's whole answer)", got["answer"], want)
+	}
+	if n := len(p.seen("GET", "/bots/scout/chat/threads/thr_council")); n != 1 {
+		t.Errorf("%d reads of the thread, want 1", n)
+	}
+}
+
+// council_run's members carry the Coder's own report as a summary: the start of its answer, and how
+// its task ended when it did not finish. Fleet's entries are unchanged.
+func TestMCPCouncilRunCoderSummary(t *testing.T) {
+	councilFast(t)
+	p := newChatAPI(t)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadBody("thr_council", "MCP: test council", ""))
+	p.on("POST", "/bots/scout/chat/threads/thr_council/turns", 202, chatTurnIn("trn_run", "thr_council", ""))
+	p.onStream("/bots/scout/chat/threads/thr_council/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frameOf("trn_run", 1, "turn_start", `"mode":"council"`),
+			frameOf("trn_run", 2, "member_done", `"member":"fleet","task":0,"report":{"summary":"two robots","findings":[],"proposals":[],"confidence":"high","open_questions":[]}`),
+			frameOf("trn_run", 3, "member_done", `"member":"coder","task":1,"report":{"state":"done","reason":"","text":"did X","changed":[],"steps":2,"tools":1}`),
+			frameOf("trn_run", 4, "member_done", `"member":"coder","task":2,"report":{"state":"failed","reason":"timeout","text":"still going"}`),
+			frameOf("trn_run", 5, "member_done", `"member":"coder","task":3,"report":{"state":"done","reason":"","text":"cut\u001b[31m report","changed":["a"],"cut":true}`),
+			frameOf("trn_run", 6, "final", `"text":"done"`),
+			frameOf("trn_run", 7, "turn_end", `"state":"done"`),
+		})
+	})
+	cs := councilHarness(t, p)
+
+	got := mcpMap(t, mcpCall(t, cs, "council_run", map[string]any{"bot": "scout", "question": "status?"}))
+	members, _ := got["members"].([]any)
+	want := []struct {
+		member  string
+		task    int
+		summary string
+	}{
+		{"fleet", 0, "two robots"},
+		{"coder", 1, "did X"},
+		{"coder", 2, "still going (failed: timeout)"},
+		{"coder", 3, "cut report"},
+	}
+	if len(members) != len(want) {
+		t.Fatalf("members %v, want %d", got["members"], len(want))
+	}
+	for i, w := range want {
+		m, _ := members[i].(map[string]any)
+		if m["member"] != w.member || m["task"] != float64(w.task) || m["summary"] != w.summary {
+			t.Errorf("member %d %v, want %s/%d/%q", i, m, w.member, w.task, w.summary)
+		}
+	}
+}
+
+// A Coder report's summary is the start of its answer: cleaned, one line, 1000 characters at most,
+// and with its state when the task did not finish.
+func TestCouncilCoderSummary(t *testing.T) {
+	long := strings.Repeat("x", councilSummaryRunes+1)
+	cases := []struct {
+		name   string
+		report string
+		want   string
+	}{
+		{"done", `{"state":"done","reason":"","text":"did X"}`, "did X"},
+		{"a control character", `{"state":"done","text":"did\u0007 X"}`, "did X"},
+		{"one line", `{"state":"done","text":"did X\n\n"}`, "did X"},
+		{"no newlines or tabs", `{"state":"done","text":"line one\n\tline two"}`, "line one line two"},
+		{"failed with a reason", `{"state":"failed","reason":"timeout","text":"half"}`, "half (failed: timeout)"},
+		{"failed without a reason", `{"state":"failed","text":"half"}`, "half (failed)"},
+		{"failed without text", `{"state":"failed","reason":"timeout"}`, "(failed: timeout)"},
+		{"failed with the report's error", `{"state":"failed","error":"disk full"}`, "disk full (failed)"},
+		{"the 1000 characters", `{"state":"done","text":` + jsonText(strings.Repeat("x", councilSummaryRunes)) + `}`, strings.Repeat("x", councilSummaryRunes)},
+		{"cut to 1000 characters", `{"state":"done","text":` + jsonText(long) + `}`, long[:councilSummaryRunes] + "…"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := councilMemberSummary("coder", json.RawMessage(c.report))
+			if got != c.want {
+				t.Errorf("summary %q, want %q", got, c.want)
+			}
+			if strings.ContainsAny(got, "\n\t") {
+				t.Errorf("summary %q: a newline or a tab reached the members list", got)
+			}
+		})
+	}
+	// Fleet's report keeps its own summary.
+	if got := councilMemberSummary("fleet", json.RawMessage(`{"summary":"two robots","confidence":"high"}`)); got != "two robots" {
+		t.Errorf("Fleet's summary %q", got)
 	}
 }
 
@@ -1216,7 +1354,7 @@ func TestMCPCouncilTwoWaitersCountEachEventOnce(t *testing.T) {
 	release := make(chan struct{})
 	events := []string{
 		frameOf("trn_run", 2, "member_done", `"member":"fleet","task":0,"report":{"summary":"fleet says"}`),
-		frameOf("trn_run", 3, "member_done", `"member":"coder","task":1,"report":{"summary":"coder says"}`),
+		frameOf("trn_run", 3, "member_done", `"member":"coder","task":1,"report":{"state":"done","text":"coder says"}`),
 	}
 	p.onStream("/bots/scout/chat/threads/thr_council/events", func(w http.ResponseWriter, r *http.Request, conn int) {
 		// Both connections send the same two events: the second waiter must not count them again.

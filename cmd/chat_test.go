@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/teknoir/cli/pkg/api"
 )
 
@@ -162,6 +164,29 @@ func writeFrames(w http.ResponseWriter, frames []string) {
 	w.(http.Flusher).Flush()
 }
 
+// chatThreadDetail is P4's answer for a thread: its turns, as JSON objects, and its last event.
+func chatThreadDetail(thread string, lastSeq int64, turns ...string) string {
+	return fmt.Sprintf(`{"thread":{"id":%q,"title":"t","origin":"cli","createdAt":1,"updatedAt":1,"turnCount":%d,"lastTurn":null},"turns":[%s],"lastSeq":%d}`,
+		thread, len(turns), strings.Join(turns, ","), lastSeq)
+}
+
+// chatTurnAt is one turn of a thread's detail: its index, its state and its answer.
+func chatTurnAt(id, thread string, index int, state, final string) string {
+	f := "null"
+	if final != "" {
+		f = jsonText(final)
+	}
+	return fmt.Sprintf(`{"id":%q,"threadId":%q,"index":%d,"kind":"ask","member":null,"prompt":"p","options":{},`+
+		`"state":%q,"final":%s,"error":null,"usage":null,"author":{"ref":"r"},"createdAt":1}`, id, thread, index, state, f)
+}
+
+// chatTurnFailedAt is chatTurnAt for a turn that failed, with the turn's error.
+func chatTurnFailedAt(id, thread string, index int, code, message string) string {
+	return fmt.Sprintf(`{"id":%q,"threadId":%q,"index":%d,"kind":"ask","member":null,"prompt":"p","options":{},`+
+		`"state":"failed","final":null,"error":{"code":%q,"message":%q},"usage":null,"author":{"ref":"r"},"createdAt":1}`,
+		id, thread, index, code, message)
+}
+
 // finalContent is the answer of the quick turn below.
 const (
 	quickFinal   = "Hello there."
@@ -267,6 +292,99 @@ func TestChatFinalDiffersFromTheCaptainStream(t *testing.T) {
 	}
 	if want := "a draft\n\nthe answer\n"; out != want {
 		t.Errorf("stdout %q, want %q", out, want)
+	}
+}
+
+// A final the platform shortened for the stream is not the answer: the whole one, from the thread's
+// own record, is printed when the turn ends.
+func TestChatCutFinalComesFromTheThread(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "text_delta", `"member":"captain","text":"the whole "`),
+			frame(2, "final", `"text":"the whole…","cut":true,"type":"final","bytes":40960`),
+			frame(3, "turn_end", `"state":"done"`),
+		})
+	})
+	p.on("GET", "/bots/scout/chat/threads/thr_new", 200, chatThreadDetail("thr_new", 3,
+		chatTurnAt("trn_1", "thr_new", 1, "done", "the whole answer")))
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if want := "the whole answer\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if strings.Contains(out, "the whole…") {
+		t.Errorf("the shortened final was printed as the answer: %q", out)
+	}
+	if n := len(p.seen("GET", "/bots/scout/chat/threads/thr_new")); n != 1 {
+		t.Errorf("%d reads of the thread, want 1", n)
+	}
+}
+
+// When the thread cannot be read, a shortened final is printed after all, with the line that says
+// how to read the answer whole.
+func TestChatCutFinalWhenTheThreadCannotBeRead(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "final", `"text":"the whole…","cut":true`),
+			frame(2, "turn_end", `"state":"done"`),
+		})
+	})
+	// No GET of the thread: the platform refuses it.
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if want := "the whole…\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if want := "the answer was shortened by the stream; read it whole with: tnctl chat scout --thread thr_new --follow"; !strings.Contains(errs, want) {
+		t.Errorf("stderr %q, want %q", errs, want)
+	}
+}
+
+// When the thread's record has no final for the turn (yet), the shortened final is printed after
+// all, with the same line, and the record is read once.
+func TestChatCutFinalWhenTheRecordHasNoFinal(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "final", `"text":"the whole…","cut":true`),
+			frame(2, "turn_end", `"state":"done"`),
+		})
+	})
+	p.on("GET", "/bots/scout/chat/threads/thr_new", 200, chatThreadDetail("thr_new", 2,
+		chatTurnAt("trn_1", "thr_new", 1, "running", "")))
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if want := "the whole…\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if want := "the answer was shortened by the stream; read it whole with: tnctl chat scout --thread thr_new --follow"; !strings.Contains(errs, want) {
+		t.Errorf("stderr %q, want %q", errs, want)
+	}
+	if n := len(p.seen("GET", "/bots/scout/chat/threads/thr_new")); n != 1 {
+		t.Errorf("%d reads of the thread, want 1", n)
 	}
 }
 
@@ -424,6 +542,393 @@ func TestChatContinuesAThread(t *testing.T) {
 	}
 }
 
+// ---------- --follow ----------
+
+// --follow follows the thread's last turn from its first event, leaving the other turns' events out,
+// and posts nothing.
+func TestChatFollowARunningTurn(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_old", 200, chatThreadDetail("thr_old", 12,
+		chatTurnAt("trn_0", "thr_old", 1, "done", "the older answer"),
+		chatTurnAt("trn_9", "thr_old", 2, "running", "")))
+	var mu sync.Mutex
+	var opened []string
+	p.onStream("/bots/scout/chat/threads/thr_old/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		mu.Lock()
+		opened = append(opened, r.Header.Get("Last-Event-ID"))
+		mu.Unlock()
+		writeFrames(w, []string{
+			// the thread's stream replays from the beginning: the older turn's events come too
+			frameOf("trn_0", 1, "text_delta", `"member":"captain","text":"the older "`),
+			frameOf("trn_0", 2, "final", `"text":"the older answer"`),
+			frameOf("trn_0", 3, "turn_end", `"state":"done"`),
+			frameOf("trn_9", 4, "text_delta", `"member":"captain","text":"half"`),
+			frameOf("trn_9", 5, "final", `"text":"half an answer, whole"`),
+			frameOf("trn_9", 6, "turn_end", `"state":"done"`),
+		})
+	})
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_old", "--follow")
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if want := "half an answer, whole\n"; out != want {
+		t.Errorf("stdout %q, want %q (only the followed turn)", out, want)
+	}
+	if strings.Contains(out, "the older") {
+		t.Errorf("another turn's events were printed: %q", out)
+	}
+	if n := len(p.seen("POST", "/bots/scout/chat/threads")); n != 0 {
+		t.Errorf("%d threads were created", n)
+	}
+	if n := len(p.seen("POST", "/bots/scout/chat/threads/thr_old/turns")); n != 0 {
+		t.Errorf("%d turns were posted", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(opened) != 1 || opened[0] != "" {
+		t.Errorf("the stream was opened at %q, want once from the first event", opened)
+	}
+}
+
+// --follow on a turn that already ended prints it from the thread's record, opening no stream.
+func TestChatFollowAFinishedTurn(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_old", 200, chatThreadDetail("thr_old", 3,
+		chatTurnAt("trn_0", "thr_old", 1, "done", "the first answer"),
+		chatTurnAt("trn_1", "thr_old", 2, "done", "the answer")))
+	p.onStream("/bots/scout/chat/threads/thr_old/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		t.Error("a turn that ended opened the stream")
+	})
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_old", "--follow")
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if want := "the answer\n"; out != want {
+		t.Errorf("stdout %q, want %q (the last turn's answer)", out, want)
+	}
+	if n := len(p.seen("GET", "/bots/scout/chat/threads/thr_old")); n != 1 {
+		t.Errorf("%d reads of the thread, want 1", n)
+	}
+}
+
+// --follow on a turn that failed exits 1 with the turn's error, from the thread's record.
+func TestChatFollowAFailedTurn(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_old", 200, chatThreadDetail("thr_old", 2,
+		chatTurnFailedAt("trn_1", "thr_old", 1, "member_failed", "The Coder ran out of time.")))
+	p.onStream("/bots/scout/chat/threads/thr_old/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		t.Error("a turn that ended opened the stream")
+	})
+	out, _, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_old", "--follow")
+	if err == nil || exitCodeOf(err) != codeError {
+		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+	}
+	if want := "the turn failed: member_failed: The Coder ran out of time."; err.Error() != want {
+		t.Errorf("error %q, want %q", err, want)
+	}
+	if out != "" {
+		t.Errorf("stdout %q, want nothing (the turn has no answer)", out)
+	}
+}
+
+// A thread with no turn yet is an error: there is nothing to follow.
+func TestChatFollowAThreadWithoutATurn(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_old", 200, chatThreadDetail("thr_old", 0))
+	_, _, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_old", "--follow")
+	if err == nil || exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "thread thr_old has no turn yet") {
+		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+// --follow asks nothing, so it never reads stdin: through ssh or inside a while-read loop stdin is an
+// open pipe, and reading it would block the command or swallow the loop's input.
+func TestChatFollowDoesNotReadStdin(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_old", 200, chatThreadDetail("thr_old", 3,
+		chatTurnAt("trn_1", "thr_old", 1, "done", "the answer")))
+	const rest = "rest of a while-read loop\n"
+	in := strings.NewReader(rest)
+	old := cliStdin
+	cliStdin = in
+	t.Cleanup(func() { cliStdin = old })
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_old", "--follow")
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if want := "the answer\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if n := in.Len(); n != len(rest) {
+		t.Errorf("stdin was read: %d of %d bytes left", n, len(rest))
+	}
+}
+
+// --follow on a terminal prints only the followed turn's text: the older turns' deltas the stream
+// replays are not printed as the answer.
+func TestChatFollowLeavesOtherTurnsTextOutOnATerminal(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_old", 200, chatThreadDetail("thr_old", 12,
+		chatTurnAt("trn_0", "thr_old", 1, "done", "the older answer"),
+		chatTurnAt("trn_9", "thr_old", 2, "running", "")))
+	p.onStream("/bots/scout/chat/threads/thr_old/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frameOf("trn_0", 1, "text_delta", `"member":"captain","text":"the older text"`),
+			frameOf("trn_0", 2, "final", `"text":"the older answer"`),
+			frameOf("trn_0", 3, "turn_end", `"state":"done"`),
+			frameOf("trn_9", 4, "text_delta", `"member":"captain","text":"mine"`),
+			frameOf("trn_9", 5, "final", `"text":"mine, whole"`),
+			frameOf("trn_9", 6, "turn_end", `"state":"done"`),
+		})
+	})
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_old", "--follow")
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if !strings.Contains(out, "mine") || !strings.Contains(out, "mine, whole") {
+		t.Errorf("stdout %q lacks the followed turn's answer", out)
+	}
+	if strings.Contains(out, "the older") {
+		t.Errorf("another turn's text was printed: %q", out)
+	}
+}
+
+// A followed running turn that ends failed exits 1 with the error the stream carried.
+func TestChatFollowARunningTurnThatFails(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_old", 200, chatThreadDetail("thr_old", 0,
+		chatTurnAt("trn_9", "thr_old", 1, "running", "")))
+	p.onStream("/bots/scout/chat/threads/thr_old/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frameOf("trn_9", 1, "error", `"code":"member_failed","message":"The Coder ran out of time."`),
+			frameOf("trn_9", 2, "turn_end", `"state":"failed"`),
+		})
+	})
+	_, _, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_old", "--follow")
+	if err == nil || exitCodeOf(err) != codeError {
+		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+	}
+	if want := "the turn failed: member_failed: The Coder ran out of time."; err.Error() != want {
+		t.Errorf("error %q, want %q", err, want)
+	}
+	// the error was in a frame: the thread's own record is not needed
+	if n := len(p.seen("GET", "/bots/scout/chat/threads/thr_old")); n != 1 {
+		t.Errorf("%d reads of the thread, want 1", n)
+	}
+}
+
+// --json follows a turn from its stored events: only that turn's, as JSON lines, and its turn_end
+// gives the exit code.
+func TestChatFollowJSON(t *testing.T) {
+	oldTurn := frameOf("trn_0", 1, "text_delta", `"member":"captain","text":"the older text"`)
+	oldEnd := frameOf("trn_0", 2, "turn_end", `"state":"done"`)
+	cases := []struct {
+		name       string
+		turn       string
+		p4         string
+		frames     []string
+		wantCode   int
+		wantErr    string
+		wantEvents []struct {
+			seq int64
+			typ string
+		}
+	}{
+		{
+			name: "a turn that ended done",
+			turn: chatTurnAt("trn_2", "thr_old", 2, "done", "the answer"),
+			frames: []string{
+				oldTurn, oldEnd,
+				frameOf("trn_2", 3, "text_delta", `"member":"captain","text":"the answer"`),
+				frameOf("trn_2", 4, "turn_end", `"state":"done"`),
+			},
+			wantCode: codeOK,
+			wantEvents: []struct {
+				seq int64
+				typ string
+			}{{3, "text_delta"}, {4, "turn_end"}},
+		},
+		{
+			name: "a turn that failed",
+			turn: chatTurnAt("trn_2", "thr_old", 2, "failed", ""),
+			frames: []string{
+				oldTurn, oldEnd,
+				frameOf("trn_2", 3, "error", `"code":"member_failed","message":"The Coder ran out of time."`),
+				frameOf("trn_2", 4, "turn_end", `"state":"failed"`),
+			},
+			wantCode: codeError,
+			wantErr:  "the turn failed: member_failed: The Coder ran out of time.",
+			wantEvents: []struct {
+				seq int64
+				typ string
+			}{{3, "error"}, {4, "turn_end"}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			noBotMode(t)
+			setTTY(t, false, false)
+			p := newChatAPI(t)
+			p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+			p.on("GET", "/bots/scout/chat/threads/thr_old", 200, chatThreadDetail("thr_old", 4,
+				chatTurnAt("trn_0", "thr_old", 1, "done", "the older answer"), c.turn))
+			p.onStream("/bots/scout/chat/threads/thr_old/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+				writeFrames(w, c.frames)
+			})
+			out, errs, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_old", "--follow", "--json")
+			if exitCodeOf(err) != c.wantCode {
+				t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+			}
+			if c.wantErr != "" && (err == nil || err.Error() != c.wantErr) {
+				t.Errorf("error %v, want %q", err, c.wantErr)
+			}
+			lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+			if len(lines) != len(c.wantEvents) {
+				t.Fatalf("lines %q, want %d", lines, len(c.wantEvents))
+			}
+			for i, want := range c.wantEvents {
+				var ev struct {
+					Seq    int64  `json:"seq"`
+					Type   string `json:"type"`
+					TurnID string `json:"turnId"`
+				}
+				if err := json.Unmarshal([]byte(lines[i]), &ev); err != nil {
+					t.Fatalf("line %d %q: %v", i, lines[i], err)
+				}
+				if ev.Seq != want.seq || ev.Type != want.typ || ev.TurnID != "trn_2" {
+					t.Errorf("line %d %+v, want seq %d of %s in trn_2", i, ev, want.seq, want.typ)
+				}
+			}
+			if strings.Contains(out, "the older text") {
+				t.Errorf("another turn's event was printed: %q", out)
+			}
+			if n := len(p.seen("POST", "/bots/scout/chat/threads")); n != 0 {
+				t.Errorf("%d threads were created", n)
+			}
+		})
+	}
+}
+
+// A shortened final of a turn that failed is read from the thread's own record once, and the record's
+// error is the turn's failure.
+func TestChatCutFinalOnAFailedTurnReadsTheThreadOnce(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "final", `"text":"the whole…","cut":true`),
+			frame(2, "turn_end", `"state":"failed"`),
+		})
+	})
+	// The record has the answer whole and the error the stream did not carry.
+	p.on("GET", "/bots/scout/chat/threads/thr_new", 200, chatThreadDetail("thr_new", 2,
+		`{"id":"trn_1","threadId":"thr_new","index":1,"kind":"ask","member":null,"prompt":"p","options":{},`+
+			`"state":"failed","final":"the whole answer","error":{"code":"member_failed","message":"The Coder ran out of time."},`+
+			`"usage":null,"author":{"ref":"r"},"createdAt":1}`))
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err == nil || exitCodeOf(err) != codeError {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if want := "the turn failed: member_failed: The Coder ran out of time."; err.Error() != want {
+		t.Errorf("error %q, want %q", err, want)
+	}
+	if want := "the whole answer\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if n := len(p.seen("GET", "/bots/scout/chat/threads/thr_new")); n != 1 {
+		t.Errorf("%d reads of the thread, want 1 (the cut final's read)", n)
+	}
+}
+
+// The turn's summary is the last line: the whole answer it may have read from the thread's record is
+// printed before it.
+func TestChatSummaryFollowsTheWholeFinal(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "final", `"text":"the whole…","cut":true`),
+			frame(2, "usage", `"calls":2,"input":100,"output":40,"cacheRead":0,"cacheWrite":0,"ms":1500`),
+			frame(3, "turn_end", `"state":"done"`),
+		})
+	})
+	p.on("GET", "/bots/scout/chat/threads/thr_new", 200, chatThreadDetail("thr_new", 3,
+		chatTurnAt("trn_1", "thr_new", 1, "done", "the whole answer")))
+	// One buffer as stdout and stderr: the order of the turn's own writes is what this test reads.
+	out, err := runChatShared(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	want := []string{"thread thr_new", "the whole answer", "done in 1.5s, 2 calls, 140 tokens"}
+	if strings.Join(lines, "|") != strings.Join(want, "|") {
+		t.Errorf("output %q, want %q (the summary after the whole final)", lines, want)
+	}
+}
+
+// The conversation opened on a thread with a running turn follows it first, then shows the prompt.
+func TestChatREPLFollowsTheRunningTurnFirst(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, true, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_a", 200, chatThreadDetail("thr_a", 5,
+		chatTurnAt("trn_9", "thr_a", 1, "running", "")))
+	p.onStream("/bots/scout/chat/threads/thr_a/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frameOf("trn_9", 1, "final", `"text":"the turn finished"`),
+			frameOf("trn_9", 2, "turn_end", `"state":"done"`),
+		})
+	})
+	old := cliStdin
+	cliStdin = strings.NewReader("/quit\n")
+	t.Cleanup(func() { cliStdin = old })
+
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_a")
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	at := strings.Index(out, "the turn finished")
+	if at < 0 {
+		t.Fatalf("stdout lacks the followed turn's answer: %q", out)
+	}
+	if prompt := strings.Index(out, "> "); prompt < at {
+		t.Errorf("the prompt came before the followed turn: %q", out)
+	}
+	if n := len(p.seen("POST", "/bots/scout/chat/threads/thr_a/turns")); n != 0 {
+		t.Errorf("%d turns were posted for a followed turn", n)
+	}
+}
+
 // A stream that ends early is connected again from the last sequence number seen.
 func TestChatReconnects(t *testing.T) {
 	noBotMode(t)
@@ -560,7 +1065,7 @@ func TestChatGivesUpAfterSixFailures(t *testing.T) {
 	if err == nil || exitCodeOf(err) != codeTimeout {
 		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
 	}
-	if want := "lost the chat stream; the turn goes on: tnctl chat scout --thread thr_new"; !strings.Contains(err.Error(), want) {
+	if want := "lost the chat stream; the turn goes on: tnctl chat scout --thread thr_new --follow"; !strings.Contains(err.Error(), want) {
 		t.Errorf("error %q, want %q", err, want)
 	}
 	mu.Lock()
@@ -650,7 +1155,7 @@ func TestChatTurnOpen(t *testing.T) {
 	if err == nil || exitCodeOf(err) != codeConflict {
 		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
 	}
-	if want := "this chat already has a turn in progress (tnctl chat scout --thread thr_new, then /cancel)"; !strings.Contains(err.Error(), want) {
+	if want := "this chat already has a turn in progress (tnctl chat scout --thread thr_new --follow, then Ctrl-C cancels it)"; !strings.Contains(err.Error(), want) {
 		t.Errorf("error %q, want %q", err, want)
 	}
 }
@@ -777,6 +1282,42 @@ func TestChatREPL(t *testing.T) {
 	}
 }
 
+// chatReply is one status and body a route answers with.
+type chatReply struct {
+	status int
+	body   string
+}
+
+// onSeq answers the requests to one path with these answers in turn, repeating the last.
+func (p *chatAPI) onSeq(method, path string, answers ...chatReply) {
+	var mu sync.Mutex
+	i := 0
+	p.onFunc(method, path, func(rec) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		a := answers[min(i, len(answers)-1)]
+		i++
+		return a.status, a.body
+	})
+}
+
+// runChatShared runs a chat command line with one buffer as stdout and stderr, so that the order of
+// the answer and the turn's own lines on the two streams is what the output reads.
+func runChatShared(t *testing.T, e *cliEnv, args ...string) (string, error) {
+	t.Helper()
+	root := &cobra.Command{Use: "tnctl", SilenceErrors: true, SilenceUsage: true}
+	root.AddCommand(newChatCmd(e))
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	if cliStdin != nil {
+		root.SetIn(cliStdin)
+	}
+	root.SetArgs(args)
+	err := root.ExecuteContext(context.Background())
+	return buf.String(), err
+}
+
 // onSeqChat answers the first requests with these bodies and repeats the last.
 func (p *chatAPI) onSeqChat(method, path string, bodies []string) {
 	var mu sync.Mutex
@@ -796,17 +1337,59 @@ func (p *chatAPI) onFunc(method, path string, f func(rec) (int, string)) {
 	p.routes[method+" "+path] = f
 }
 
-// The REPL's /cancel cancels the thread's open turn.
-func TestChatREPLCancel(t *testing.T) {
+// The REPL's /cancel finds no open turn when the followed turn has ended meanwhile: it sends nothing
+// and says so. The thread's read at the start sees the turn still running; the one /cancel makes sees
+// it done.
+func TestChatREPLCancelWithNothingToCancel(t *testing.T) {
 	noBotMode(t)
 	setTTY(t, true, true)
 	p := newChatAPI(t)
 	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
-	p.on("GET", "/bots/scout/chat/threads/thr_a", 200,
-		`{"thread":{"id":"thr_a","title":"t","origin":"cli","createdAt":1,"updatedAt":1,"turnCount":1,"lastTurn":null},
-"turns":[{"id":"trn_open","state":"running"}],"lastSeq":3}`)
-	p.on("POST", "/bots/scout/chat/threads/thr_a/turns/trn_open/cancel", 202,
-		`{"turn":{"id":"trn_open","threadId":"thr_a","index":1,"kind":"ask","prompt":"p","options":{},"state":"cancelled","createdAt":1}}`)
+	p.onSeq("GET", "/bots/scout/chat/threads/thr_a",
+		chatReply{200, chatThreadDetail("thr_a", 3, chatTurnRecord("trn_open", "thr_a", "running", "", ""))},
+		chatReply{200, chatThreadDetail("thr_a", 4, chatTurnRecord("trn_open", "thr_a", "done", "still here", ""))})
+	// The conversation follows the running turn first; it ends done.
+	p.onStream("/bots/scout/chat/threads/thr_a/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frameOf("trn_open", 1, "final", `"text":"still here"`),
+			frameOf("trn_open", 2, "turn_end", `"state":"done"`),
+		})
+	})
+	old := cliStdin
+	cliStdin = strings.NewReader("/cancel\n/quit\n")
+	t.Cleanup(func() { cliStdin = old })
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_a")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errs)
+	}
+	if !strings.Contains(out, "still here") {
+		t.Errorf("stdout %q lacks the followed turn's answer", out)
+	}
+	if n := len(p.seen("POST", "/bots/scout/chat/threads/thr_a/turns/trn_open/cancel")); n != 0 {
+		t.Errorf("%d cancels: the turn had ended", n)
+	}
+	if !strings.Contains(errs, "· no open turn to cancel") {
+		t.Errorf("stderr %q", errs)
+	}
+}
+
+// The REPL's /cancel cancels a turn someone else started after the thread's last one ended.
+func TestChatREPLCancelCancelsANewTurn(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, true, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	// At the start the thread's last turn has ended: nothing is followed. By the /cancel someone else
+	// has started a turn in the same thread.
+	p.onSeq("GET", "/bots/scout/chat/threads/thr_a",
+		chatReply{200, chatThreadDetail("thr_a", 4, chatTurnAt("trn_done", "thr_a", 1, "done", "the answer"))},
+		chatReply{200, chatThreadDetail("thr_a", 6,
+			chatTurnAt("trn_done", "thr_a", 1, "done", "the answer"),
+			chatTurnAt("trn_other", "thr_a", 2, "running", ""))})
+	p.on("POST", "/bots/scout/chat/threads/thr_a/turns/trn_other/cancel", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_a/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		t.Error("the conversation followed a turn that had ended")
+	})
 	old := cliStdin
 	cliStdin = strings.NewReader("/cancel\n/quit\n")
 	t.Cleanup(func() { cliStdin = old })
@@ -814,11 +1397,57 @@ func TestChatREPLCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, errs)
 	}
-	if n := len(p.seen("POST", "/bots/scout/chat/threads/thr_a/turns/trn_open/cancel")); n != 1 {
-		t.Errorf("%d cancels\n%s", n, errs)
+	if n := len(p.seen("POST", "/bots/scout/chat/threads/thr_a/turns/trn_other/cancel")); n != 1 {
+		t.Errorf("%d cancels of the new turn, want 1\n%s", n, errs)
 	}
-	if !strings.Contains(errs, "cancelling turn trn_open") {
+	if !strings.Contains(errs, "· cancelling turn trn_other") {
 		t.Errorf("stderr %q", errs)
+	}
+}
+
+// A conversation opened on a thread whose last turn has ended opens no stream: it shows the prompt.
+func TestChatREPLOnAFinishedThreadOpensNoStream(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, true, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_a", 200, chatThreadDetail("thr_a", 4,
+		chatTurnAt("trn_done", "thr_a", 1, "done", "the answer")))
+	p.onStream("/bots/scout/chat/threads/thr_a/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		t.Error("the conversation opened the stream of a turn that had ended")
+	})
+	old := cliStdin
+	cliStdin = strings.NewReader("/quit\n")
+	t.Cleanup(func() { cliStdin = old })
+	out, errs, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_a")
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if n := len(p.seen("GET", "/bots/scout/chat/threads/thr_a/events")); n != 0 {
+		t.Errorf("%d connections to the events stream, want none", n)
+	}
+	if !strings.Contains(out, "> ") {
+		t.Errorf("stdout %q: the prompt was not shown", out)
+	}
+}
+
+// A conversation whose first read of the thread fails ends with that error: there is nothing to
+// follow and no turn can be posted without the thread's last event.
+func TestChatREPLWhenTheThreadCannotBeRead(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, true, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("GET", "/bots/scout/chat/threads/thr_a", 500, `{"code":"internal","message":"the platform is briefly down"}`)
+	old := cliStdin
+	cliStdin = strings.NewReader("/quit\n")
+	t.Cleanup(func() { cliStdin = old })
+	_, errs, err := runCLI(t, p.env(t), "chat", "scout", "--thread", "thr_a")
+	if err == nil || exitCodeOf(err) != codeError {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	if got := err.Error(); !strings.Contains(got, "the platform is briefly down") {
+		t.Errorf("error %q, want the platform's message", got)
 	}
 }
 
@@ -1148,7 +1777,7 @@ func TestChatStreamErrorsAreFailures(t *testing.T) {
 			if err == nil || exitCodeOf(err) != codeTimeout {
 				t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
 			}
-			if want := "lost the chat stream; the turn goes on: tnctl chat scout --thread thr_new"; !strings.Contains(err.Error(), want) {
+			if want := "lost the chat stream; the turn goes on: tnctl chat scout --thread thr_new --follow"; !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q, want %q", err, want)
 			}
 			mu.Lock()
@@ -1395,6 +2024,8 @@ func TestChatUsageErrors(t *testing.T) {
 		{"bad effort", []string{"chat", "scout", "--effort", "max", "hi"}, "--effort must be low, medium or high"},
 		{"member with mode", []string{"chat", "scout", "--member", "fleet", "--mode", "council", "hi"}, "--member and --mode cannot be used together"},
 		{"new with thread", []string{"chat", "scout", "--new", "--thread", "thr_1", "hi"}, "--new and --thread cannot be used together"},
+		{"follow without a thread", []string{"chat", "scout", "--follow"}, "--follow needs --thread"},
+		{"follow with a prompt", []string{"chat", "scout", "--thread", "thr_1", "--follow", "hi"}, "--follow follows the thread's last turn: give no prompt"},
 		{"a prompt too long", []string{"chat", "scout", long}, "the prompt is longer than 16000 characters"},
 		{"no bot", []string{"chat"}, "chat needs a bot"},
 	}

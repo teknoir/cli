@@ -1,6 +1,6 @@
 ---
 name: teknoir-k3s-apps
-description: Build and run your own apps on a TeknoirBot computer. It covers the inner k3s, the apps namespace and its admission rules, buildctl to the bot builder, the bot registry, Deployments and Services, port-forward into the bot browser, and cleanup. Use when asked to build an image, write a Dockerfile, deploy, run, restart, scale or debug an app inside a TeknoirBot, or to view a service on the bot computer. For a robot configuration use teknoir-config; for device telemetry use teknoir-mqtt-streams.
+description: Build and run your own apps on a TeknoirBot computer. It covers the inner k3s, the apps namespace and its admission rules, buildctl to the bot builder, the bot registry, Deployments and Services, checking an app from the council pod, and cleanup. Use when asked to build an image, write a Dockerfile, deploy, run, restart, scale or debug an app inside a TeknoirBot, or to view a service on the bot computer. For a robot configuration use teknoir-config; for device telemetry use teknoir-mqtt-streams.
 license: Apache-2.0
 metadata:
   teknoir-kit-version: "0.2.0"
@@ -13,7 +13,8 @@ Paths in this skill are relative to this skill's directory.
 ## What exists
 
 A TeknoirBot's computer is a virtual Device (`tb-<bot>`) with its own single-node k3s. You reach
-it with the in-cluster `kubectl` the desktop gives you.
+it with the in-cluster `kubectl` of the council pod you run in (`teknoirbot-council` in
+`teknoir-desktop`).
 
 - **The `apps` namespace** is yours: PodSecurity **baseline** enforced (with a restricted
   warning). Baseline refuses a privileged container, host namespaces, `hostPath`, `hostPort`,
@@ -28,12 +29,12 @@ it with the in-cluster `kubectl` the desktop gives you.
   ingresses, network policies, HPAs, PDBs. Nothing in `kube-system` or `teknoir-build`. Reads
   outside `apps`: `nodes`, `namespaces` and `events`.
 - **There is no kubeconfig context.** `kubectl` runs in-cluster as the agent's service account,
-  whose default namespace is `teknoir-desktop`, where you have no role: **every call passes
-  `-n apps`**. Never `kubectl config set-context`. Put `-n apps` after the verb
-  (`kubectl get pods -n apps`): the bot's permission rules match `kubectl <verb>` prefixes.
+  `teknoirbot-agent`, whose default namespace is `teknoir-desktop` — the namespace of the council
+  pod you run in, where you have no role: **every call passes `-n apps`**. Never `kubectl
+  config set-context`. Put `-n apps` after the verb (`kubectl get pods -n apps`).
 - **The builder** is `buildkitd` in `teknoir-build`, reached as
-  `tcp://buildkitd.teknoir-build:1234` (`$BUILDKIT_HOST`). Only the desktop pod may connect to
-  it; a pod in `apps` gets `connection refused`.
+  `tcp://buildkitd.teknoir-build:1234` (`$BUILDKIT_HOST`). Only the council pod may connect to
+  it: building from a pod in `apps` is refused with `connection refused`.
 - **The registry** is `registry.teknoir-build:5000`. Push to
   `registry.teknoir-build.svc.cluster.local:5000/<app>:<tag>`; the node pulls the same image as
   `localhost:5000/<app>:<tag>`. Use the push name in the build and the pull name in the
@@ -52,7 +53,11 @@ It prints, as its last line, the pull name to put in the Deployment: `image: loc
 - **A new tag for every build.** The Deployment uses `imagePullPolicy: IfNotPresent`; with a
   reused tag (or `:latest`) the pod keeps running the old image and nothing tells you.
 - **`HOME` must be writable** for buildctl; the script sets a temporary `DOCKER_CONFIG` when it is
-  not. In the desktop it is `/home/desktop`.
+  not. In the council pod it is `/work/home`.
+- **Check the disk** with `df -h /work` before a big install or build: the work volume is a
+  local-path volume on the VM's own disk — the same 20 GiB as the builder cache, the registry and
+  the images — and its 5Gi size is not enforced. A full disk stops the Coder and puts the node under
+  disk pressure. `/tmp` is 2 GiB and goes with the pod: keep what you need under `/work`.
 - **Keep the context small** and add a `.dockerignore`: the whole context is streamed to the
   builder.
 - The base image is pulled by the builder from upstream, not through the platform's Harbor mirror.
@@ -83,8 +88,9 @@ kubectl get pods,events -n apps
   example after a ConfigMap or Secret change.
 - `kubectl scale deploy/<app> --replicas 2 -n apps` works; `statefulsets/scale` too.
 - **Resources**: the template asks for 25m CPU and 64Mi and limits 500m and 256Mi. Keep limits
-  small: the VM is 4 GiB or 8 GiB and shares it with the desktop, the browser, the builder and the
-  registry. A limit sum above the VM's memory gets something OOM-killed, possibly k3s.
+  small: the VM is 4 GiB or 8 GiB and shares it with the council pod (it requests 512Mi), the
+  desktop, the browser, the builder and the registry. A limit sum above the VM's memory gets
+  something OOM-killed, possibly k3s.
 - **`readOnlyRootFilesystem: true`** is in the template; mount an `emptyDir` at `/tmp` for
   anything that writes there (Python does).
 - **A PVC** works (`persistentvolumeclaims` is allowed, class `local-path`); its size is not
@@ -92,26 +98,29 @@ kubectl get pods,events -n apps
 - **A ConfigMap or Secret** for settings is allowed; mount it read-only.
 - **Environment and flags go in the Deployment**, not in a shell you type: the image usually has
   no shell, and typing into a running pod leaves nothing to reproduce.
+- **A service that should last is a Deployment**, not a process you leave running: anything you
+  start by hand ends with the Coder's task.
 
 ## View it
 
 ```bash
-nohup kubectl port-forward svc/<app> 8080:80 -n apps >/tmp/pf-<app>.log 2>&1 & echo $! >/tmp/pf-<app>.pid
-DESKTOP_BROWSER_URL=http://localhost:8080 setsid -f /usr/local/bin/desktop-browser >/dev/null 2>&1
-scrot /tmp/view.png    # optional: a screenshot you can read
+curl -s http://<app>.apps.svc.cluster.local:<port>/
 ```
 
-`port-forward` binds in the desktop container, where the browser runs, so `localhost` is shared.
-There is no ingress controller and no NodePort. For the browser use the port-forward; from the
-terminal `curl -s http://<app>.apps.svc.cluster.local/` also works. A person watching the desktop
-sees the page too. Stop it with `kill "$(cat /tmp/pf-<app>.pid)"`: each command runs in a new
-shell, so `kill %1` finds no job.
+There is no ingress controller and no NodePort, and nothing outside the VM reaches an app, so that
+in-cluster URL is how you check one: each Service is `<app>.apps.svc.cluster.local` on its port.
+There is no browser, no X server and no screenshot tool in the council pod, so you cannot look at a
+page yourself: check what you can with `curl` (the status, the HTML, an API answer), and give the
+person the URL to open in the bot's desktop browser — the desktop runs in the same cluster.
 
 ## Clean up
 
 The VM's disk is 20 GiB by default (40 GiB on a test bot). The builder's cache, the registry's
-volume and the containerd copy of every image all live on it, plus your home at
-`/home/desktop`.
+volume and the containerd copy of every image all live on it. Your own files live at `/work`
+(`HOME=/work/home`, and one directory per chat at `/work/chat-<id>`), a local-path volume on that
+same disk: they share its free space, and the volume's 5Gi size is not enforced. `df -h /work` shows
+the VM disk's free space. A full disk stops the Coder and puts the node under disk pressure, so
+clean up builds and images you no longer need.
 
 | What | Command |
 | --- | --- |
@@ -126,15 +135,16 @@ volume and the containerd copy of every image all live on it, plus your home at
   keeps filling; do not promise the space back.
 - **The builder keeps its cache under 8 GB by itself** (it does not grow without bound), so a
   prune is for when a build fails for space, not a routine.
-- Watch `df -h /home/desktop` and `kubectl get events -n apps` before a big build: a full disk
-  puts the node under disk pressure, new pods stay `Pending`, and recovering needs a person.
+- Watch `df -h /work` and `kubectl get events -n apps` before a big build: a full work volume stops
+  the Coder, and a full VM disk puts the node under disk pressure, new pods stay `Pending`, and
+  recovering needs a person.
 
 ## Other paths — a person does this step today
 
 - **Push to Harbor or another registry.** The agent has no push credential, and the image exists
   only in the bot's registry, which nothing outside the VM reaches. Tell the person where the
-  source and Dockerfile are (`~/work/<app>`) and give them the exact build and push commands to run
-  on their own machine (see People on a laptop).
+  source and Dockerfile are (in your work directory under `/work`) and give them the exact build and
+  push commands to run on their own machine (see People on a laptop).
 - **Commit to git.** The agent may clone, commit locally and show the change (`git diff`,
   `git log -p`), but never pushes. Never ask for, paste or store a git or registry token on the
   bot's computer: its home persists, and its creator (and teamspace admins, unless it acts as its
@@ -172,8 +182,8 @@ app is reachable this way only once it is declared as one of them.
 | `ImagePullBackOff` … `127.0.0.1:5000: connect: connection refused` right after the computer restarted | the registry is still starting (it cleans up first) | wait a minute and check again; do not rebuild |
 | a tag changed under you | the registry has no login; anything in `apps` can push | pin what you deploy by digest (`<image>@sha256:…`) when it matters, and never run untrusted images in `apps` |
 | The pod runs the old code, no error | a reused tag with `IfNotPresent` | build a new tag and set it in the Deployment (`kubectl set image deploy/<app> <app>=localhost:5000/<app>:<new-tag> -n apps`) |
-| `dial tcp 10.53.x.x:1234: connect: connection refused` | building from a pod in `apps`, which may not reach the builder | build from the desktop |
-| `#2 ERROR: mkdir /.docker: permission denied` | `HOME` unset or unwritable | `export HOME=/home/desktop`, or let the script set `DOCKER_CONFIG` |
+| `dial tcp 10.53.x.x:1234: connect: connection refused` | building from a pod in `apps`, which may not reach the builder | build from the council pod (the Coder) |
+| `#2 ERROR: mkdir /.docker: permission denied` | `HOME` unset or unwritable | `export HOME=/work/home`, or let the script set `DOCKER_CONFIG` |
 | `violates PodSecurity "baseline:latest": privileged (...)` | a privileged or host-level pod | follow the template's security context; the ReplicaSet carries the refusal, so read `kubectl get rs,events -n apps` |
 | `ValidatingAdmissionPolicy 'teknoirbot-apps' ... denied request: only ClusterIP Services are allowed` | a NodePort, LoadBalancer or ExternalName Service | `type: ClusterIP` |
 | `Forbidden ... cannot list resource "pods" in the namespace "teknoir-build"` | a call outside `apps` | stay in `apps`; the builder and registry are not yours |
@@ -193,8 +203,8 @@ app is reachable this way only once it is declared as one of them.
   differences), and `kubectl apply -f <file> -n apps --dry-run=server` shows whether admission
   accepts it.
 - Keep every name in `apps` prefixed with your app so cleanup is obvious.
-- `kubectl apply`, `delete`, `patch` and `scale` ask for approval on a bot; the builder build asks
-  too. Do not work around a refusal.
+- In the council pod nothing asks before a write: read first (`kubectl diff`, `--dry-run=server`)
+  and keep every change in the `apps` namespace.
 
 ## Bot mode
 
@@ -204,7 +214,7 @@ Everything above applies to the bot's own computer, and only there.
 
 - `kubectl` and `buildctl` are the bot's tools on its own VM; they do not reach another device.
 - The agent's role, the builder and the registry come with the agent: the platform adds them to
-  every bot computer whose desktop runs it, and they can arrive a little after the desktop starts.
+  every bot computer whose council runs, and they can arrive a little after the council pod starts.
   If `kubectl get pods -n apps` answers `Forbidden`, or `kubectl get ns apps` answers `NotFound`,
   just after a start, wait a minute and try again; if it stays that way, report it to a person.
   Never suggest re-creating the bot for this.
