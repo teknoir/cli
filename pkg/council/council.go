@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,7 +90,9 @@ type Poster interface {
 // Hub is the platform's work queue: hub.Client is one, through HubOf.
 type Hub interface {
 	Next(ctx context.Context, free int) (*hub.WorkTurn, error)
-	NewPoster(turn *hub.WorkTurn, onClosed func(reason string)) Poster
+	// NewPoster is the poster of one turn. deadline is when the turn's finish must be posted: no
+	// resend goes out at or after it.
+	NewPoster(turn *hub.WorkTurn, deadline time.Time, onClosed func(reason string)) Poster
 }
 
 // Whoami says who the bot is now: its access level (none, read or creator; "" counts as none) and
@@ -97,15 +102,15 @@ type Whoami func(ctx context.Context) (level string, facts json.RawMessage, err 
 // hubClient adapts a hub.Client to Hub.
 type hubClient struct{ c *hub.Client }
 
-// HubOf adapts a *hub.Client: NewPoster calls Client.Poster.
+// HubOf adapts a *hub.Client: NewPoster calls Client.PosterWith, with the turn's finish deadline.
 func HubOf(c *hub.Client) Hub { return hubClient{c: c} }
 
 func (h hubClient) Next(ctx context.Context, free int) (*hub.WorkTurn, error) {
 	return h.c.Next(ctx, free)
 }
 
-func (h hubClient) NewPoster(turn *hub.WorkTurn, onClosed func(reason string)) Poster {
-	return h.c.Poster(turn, onClosed)
+func (h hubClient) NewPoster(turn *hub.WorkTurn, deadline time.Time, onClosed func(reason string)) Poster {
+	return h.c.PosterWith(turn, onClosed, hub.PosterOptions{Deadline: deadline})
 }
 
 // Config is what a daemon is built from.
@@ -121,6 +126,9 @@ type Config struct {
 	ModelSlots int
 	// Logf is the operator log: ids, counts, codes and durations only. nil logs nothing.
 	Logf func(format string, args ...any)
+	// KeyFile is the file the bot's key is read from, named in the log when the key is missing or
+	// empty. Empty takes $TNCTL_BOT_KEY_FILE, the variable cmd/council.go reads the key from.
+	KeyFile string
 
 	// The rest is for tests; zero values take the defaults.
 
@@ -154,6 +162,10 @@ func (c *Config) defaults() {
 	}
 	if c.Logf == nil {
 		c.Logf = func(string, ...any) {}
+	}
+	if c.KeyFile == "" {
+		// The same variable cmd/council.go reads the bot's key from: bot mode's TNCTL_BOT_KEY_FILE.
+		c.KeyFile = strings.TrimSpace(os.Getenv("TNCTL_BOT_KEY_FILE"))
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -257,6 +269,7 @@ func New(cfg Config) (*Daemon, error) {
 // each of which finishes as bot_restarting, and returns nil when they are done or at StopGrace.
 func (d *Daemon) Serve(ctx context.Context) error {
 	attempt := 0
+	notFound := 0
 	fastNils := 0
 	ended := false
 	for !ended && ctx.Err() == nil {
@@ -287,6 +300,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		switch {
 		case err == nil && work != nil:
 			attempt = 0
+			notFound = 0
 			fastNils = 0
 			if ctx.Err() != nil {
 				// The turn was claimed as the bot stopped: it still starts, and finishes at once.
@@ -299,16 +313,34 @@ func (d *Daemon) Serve(ctx context.Context) error {
 				continue
 			}
 			attempt++
-			d.cfg.Logf("poll: failed (status %d, code %q), attempt %d", hub.StatusOf(err), hub.CodeOf(err), attempt)
 			wait := hub.Backoff(err, attempt, d.cfg.Rand)
-			if hub.StatusOf(err) == 404 && hub.CodeOf(err) == "council_off" {
+			switch {
+			case hub.IsKeyError(err):
+				notFound = 0
+				// Only a person can fix this, by re-creating the bot: it is not a network blip.
+				d.cfg.Logf("poll: the bot key is missing or empty at %s: re-create the bot, attempt %d", d.cfg.KeyFile, attempt)
 				wait = 60 * time.Second
+			case hub.StatusOf(err) == http.StatusNotFound:
+				// No council API where the bot points: the council is off. The first 404 of a streak
+				// and every tenth one are logged, so a restart's other failures do not hide them
+				// while the log stays readable; the poll keeps asking, since the platform may be
+				// rolled out.
+				notFound++
+				if notFound == 1 || notFound%10 == 0 {
+					d.cfg.Logf("poll: the platform has no council API here (404 %q): waiting 60 s", hub.CodeOf(err))
+				}
+				wait = 60 * time.Second
+			default:
+				notFound = 0
+				d.cfg.Logf("poll: failed (status %d, code %q, %s), attempt %d",
+					hub.StatusOf(err), hub.CodeOf(err), hub.ErrorClass(err), attempt)
 			}
 			if d.cfg.Sleep(ctx, wait) != nil {
 				ended = true
 			}
 		default:
 			attempt = 0
+			notFound = 0
 			if d.cfg.Now().Sub(started) < time.Second {
 				fastNils++
 			} else {

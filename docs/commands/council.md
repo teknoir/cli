@@ -19,13 +19,28 @@ The council image starts it as `tini -- tnctl council serve --work-dir /work`. F
    request up to 25 s and answers with one turn or with no work, and `free` says how many of the
    `--max-turns` slots are free. A poll with no free slot is kept open all the same, so the bot shows as
    online; the end of a turn cancels it and the free slot is offered at once. A failed poll is logged with
-   the status and code it got, and waited out with a growing backoff — 60 s when the platform answers
-   `council_off` (the chat is turned off) — and a platform that answers empty at once is slept off at 1 s.
+   the status and code it got and the class of the failure, and waited out with a growing backoff; a
+   platform that answers empty at once is slept off at 1 s. The class is one of `key` (the bot's key file
+   is missing or empty, which only a person can fix, by re-creating the bot), `dns`, `tls`, `timeout`,
+   `refused`, `transport` and `http`. A missing key waits 60 s, and says where the key file is. Any `404`
+   waits 60 s too, not only `council_off`: a 404 is the platform having no council API there, which is the
+   council being off, and it is logged at the first 404 of a run and every tenth one after that, rather
+   than every 60 s.
 2. **Runs the turn.** Which phases run depends on the turn's `kind` and `mode`; see [Turn modes](#turn-modes).
    Every model call goes through the bot API's model proxy, with the bot's key.
 3. **Posts its progress and its outcome.** Events as they happen — `turn_start`, `plan`, `member_start`,
    `text_delta`, `tool_call`, `tool_result`, `coder_update`, `member_done`, `critique`, `budget`, `usage` —
    then the finish: the state, the answer and what the turn cost.
+
+A batch of events, or the finish, that fails with a network error, a `429` or a `5xx` is resent with the same
+batch number and the same finish body, which the platform stores once: the waits grow from 1 s to 5 s, or as
+long as the server's `Retry-After` asks, and the resends continue for up to 3 minutes of failures in a row —
+but no resend goes out at or after `D + 50 s`, the deadline the finish is posted by. A platform restart,
+30–90 s with no answer, does not end a running turn; the events emitted meanwhile wait in a buffer of up to
+4 MiB, and the ones past it are dropped; the work goes on. Past that window a turn that is still working ends
+`events_lost`, as before. A turn that is finishing drops the batch it lost and still sends the finish with
+the turn's own outcome, whose resends get a failure window of their own, still bounded by `D + 50 s`. A `409`
+(`turn_closed`, `claim_mismatch`), a `404` and any other refusal are not resent.
 
 A turn ends `done` with its answer, or `failed` with a code: `bad_turn` (a kind or a member the bot does not
 know), `turn_closed`, `events_lost`, `events_rejected` (the platform dropped the turn or refused its

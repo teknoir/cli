@@ -173,7 +173,7 @@ func modeOf(work *hub.WorkTurn) string {
 func (t *turn) run() {
 	defer t.d.endTurn(t)
 
-	t.poster = t.d.cfg.Hub.NewPoster(t.work, func(reason string) {
+	t.poster = t.d.cfg.Hub.NewPoster(t.work, t.D.Add(t.d.cfg.FinishGrace), func(reason string) {
 		t.cancel(&closedError{reason: reason})
 	})
 	t.merge = newMerger(t.poster, memberCaptain, t.d.cfg.MergeEvery, t.d.cfg.MergeBytes)

@@ -2,21 +2,28 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/teknoir/cli/pkg/council/internal/botapi"
 )
 
 // botAPI is a fake bot API for the hub tests: it records requests and lets each test answer them.
@@ -990,10 +997,14 @@ func TestPosterLost(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		})
 		c := newClient(t, b.server.URL, keyFile(t))
+		opts := posterOpts()
+		opts.MaxRetryWait = 20 * time.Millisecond
+		opts.GiveUpAfter = 200 * time.Millisecond
 		closed := make(chan string, 2)
-		p := c.PosterWith(turn(), func(r string) { closed <- r }, posterOpts())
+		p := c.PosterWith(turn(), func(r string) { closed <- r }, opts)
 		p.Emit(EventTurnStart, map[string]any{})
 
+		start := time.Now()
 		done := make(chan struct{})
 		go func() { defer close(done); p.Run(context.Background()) }()
 		select {
@@ -1001,6 +1012,7 @@ func TestPosterLost(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatal("Run did not return after a lost batch")
 		}
+		took := time.Since(start)
 		select {
 		case got := <-closed:
 			if got != ClosedLost {
@@ -1009,8 +1021,11 @@ func TestPosterLost(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("onClosed was not called")
 		}
-		if got := len(ev.k2()); got != 4 {
-			t.Errorf("K2 attempts = %d, want 4 (one and three resends)", got)
+		if got := len(ev.k2()); got < 5 {
+			t.Errorf("K2 attempts = %d, want more than the old four, through the 200 ms window", got)
+		}
+		if took < 200*time.Millisecond {
+			t.Errorf("the batch was given up after %v, want at least the 200 ms window", took)
 		}
 
 		if err := p.Finish(context.Background(), "failed", "", "", "", Usage{}); err != nil {
@@ -1034,15 +1049,22 @@ func TestPosterLost(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 		})
 		c := newClient(t, b.server.URL, keyFile(t))
+		opts := posterOpts()
+		opts.MaxRetryWait = 20 * time.Millisecond
+		opts.GiveUpAfter = 200 * time.Millisecond
 		var closed atomic.Int32
-		p := c.PosterWith(turn(), func(string) { closed.Add(1) }, posterOpts())
+		p := c.PosterWith(turn(), func(string) { closed.Add(1) }, opts)
 		p.Emit(EventTurnStart, map[string]any{})
 
+		start := time.Now()
 		if err := p.Finish(context.Background(), "done", "the answer", "", "", Usage{}); err != nil {
 			t.Fatalf("Finish: %v", err)
 		}
-		if got := len(ev.k2()); got != 4 {
-			t.Errorf("K2 attempts = %d, want 4", got)
+		if got := len(ev.k2()); got < 5 {
+			t.Errorf("K2 attempts = %d, want more than the old four, through the 200 ms window", got)
+		}
+		if took := time.Since(start); took < 200*time.Millisecond {
+			t.Errorf("the batch was given up after %v, want at least the 200 ms window", took)
 		}
 		if k3 := ev.k3(); len(k3) != 1 {
 			t.Fatalf("K3 requests = %d, want 1: the answer still goes out", len(k3))
@@ -1271,8 +1293,87 @@ func TestFinishRespectsCtx(t *testing.T) {
 	}
 }
 
+// TestFinishGetsItsOwnWindow: a K2 whose window runs out while the turn finishes does not spend the
+// window of the answer that follows it: K3 rides out a run of failures of its own.
+func TestFinishGetsItsOwnWindow(t *testing.T) {
+	var k2s, k3s atomic.Int32
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/finish") {
+			if k3s.Add(1) <= 2 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		k2s.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := outageOpts()
+	opts.GiveUpAfter = 200 * time.Millisecond
+	p := c.PosterWith(turn(), nil, opts)
+	p.Emit(EventTurnStart, map[string]any{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.Finish(ctx, "done", "the answer", "", "", Usage{}); err != nil {
+		t.Fatalf("Finish: %v, want nil: the answer gets a failure window of its own", err)
+	}
+	if got := k2s.Load(); got == 0 {
+		t.Error("no K2 attempt was made")
+	}
+	if got := k3s.Load(); got != 3 {
+		t.Errorf("K3 requests = %d, want 3: the two 503s resent, then taken", got)
+	}
+}
+
+// TestFinishAfterLostGetsItsOwnWindow: a turn the network lost while it was open still posts its
+// answer through a run of failures of its own.
+func TestFinishAfterLostGetsItsOwnWindow(t *testing.T) {
+	var k3s atomic.Int32
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/finish") {
+			if k3s.Add(1) <= 2 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := outageOpts()
+	opts.GiveUpAfter = 200 * time.Millisecond
+	closed := make(chan string, 2)
+	p := c.PosterWith(turn(), func(r string) { closed <- r }, opts)
+	p.Emit(EventTurnStart, map[string]any{})
+
+	done := make(chan struct{})
+	go func() { defer close(done); p.Run(context.Background()) }()
+	select {
+	case got := <-closed:
+		if got != ClosedLost {
+			t.Fatalf("onClosed = %q, want %q", got, ClosedLost)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("onClosed was not called")
+	}
+	<-done
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.Finish(ctx, "failed", "", "", "", Usage{}); err != nil {
+		t.Fatalf("Finish: %v, want nil: the answer after a lost batch gets a window of its own", err)
+	}
+	if got := k3s.Load(); got != 3 {
+		t.Errorf("K3 requests = %d, want 3: the two 503s resent, then taken", got)
+	}
+}
+
 // TestFinishRetriesHungAttempt: a long ctx lets each hung attempt end at RequestTimeout and be
-// retried, until the batch is lost.
+// retried until the batch's window runs out.
 func TestFinishRetriesHungAttempt(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
@@ -1291,6 +1392,8 @@ func TestFinishRetriesHungAttempt(t *testing.T) {
 	c := newClient(t, b.server.URL, keyFile(t))
 	opts := posterOpts()
 	opts.RequestTimeout = 50 * time.Millisecond
+	opts.MaxRetryWait = 20 * time.Millisecond
+	opts.GiveUpAfter = 300 * time.Millisecond
 	p := c.PosterWith(turn(), nil, opts)
 	p.Emit(EventTurnStart, map[string]any{})
 
@@ -1300,11 +1403,13 @@ func TestFinishRetriesHungAttempt(t *testing.T) {
 	if err := p.Finish(ctx, "done", "f", "", "", Usage{}); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	if took := time.Since(start); took > 3*time.Second {
-		t.Errorf("Finish took %v, want each hung attempt to end at RequestTimeout", took)
+	// The window is a time, so the time is what is asserted: a loaded machine gives fewer attempts,
+	// not a shorter window.
+	if took := time.Since(start); took < 300*time.Millisecond || took > 3*time.Second {
+		t.Errorf("Finish took %v, want the whole 300 ms window and no more than 3 s", took)
 	}
-	if got := attempts.Load(); got != 4 {
-		t.Errorf("K2 attempts = %d, want 4", got)
+	if got := attempts.Load(); got < 2 {
+		t.Errorf("K2 attempts = %d, want the hung attempt retried", got)
 	}
 	if got := finishes.Load(); got != 1 {
 		t.Errorf("K3 requests = %d, want 1 after the lost batch", got)
@@ -1445,6 +1550,563 @@ func TestEmitDropsUnknownType(t *testing.T) {
 	}
 	if len(b.requests()) != 2 {
 		t.Errorf("requests = %d, want K2 then K3", len(b.requests()))
+	}
+}
+
+// dropConnection closes the connection under a request: the client sees a transport error, with no
+// status at all.
+func dropConnection(w http.ResponseWriter) {
+	if hj, ok := w.(http.Hijacker); ok {
+		if conn, _, err := hj.Hijack(); err == nil {
+			_ = conn.Close()
+			return
+		}
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+}
+
+// outageOpts is a poster that rides out a short outage quickly.
+func outageOpts() PosterOptions {
+	opts := posterOpts()
+	opts.RetryBase = 5 * time.Millisecond
+	opts.MaxRetryWait = 20 * time.Millisecond
+	opts.Heartbeat = time.Hour
+	return opts
+}
+
+// TestPosterSurvivesOutage: a batch that fails with dropped connections and 503s for longer than the
+// old four attempts, then succeeds, keeps the turn open and is stored once, in order, with every
+// event.
+func TestPosterSurvivesOutage(t *testing.T) {
+	var attempts atomic.Int32
+	ev := &recorder{}
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		var v map[string]any
+		_ = json.Unmarshal(body, &v)
+		if strings.HasSuffix(r.URL.Path, "/finish") {
+			ev.add(r.URL.Path, v)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if k := attempts.Add(1); k <= 12 {
+			// Twelve failures: three times the old limit, and still far inside the window.
+			if k%2 == 0 {
+				dropConnection(w)
+				return
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		ev.add(r.URL.Path, v)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := outageOpts()
+	opts.GiveUpAfter = 2 * time.Second
+	closed := make(chan string, 2)
+	p := c.PosterWith(turn(), func(r string) { closed <- r }, opts)
+	p.Emit(EventTurnStart, map[string]any{"i": 0})
+	p.Emit(EventTextDelta, map[string]any{"i": 1})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); p.Run(ctx) }()
+	waitFor(t, "the batch through the outage", func() bool { return len(ev.k2()) >= 1 })
+	p.Emit(EventMemberDone, map[string]any{"i": 2})
+	waitFor(t, "the second batch", func() bool { return len(ev.k2()) >= 2 })
+	cancel()
+	<-done
+
+	if err := p.Finish(context.Background(), "done", "the answer", "", "", Usage{}); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	select {
+	case reason := <-closed:
+		t.Fatalf("onClosed(%q) during a twelve-attempt outage", reason)
+	default:
+	}
+	nums, payloads := stored(ev)
+	if len(nums) != 2 || nums[0] != 1 || nums[1] != 2 {
+		t.Fatalf("stored batches = %v, want 1 then 2", nums)
+	}
+	var events []Event
+	for _, part := range payloads {
+		events = append(events, part...)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events stored = %d, want the 3 emitted", len(events))
+	}
+	for i, e := range events {
+		data, _ := e.Data.(map[string]any)
+		if data["i"] != float64(i) {
+			t.Errorf("event %d carries i = %v, want %d: in order, none lost", i, data["i"], i)
+		}
+	}
+	if k3 := ev.k3(); len(k3) != 1 {
+		t.Errorf("K3 requests = %d, want 1", len(k3))
+	}
+}
+
+// TestPosterGivesUpAfterTheWindow: a run of failures that lasts GiveUpAfter loses the turn, at the
+// window's end and not at a count of attempts.
+func TestPosterGivesUpAfterTheWindow(t *testing.T) {
+	var attempts atomic.Int32
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/finish") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := outageOpts()
+	opts.GiveUpAfter = 300 * time.Millisecond
+	closed := make(chan string, 2)
+	p := c.PosterWith(turn(), func(r string) { closed <- r }, opts)
+	p.Emit(EventTurnStart, map[string]any{})
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() { defer close(done); p.Run(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return: the window never ran out")
+	}
+	if got := <-closed; got != ClosedLost {
+		t.Errorf("onClosed = %q, want %q", got, ClosedLost)
+	}
+	if took := time.Since(start); took < 300*time.Millisecond {
+		t.Errorf("the turn was lost after %v, want at least the 300 ms window", took)
+	}
+	if got := attempts.Load(); got <= 4 {
+		t.Errorf("K2 attempts = %d, want more than the old four", got)
+	}
+}
+
+// TestPosterNewStreakAfterSuccess: a 2xx ends the run of failures, so the next one gets a window of
+// its own.
+func TestPosterNewStreakAfterSuccess(t *testing.T) {
+	var failing atomic.Bool
+	ev := &recorder{}
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		var v map[string]any
+		_ = json.Unmarshal(body, &v)
+		if strings.HasSuffix(r.URL.Path, "/finish") {
+			ev.add(r.URL.Path, v)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if failing.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		ev.add(r.URL.Path, v)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := outageOpts()
+	opts.MaxRetryWait = 10 * time.Millisecond
+	// Each run below lasts two thirds of the window, so neither can run out of it by itself, and
+	// the two together always outlast one window counted from the first run: load can only make the
+	// runs longer, which still proves the second window is a new one.
+	opts.GiveUpAfter = 600 * time.Millisecond
+	closed := make(chan string, 2)
+	p := c.PosterWith(turn(), func(r string) { closed <- r }, opts)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); p.Run(ctx) }()
+
+	failing.Store(true)
+	p.Emit(EventTurnStart, map[string]any{"i": 0})
+	time.Sleep(400 * time.Millisecond)
+	failing.Store(false)
+	waitFor(t, "the first batch", func() bool { return len(ev.k2()) >= 1 })
+
+	// A second run of the same length: counted from the first run's first failure, the two outlast
+	// the window; only a window of its own keeps the second batch.
+	failing.Store(true)
+	p.Emit(EventTextDelta, map[string]any{"i": 1})
+	time.Sleep(400 * time.Millisecond)
+	failing.Store(false)
+	waitFor(t, "the second batch", func() bool { return len(ev.k2()) >= 2 })
+	cancel()
+	<-done
+
+	if err := p.Finish(context.Background(), "done", "the answer", "", "", Usage{}); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	select {
+	case reason := <-closed:
+		t.Fatalf("onClosed(%q): the second run of failures did not get its own window", reason)
+	default:
+	}
+	nums, payloads := stored(ev)
+	if len(nums) != 2 || nums[0] != 1 || nums[1] != 2 {
+		t.Fatalf("stored batches = %v, want 1 then 2", nums)
+	}
+	if len(payloads[0]) != 1 || len(payloads[1]) != 1 {
+		t.Errorf("event counts per batch = %d and %d, want 1 and 1", len(payloads[0]), len(payloads[1]))
+	}
+}
+
+// TestPosterDeadlineGivesUpAtOnce: a failure at or after the poster's Deadline is not resent.
+func TestPosterDeadlineGivesUpAtOnce(t *testing.T) {
+	var attempts atomic.Int32
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/finish") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := outageOpts()
+	opts.GiveUpAfter = time.Minute // the deadline is what gives up here
+	opts.Deadline = time.Now().Add(-time.Second)
+	closed := make(chan string, 2)
+	p := c.PosterWith(turn(), func(r string) { closed <- r }, opts)
+	p.Emit(EventTurnStart, map[string]any{})
+	done := make(chan struct{})
+	go func() { defer close(done); p.Run(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return: a deadline in the past did not give up")
+	}
+	if got := <-closed; got != ClosedLost {
+		t.Errorf("onClosed = %q, want %q", got, ClosedLost)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("K2 attempts = %d, want 1: a failure past the deadline is not resent", got)
+	}
+}
+
+// TestPosterPastDeadlineStillDelivers: the deadline bounds the resends, not the requests: a batch
+// and a finish that the server takes go out even with the deadline already past.
+func TestPosterPastDeadlineStillDelivers(t *testing.T) {
+	ev := &recorder{}
+	b := newBotAPI(t, okHandler(ev))
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := posterOpts()
+	opts.Deadline = time.Now().Add(-time.Second)
+	closed := make(chan string, 2)
+	p := c.PosterWith(turn(), func(r string) { closed <- r }, opts)
+	p.Emit(EventTurnStart, map[string]any{"i": 0})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); p.Run(ctx) }()
+	waitFor(t, "the first batch", func() bool { return len(ev.k2()) >= 1 })
+	cancel()
+	<-done
+
+	if err := p.Finish(context.Background(), "done", "the answer", "", "", Usage{}); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	select {
+	case reason := <-closed:
+		t.Fatalf("onClosed(%q): a past deadline must not stop a request the server takes", reason)
+	default:
+	}
+	if k3 := ev.k3(); len(k3) != 1 {
+		t.Errorf("K3 requests = %d, want 1", len(k3))
+	}
+	_, payloads := stored(ev)
+	if len(payloads) != 1 || len(payloads[0]) != 1 {
+		t.Fatalf("stored batches = %d, want one with the event: %v", len(payloads), payloads)
+	}
+}
+
+// TestPosterResendNotPastDeadline: a failure whose resend would land at or after Deadline gives up
+// at once, however long the server's Retry-After asks to wait, and nothing goes out past it.
+func TestPosterResendNotPastDeadline(t *testing.T) {
+	var mu sync.Mutex
+	var at []time.Time
+	deadline := time.Now().Add(50 * time.Millisecond)
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		mu.Lock()
+		at = append(at, time.Now())
+		mu.Unlock()
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := outageOpts()
+	opts.GiveUpAfter = time.Minute // the deadline is what gives up here
+	opts.Deadline = deadline
+	closed := make(chan string, 2)
+	p := c.PosterWith(turn(), func(r string) { closed <- r }, opts)
+	p.Emit(EventTurnStart, map[string]any{})
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() { defer close(done); p.Run(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not return: a resend would have gone out past the deadline")
+	}
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Errorf("the turn was lost after %v, want at once: the resend would pass the deadline", took)
+	}
+	if got := <-closed; got != ClosedLost {
+		t.Errorf("onClosed = %q, want %q", got, ClosedLost)
+	}
+	k2 := 0
+	for _, r := range b.requests() {
+		if strings.HasSuffix(r.path, "/events") {
+			k2++
+		}
+	}
+	if k2 != 1 {
+		t.Errorf("K2 requests = %d, want 1: no resend past the deadline", k2)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, ts := range at {
+		if !ts.Before(deadline) {
+			t.Errorf("a request went out at %v, at or after the deadline %v", ts, deadline)
+		}
+	}
+}
+
+// TestFinishResendNotPastDeadline: the same for K3: a failure whose resend would land at or after
+// Deadline ends the finish with that error, after one request.
+func TestFinishResendNotPastDeadline(t *testing.T) {
+	var finishes atomic.Int32
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/finish") {
+			finishes.Add(1)
+		}
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := outageOpts()
+	opts.GiveUpAfter = time.Minute // the deadline is what gives up here
+	opts.Deadline = time.Now().Add(50 * time.Millisecond)
+	p := c.PosterWith(turn(), nil, opts)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := p.Finish(ctx, "done", "the answer", "", "", Usage{})
+	if got := StatusOf(err); got != http.StatusServiceUnavailable {
+		t.Fatalf("Finish = %v, want the 503", err)
+	}
+	if got := finishes.Load(); got != 1 {
+		t.Errorf("K3 requests = %d, want 1: no resend past the deadline", got)
+	}
+}
+
+// TestRetryWait: the wait doubles from RetryBase to MaxRetryWait and is capped, not wrapped, however
+// large the base or the attempt count.
+func TestRetryWait(t *testing.T) {
+	t.Run("a huge base is capped", func(t *testing.T) {
+		// 1<<35+1 is past MaxRetryWait at every shift, and its 29th shift wraps to a small positive
+		// value: the doubling must be capped, not wrapped.
+		for _, base := range []time.Duration{time.Hour, (1 << 35) + 1} {
+			p := &Poster{retryBase: base, maxRetry: DefaultMaxRetryWait}
+			for attempts := 1; attempts <= 1000; attempts++ {
+				if got := p.retryWait(attempts, 0); got != DefaultMaxRetryWait {
+					t.Fatalf("base %s, attempt %d waits %s, want %s", base, attempts, got, DefaultMaxRetryWait)
+				}
+			}
+		}
+	})
+	t.Run("doubles to the cap", func(t *testing.T) {
+		p := &Poster{retryBase: time.Second, maxRetry: 5 * time.Second}
+		want := []time.Duration{
+			time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second,
+		}
+		for i, w := range want {
+			if got := p.retryWait(i+1, 0); got != w {
+				t.Errorf("attempt %d waits %s, want %s", i+1, got, w)
+			}
+		}
+	})
+}
+
+// TestPosterRetryAfterBeatsMaxWait: the server's Retry-After is honoured even past MaxRetryWait.
+func TestPosterRetryAfterBeatsMaxWait(t *testing.T) {
+	var mu sync.Mutex
+	var times []time.Time
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		mu.Lock()
+		times = append(times, time.Now())
+		mu.Unlock()
+		if n == 1 {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	opts := outageOpts()
+	opts.GiveUpAfter = time.Minute
+	p := c.PosterWith(turn(), nil, opts)
+	p.Emit(EventTurnStart, map[string]any{})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.Finish(ctx, "done", "the answer", "", "", Usage{}); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(times) < 2 {
+		t.Fatalf("requests = %d, want the batch resent", len(times))
+	}
+	if gap := times[1].Sub(times[0]); gap < 1900*time.Millisecond {
+		t.Errorf("resent after %v, want the server's Retry-After of 2 s, not MaxRetryWait", gap)
+	}
+}
+
+// TestFinishSurvivesOutage: K3 rides out a run of transient failures too, and the answer reaches the
+// platform once.
+func TestFinishSurvivesOutage(t *testing.T) {
+	t.Run("transient then ok", func(t *testing.T) {
+		var finishes atomic.Int32
+		ev := &recorder{}
+		b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+			var v map[string]any
+			_ = json.Unmarshal(body, &v)
+			if !strings.HasSuffix(r.URL.Path, "/finish") {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			if finishes.Add(1) <= 8 {
+				if finishes.Load()%2 == 0 {
+					dropConnection(w)
+					return
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			ev.add(r.URL.Path, v)
+			w.WriteHeader(http.StatusNoContent)
+		})
+		c := newClient(t, b.server.URL, keyFile(t))
+		opts := outageOpts()
+		opts.GiveUpAfter = 2 * time.Second
+		p := c.PosterWith(turn(), func(string) { t.Error("onClosed was called") }, opts)
+		if err := p.Finish(context.Background(), "done", "the answer", "", "", Usage{}); err != nil {
+			t.Fatalf("Finish = %v, want nil through eight failed attempts", err)
+		}
+		if got := ev.k3(); len(got) != 1 {
+			t.Errorf("stored finishes = %d, want 1", len(got))
+		}
+		if got := finishes.Load(); got <= 4 {
+			t.Errorf("K3 attempts = %d, want more than the old four", got)
+		}
+	})
+
+	t.Run("past the window", func(t *testing.T) {
+		var finishes atomic.Int32
+		b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+			if strings.HasSuffix(r.URL.Path, "/finish") {
+				finishes.Add(1)
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+		c := newClient(t, b.server.URL, keyFile(t))
+		opts := outageOpts()
+		opts.GiveUpAfter = 300 * time.Millisecond
+		p := c.PosterWith(turn(), func(string) { t.Error("onClosed was called") }, opts)
+		start := time.Now()
+		err := p.Finish(context.Background(), "done", "the answer", "", "", Usage{})
+		if err == nil {
+			t.Fatal("Finish = nil, want the last error once the window ran out")
+		}
+		if got := StatusOf(err); got != http.StatusServiceUnavailable {
+			t.Errorf("Finish = %v, want the last 503", err)
+		}
+		if took := time.Since(start); took < 300*time.Millisecond {
+			t.Errorf("Finish gave up after %v, want at least the 300 ms window", took)
+		}
+	})
+
+	t.Run("turn_closed after a resend", func(t *testing.T) {
+		var finishes atomic.Int32
+		b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+			if !strings.HasSuffix(r.URL.Path, "/finish") {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			switch finishes.Add(1) {
+			case 1:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = fmt.Fprint(w, `{"code":"turn_closed","state":"done"}`)
+			}
+		})
+		c := newClient(t, b.server.URL, keyFile(t))
+		p := c.PosterWith(turn(), func(string) { t.Error("onClosed was called") }, outageOpts())
+		if err := p.Finish(context.Background(), "done", "the answer", "", "", Usage{}); err != nil {
+			t.Errorf("Finish = %v for a 409 turn_closed after a resend, want nil", err)
+		}
+		if got := finishes.Load(); got != 2 {
+			t.Errorf("K3 requests = %d, want 2", got)
+		}
+	})
+}
+
+// TestFinishRejectedAtOnce: a K3 the server refuses (a 4xx other than 404, 409 and 429) ends at once.
+func TestFinishRejectedAtOnce(t *testing.T) {
+	var finishes atomic.Int32
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		if !strings.HasSuffix(r.URL.Path, "/finish") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		finishes.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{"code":"bad_finish"}`)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	p := c.PosterWith(turn(), func(string) { t.Error("onClosed was called") }, outageOpts())
+	err := p.Finish(context.Background(), "done", "the answer", "", "", Usage{})
+	if got := StatusOf(err); got != http.StatusBadRequest {
+		t.Fatalf("Finish = %v, want the 400 itself", err)
+	}
+	if got := finishes.Load(); got != 1 {
+		t.Errorf("K3 requests = %d, want 1: a refused finish is not resent", got)
+	}
+}
+
+// TestErrorClass: the word the poll log gives a failure.
+func TestErrorClass(t *testing.T) {
+	wrap := func(err error) error { return &url.Error{Op: "Get", URL: "https://tb-api.teknoir.cloud/api", Err: err} }
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"key", fmt.Errorf("read the key: %w", botapi.ErrKey), "key"},
+		{"dns", wrap(&net.DNSError{Err: "no such host", Name: "tb-api.teknoir.cloud", IsNotFound: true}), "dns"},
+		{"tls verify", wrap(&tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), "tls"},
+		{"tls record", wrap(tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}), "tls"},
+		{"timeout", wrap(context.DeadlineExceeded), "timeout"},
+		{"refused", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}), "refused"},
+		{"plain", wrap(errors.New("something else")), "transport"},
+		{"http", &Error{Status: http.StatusServiceUnavailable}, "http"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ErrorClass(tc.err); got != tc.want {
+				t.Errorf("ErrorClass(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
+	}
+	if got := ErrorClass(nil); got != "" {
+		t.Errorf("ErrorClass(nil) = %q, want \"\"", got)
 	}
 }
 
