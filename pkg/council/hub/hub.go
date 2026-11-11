@@ -18,17 +18,21 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/teknoir/cli/pkg/api"
@@ -47,8 +51,14 @@ const (
 	// DefaultRequestTimeout is the deadline of one K2 or K3 attempt.
 	DefaultRequestTimeout = 15 * time.Second
 	// DefaultRetryBase is the wait before the first resend of a failed K2 or K3; the waits after it
-	// double.
+	// double, up to DefaultMaxRetryWait.
 	DefaultRetryBase = 1 * time.Second
+	// DefaultMaxRetryWait caps one resend's wait: a platform that is restarting is not hammered.
+	DefaultMaxRetryWait = 5 * time.Second
+	// DefaultGiveUpAfter is how long a K2 batch or a K3 keeps being resent through a run of
+	// transient failures before the turn gives up on it. The platform's backend is stopped and
+	// started on every release, which takes 30–90 s with no answer at all.
+	DefaultGiveUpAfter = 3 * time.Minute
 	// DefaultMaxBuffered is the most event JSON a poster buffers; events beyond it are dropped.
 	DefaultMaxBuffered = 4 << 20
 
@@ -60,11 +70,10 @@ const (
 	// the request body needs.
 	MaxEventBytes = MaxBatchBytes - 1024
 
-	// maxAttempts is how many times one K2 batch or one K3 is tried: the first attempt and three
-	// resends, 1, 2 and 4 retry bases apart.
-	maxAttempts = 3
 	// maxRetryAfter caps one resend's wait, also when the server's Retry-After asks for longer.
 	maxRetryAfter = 30 * time.Second
+	// maxRetryShift is the most times the retry base is doubled, so the shift cannot overflow.
+	maxRetryShift = 30
 
 	// maxResult caps what is read from one response.
 	maxResult = 1 << 20
@@ -205,6 +214,52 @@ func CodeOf(err error) string {
 		return e.Code
 	}
 	return ""
+}
+
+// IsKeyError reports whether err is the bot's key being missing or empty. Only a person can fix
+// that, by re-creating the bot; botapi is internal, so this is how a caller outside it asks.
+func IsKeyError(err error) bool { return errors.Is(err, botapi.ErrKey) }
+
+// ErrorClass says why a request failed, in one word, for the operator log: "key" when the bot's key
+// is missing or empty, "dns" when the name does not resolve, "tls" when the handshake or the
+// certificate fails, "timeout", "refused" when the connection is refused, "transport" for any other
+// failed connection, and "http" when an answer came back with a status.
+func ErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	if IsKeyError(err) {
+		return "key"
+	}
+	if StatusOf(err) != 0 {
+		return "http"
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return "dns"
+	}
+	var certVerify *tls.CertificateVerificationError
+	var recordHeader tls.RecordHeaderError
+	var unknownAuthority x509.UnknownAuthorityError
+	var certInvalid x509.CertificateInvalidError
+	var hostname x509.HostnameError
+	var systemRoots x509.SystemRootsError
+	if errors.As(err, &certVerify) || errors.As(err, &recordHeader) ||
+		errors.As(err, &unknownAuthority) || errors.As(err, &certInvalid) ||
+		errors.As(err, &hostname) || errors.As(err, &systemRoots) {
+		return "tls"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "refused"
+	}
+	return "transport"
 }
 
 // Client is the council work queue of one bot API.
@@ -383,9 +438,17 @@ type PosterOptions struct {
 	BatchSize int
 	// RequestTimeout is the deadline of one K2 or K3 attempt (DefaultRequestTimeout).
 	RequestTimeout time.Duration
-	// RetryBase is the wait before the first resend of a failed request; the waits after it double
-	// (DefaultRetryBase).
+	// RetryBase is the wait before the first resend of a failed request; the waits after it double,
+	// up to MaxRetryWait (DefaultRetryBase).
 	RetryBase time.Duration
+	// MaxRetryWait caps one resend's wait (DefaultMaxRetryWait).
+	MaxRetryWait time.Duration
+	// GiveUpAfter is how long a K2 batch or a K3 keeps being resent through a run of transient
+	// failures before it is given up (DefaultGiveUpAfter).
+	GiveUpAfter time.Duration
+	// Deadline is when the turn must be finished: a failure at or after it gives up at once. Zero
+	// means no deadline.
+	Deadline time.Time
 	// MaxBuffered is the most event JSON the poster buffers; events beyond it are dropped
 	// (DefaultMaxBuffered).
 	MaxBuffered int
@@ -429,18 +492,26 @@ type finishReq struct {
 // One driver goroutine (Run or Finish) sends at a time, so batches never interleave and nothing
 // goes out after K3. Every request is bounded by RequestTimeout, and a request cut short by the
 // driver's ctx leaves its batch pending for the next driver, with the same number.
+//
+// A transient failure — a network error, an attempt that timed out while the driver's ctx is still
+// live, a 429 or a 5xx — is resent, the same batch number and the same K3 body, until the run of
+// failures has lasted GiveUpAfter or the turn's Deadline has come; a platform that is being
+// restarted (30–90 s with no answer) does not end a running turn.
 type Poster struct {
 	c    *Client
 	turn *WorkTurn
 
 	// The settings, fixed at creation.
-	flush      time.Duration
-	heartbeat  time.Duration
-	batchSize  int
-	reqTimeout time.Duration
-	retryBase  time.Duration
-	maxBuf     int
-	onClose    func(reason string)
+	flush       time.Duration
+	heartbeat   time.Duration
+	batchSize   int
+	reqTimeout  time.Duration
+	retryBase   time.Duration
+	maxRetry    time.Duration // the most one resend waits
+	giveUpAfter time.Duration // how long a run of transient failures is ridden out
+	deadline    time.Time     // when the turn must be finished; zero means no deadline
+	maxBuf      int
+	onClose     func(reason string)
 
 	// wake tells the driver there is work, without ever blocking. It carries at most one token.
 	wake chan struct{}
@@ -455,6 +526,9 @@ type Poster struct {
 	pending  *batch            // the batch with a number and no 2xx answer yet; at most one
 	lastNum  int               // the last batch number given
 	lastSent time.Time         // when the last K2 or K3 got a 2xx
+	// failingSince is when the current run of transient failures began; zero when there is none.
+	// Any K2 or K3 that gets a 2xx clears it.
+	failingSince time.Time
 
 	// Where the turn is.
 	state   int
@@ -486,18 +560,21 @@ func (c *Client) Poster(turn *WorkTurn, onClosed func(reason string)) *Poster {
 // PosterWith is Poster with the intervals given.
 func (c *Client) PosterWith(turn *WorkTurn, onClosed func(reason string), opts PosterOptions) *Poster {
 	p := &Poster{
-		c:          c,
-		turn:       turn,
-		flush:      opts.Flush,
-		heartbeat:  opts.Heartbeat,
-		batchSize:  opts.BatchSize,
-		reqTimeout: opts.RequestTimeout,
-		retryBase:  opts.RetryBase,
-		maxBuf:     opts.MaxBuffered,
-		onClose:    onClosed,
-		wake:       make(chan struct{}, 1),
-		finDone:    make(chan struct{}),
-		lastSent:   time.Now(),
+		c:           c,
+		turn:        turn,
+		flush:       opts.Flush,
+		heartbeat:   opts.Heartbeat,
+		batchSize:   opts.BatchSize,
+		reqTimeout:  opts.RequestTimeout,
+		retryBase:   opts.RetryBase,
+		maxRetry:    opts.MaxRetryWait,
+		giveUpAfter: opts.GiveUpAfter,
+		deadline:    opts.Deadline,
+		maxBuf:      opts.MaxBuffered,
+		onClose:     onClosed,
+		wake:        make(chan struct{}, 1),
+		finDone:     make(chan struct{}),
+		lastSent:    time.Now(),
 	}
 	if p.flush <= 0 {
 		p.flush = DefaultFlush
@@ -513,6 +590,12 @@ func (c *Client) PosterWith(turn *WorkTurn, onClosed func(reason string), opts P
 	}
 	if p.retryBase <= 0 {
 		p.retryBase = DefaultRetryBase
+	}
+	if p.maxRetry <= 0 {
+		p.maxRetry = DefaultMaxRetryWait
+	}
+	if p.giveUpAfter <= 0 {
+		p.giveUpAfter = DefaultGiveUpAfter
 	}
 	if p.maxBuf <= 0 {
 		p.maxBuf = DefaultMaxBuffered
@@ -814,6 +897,7 @@ func (p *Poster) sendBatch(ctx context.Context, b *batch) {
 	if err == nil {
 		p.pending = nil
 		p.lastSent = time.Now()
+		p.failingSince = time.Time{}
 		return
 	}
 	if ctx.Err() != nil {
@@ -832,12 +916,15 @@ func (p *Poster) sendBatch(ctx context.Context, b *batch) {
 			p.endedLocked(ClosedNotFound)
 		case refused(he.Status):
 			if p.state == stateFinishing {
-				// One refused batch does not hold up the turn's answer.
+				// One refused batch does not hold up the turn's answer, which gets a failure
+				// window of its own.
 				p.pending = nil
+				p.failingSince = time.Time{}
 				return
 			}
 			p.endedLocked(ClosedRejected)
 		default:
+			// A 429 or a 5xx: the platform is busy or restarting, not refusing the batch.
 			p.retryBatchLocked(b, he.RetryAfter)
 		}
 		return
@@ -852,10 +939,22 @@ func refused(status int) bool {
 	return status >= 300 && status < 500 && status != http.StatusTooManyRequests
 }
 
-// retryWait is the wait before the attempts-th resend: 1, 2 or 4 retry bases, or the server's
-// Retry-After when it asks for longer, but never more than maxRetryAfter.
+// retryWait is the wait before the attempts-th resend: 1, 2, 4 … retry bases, capped at MaxRetryWait,
+// or the server's Retry-After when it asks for longer, but never more than maxRetryAfter.
 func (p *Poster) retryWait(attempts int, retryAfter time.Duration) time.Duration {
-	d := p.retryBase << uint(attempts-1)
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > maxRetryShift {
+		attempts = maxRetryShift
+	}
+	// The comparison keeps the doubling from overflowing: a base that would pass MaxRetryWait is
+	// capped here, not wrapped.
+	shift := uint(attempts - 1)
+	d := p.maxRetry
+	if shift < 63 && p.retryBase <= p.maxRetry>>shift {
+		d = p.retryBase << shift
+	}
 	if retryAfter > d {
 		d = retryAfter
 	}
@@ -865,21 +964,39 @@ func (p *Poster) retryWait(attempts int, retryAfter time.Duration) time.Duration
 	return d
 }
 
-// retryBatchLocked resends b after 1, 2 and 4 retry bases (or the server's Retry-After), then gives
-// it up.
+// recordFailureLocked records a transient failure, the first of a run setting its start, and reports
+// whether there is time for another attempt: the run may last GiveUpAfter, and nothing may go out at
+// or after the turn's deadline.
+func (p *Poster) recordFailureLocked(now time.Time) bool {
+	if p.failingSince.IsZero() {
+		p.failingSince = now
+	}
+	if !p.deadline.IsZero() && !now.Before(p.deadline) {
+		return false
+	}
+	return now.Before(p.failingSince.Add(p.giveUpAfter))
+}
+
+// retryBatchLocked resends b after the retry wait (or the server's Retry-After), until the run of
+// transient failures has lasted GiveUpAfter, or the turn's deadline has come: no resend goes out at
+// or after it.
 func (p *Poster) retryBatchLocked(b *batch, retryAfter time.Duration) {
-	b.attempts++
-	if b.attempts > maxAttempts {
+	now := time.Now()
+	at := now.Add(p.retryWait(b.attempts+1, retryAfter))
+	if !p.recordFailureLocked(now) || (!p.deadline.IsZero() && !at.Before(p.deadline)) {
 		if p.state == stateFinishing {
-			// The events are lost, but the turn's answer still goes out.
+			// The events are lost, but the turn's answer still goes out, with a failure window of
+			// its own.
 			p.pending = nil
+			p.failingSince = time.Time{}
 			p.dropBufferLocked()
 			return
 		}
 		p.closeLocked(ClosedLost)
 		return
 	}
-	b.retryAt = time.Now().Add(p.retryWait(b.attempts, retryAfter))
+	b.attempts++
+	b.retryAt = at
 }
 
 // MaxErrorMessage is the most characters of a turn's error message that K3 sends.
@@ -932,6 +1049,7 @@ func (p *Poster) sendFinish(ctx context.Context, fr *finishReq) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err == nil {
+		p.failingSince = time.Time{}
 		p.finishLocked(nil)
 		return
 	}
@@ -953,12 +1071,17 @@ func (p *Poster) sendFinish(ctx context.Context, fr *finishReq) {
 		}
 		retryAfter = he.RetryAfter
 	}
-	fr.attempts++
-	if fr.attempts > maxAttempts {
+	// A network error, a timeout while ctx is still live, a 429 or a 5xx: the answer is worth
+	// waiting for, for as long as the run of failures allows, but no resend goes out at or after
+	// the turn's deadline.
+	now := time.Now()
+	at := now.Add(p.retryWait(fr.attempts+1, retryAfter))
+	if !p.recordFailureLocked(now) || (!p.deadline.IsZero() && !at.Before(p.deadline)) {
 		p.finishLocked(err)
 		return
 	}
-	fr.retryAt = time.Now().Add(p.retryWait(fr.attempts, retryAfter))
+	fr.attempts++
+	fr.retryAt = at
 }
 
 // Finish sends what is left, then K3, and returns K3's result.
@@ -1063,6 +1186,11 @@ func (p *Poster) closeLocked(reason string) {
 	}
 	p.state = stateClosed
 	p.reason = reason
+	if reason == ClosedLost || reason == ClosedRejected {
+		// The turn's answer still goes out, so K3 gets a failure window of its own, bounded by the
+		// deadline and Finish's ctx.
+		p.failingSince = time.Time{}
+	}
 	p.dropBufferLocked()
 	p.pending = nil
 }

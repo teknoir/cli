@@ -350,6 +350,8 @@ type fakePoster struct {
 	finishCalled bool
 	finishes     int
 	finishAt     time.Time
+	// deadline is when the turn's finish must be posted, as the hub made the poster with it.
+	deadline time.Time
 	// finishWait makes Finish block on it before it records anything: a Finish that ignores its
 	// ctx. The test sets it before the stop; the turn's goroutine reads it after, through the
 	// channel the stop closes.
@@ -533,9 +535,10 @@ func (h *fakeHub) Next(ctx context.Context, free int) (*hub.WorkTurn, error) {
 	return nil, context.Cause(ctx)
 }
 
-func (h *fakeHub) NewPoster(turn *hub.WorkTurn, onClosed func(reason string)) Poster {
+func (h *fakeHub) NewPoster(turn *hub.WorkTurn, deadline time.Time, onClosed func(reason string)) Poster {
 	p := newFakePoster(turn)
 	p.onClosed = onClosed
+	p.deadline = deadline
 	h.mu.Lock()
 	p.finishWait = h.finishWait
 	h.posters = append(h.posters, p)

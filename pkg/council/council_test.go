@@ -6,12 +6,18 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/teknoir/cli/pkg/council/coder"
 	"github.com/teknoir/cli/pkg/council/hub"
+	"github.com/teknoir/cli/pkg/council/internal/botapi"
 	"github.com/teknoir/cli/pkg/council/model"
 )
 
@@ -213,6 +219,226 @@ func TestPollBackoffStatuses(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A bot whose key file is gone needs a person: the poll names the file, says to re-create the bot,
+// and waits 60 s.
+func TestPollKeyError(t *testing.T) {
+	h := newHarness(t, nil)
+	h.hub = &fakeHub{err: fmt.Errorf("hub: %w", botapi.ErrKey)}
+	h.cfg.Hub = h.hub
+	h.cfg.KeyFile = "/run/teknoirbot/key"
+	sleeps := &sleepRec{}
+	h.cfg.Sleep = sleeps.sleep
+	_, cancel, done := h.serveDaemon(t)
+	waitUntil(t, "one failed poll", func() bool { return len(sleeps.all()) >= 1 })
+	cancel()
+	waitServe(t, done, 5*time.Second)
+
+	if got := sleeps.all()[0]; got != 60*time.Second {
+		t.Errorf("wait %s, want 60 s for a missing key", got)
+	}
+	lines := h.logs.all()
+	named := false
+	for _, line := range lines {
+		if strings.Contains(line, "/run/teknoirbot/key") && strings.Contains(line, "re-create the bot") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("no log line names the key file and re-creating the bot: %v", lines)
+	}
+}
+
+// A 404 on the work queue is the council being off, whatever its code: 60 s between polls, and one
+// line per streak.
+func TestPollNoCouncilAPI(t *testing.T) {
+	h := newHarness(t, nil)
+	h.hub = &fakeHub{err: &hub.Error{Method: "GET", URL: "u", Status: http.StatusNotFound, Code: "NotFoundError"}}
+	h.cfg.Hub = h.hub
+	var mu sync.Mutex
+	var waits []time.Duration
+	h.cfg.Sleep = func(ctx context.Context, d time.Duration) error {
+		mu.Lock()
+		waits = append(waits, d)
+		n := len(waits)
+		mu.Unlock()
+		if n >= 10 {
+			// Hold the tenth poll until the test cancels, so the count of failures is exact.
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	_, cancel, done := h.serveDaemon(t)
+	waitUntil(t, "ten failed polls", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(waits) >= 10
+	})
+	cancel()
+	waitServe(t, done, 5*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i, w := range waits {
+		if w != 60*time.Second {
+			t.Errorf("wait %d is %s, want 60 s for a platform with no council API", i, w)
+		}
+	}
+	lines := 0
+	for _, line := range h.logs.all() {
+		if strings.Contains(line, "no council API") {
+			lines++
+		}
+	}
+	if lines != 2 {
+		t.Errorf("lines about the missing council API = %d, want 2 (the first failure and the tenth): %v", lines, h.logs.all())
+	}
+}
+
+// countLog is how many of the captured lines hold substr.
+func countLog(lines []string, substr string) int {
+	n := 0
+	for _, line := range lines {
+		if strings.Contains(line, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// scriptHub is a work queue that answers with a script of errors, then with one error for good.
+type scriptHub struct {
+	mu   sync.Mutex
+	errs []error
+	then error
+}
+
+func (h *scriptHub) Next(ctx context.Context, free int) (*hub.WorkTurn, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.errs) > 0 {
+		err := h.errs[0]
+		h.errs = h.errs[1:]
+		return nil, err
+	}
+	return nil, h.then
+}
+
+func (h *scriptHub) NewPoster(turn *hub.WorkTurn, deadline time.Time, onClosed func(reason string)) Poster {
+	p := newFakePoster(turn)
+	p.onClosed = onClosed
+	p.deadline = deadline
+	return p
+}
+
+// A restart's 503s do not hide the 404s that follow them: the 404 line comes at the first 404 after
+// them, not ten failures later, and then at every tenth 404.
+func TestPollNoCouncilAPICountsTheFourOhFours(t *testing.T) {
+	busy := &hub.Error{Method: "GET", URL: "u", Status: http.StatusServiceUnavailable}
+	off := &hub.Error{Method: "GET", URL: "u", Status: http.StatusNotFound, Code: "NotFoundError"}
+
+	h := newHarness(t, nil)
+	h.cfg.Hub = &scriptHub{errs: []error{busy, busy}, then: off}
+	var mu sync.Mutex
+	var waits []time.Duration
+	afterThird := -1
+	h.cfg.Sleep = func(ctx context.Context, d time.Duration) error {
+		mu.Lock()
+		waits = append(waits, d)
+		n := len(waits)
+		if n == 3 {
+			afterThird = countLog(h.logs.all(), "no council API")
+		}
+		mu.Unlock()
+		if n >= 12 {
+			// Hold the twelfth poll's wait until the test cancels, so the count is exact.
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	_, cancel, done := h.serveDaemon(t)
+	waitUntil(t, "twelve failed polls", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(waits) >= 12
+	})
+	cancel()
+	waitServe(t, done, 5*time.Second)
+
+	if afterThird != 1 {
+		t.Errorf("lines about the missing council API after the 3rd poll = %d, want 1: the 404s are counted from the first 404: %v", afterThird, h.logs.all())
+	}
+	if got := countLog(h.logs.all(), "no council API"); got != 2 {
+		t.Errorf("lines after twelve polls = %d, want 2 (the first 404 and the tenth): %v", got, h.logs.all())
+	}
+}
+
+// The poster HubOf makes carries the turn's finish deadline: a failure at or past it gives up at
+// once, with one K2 and no resend.
+func TestHubOfPosterCarriesTheDeadline(t *testing.T) {
+	var k2s atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/finish") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		k2s.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	keyPath := filepath.Join(t.TempDir(), "bot-key")
+	if err := os.WriteFile(keyPath, []byte("bot-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := hub.New(srv.URL, keyPath, "test", nil)
+	if err != nil {
+		t.Fatalf("hub.New: %v", err)
+	}
+	closed := make(chan string, 1)
+	p := HubOf(c).NewPoster(&hub.WorkTurn{ID: "trn_1", ClaimID: "clm_1"},
+		time.Now().Add(-time.Second), func(reason string) { closed <- reason })
+	p.Emit(hub.EventTurnStart, map[string]any{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); p.Run(ctx) }()
+	select {
+	case reason := <-closed:
+		if reason != hub.ClosedLost {
+			t.Errorf("onClosed = %q, want %q", reason, hub.ClosedLost)
+		}
+	case <-time.After(3 * time.Second):
+		// The default flush holds the event for a second. With no deadline carried the poster
+		// would keep resending, through its three-minute window.
+		t.Fatal("no onClosed: the poster HubOf made did not carry the past deadline")
+	}
+	<-done
+	if got := k2s.Load(); got != 1 {
+		t.Errorf("K2 requests = %d, want 1", got)
+	}
+}
+
+// The poster of a turn is made with the turn's finish deadline: D plus FinishGrace.
+func TestPosterDeadline(t *testing.T) {
+	work := newWork(kindAsk, "", "what is a robot?")
+	h := newHarness(t, work)
+	h.cfg.FinishGrace = 300 * time.Millisecond
+	h.model.push(roleRoute, textStep("an edge computer", "end_turn"))
+	h.start(t)
+	p := h.poster(t)
+	p.mu.Lock()
+	got := p.deadline
+	p.mu.Unlock()
+	want := time.UnixMilli(work.Deadline).Add(h.cfg.FinishGrace)
+	if !got.Equal(want) {
+		t.Errorf("the poster's deadline = %v, want D + FinishGrace = %v", got, want)
+	}
+	h.waitFinish(t)
+	h.stop(t)
 }
 
 // Two fast nil answers make a one-second sleep.
