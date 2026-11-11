@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // botAPI is a fake bot API for the hub tests: it records requests and lets each test answer them.
@@ -1164,6 +1165,41 @@ func TestFinishWithError(t *testing.T) {
 	errObj, _ := k3[0].body["error"].(map[string]any)
 	if errObj["code"] != "budget" || errObj["message"] != "out of tokens" {
 		t.Errorf("error = %v", k3[0].body["error"])
+	}
+}
+
+// TestFinishSanitizesError: K3 refuses a code it does not take, so Finish sends one it does, and
+// cuts a long message.
+func TestFinishSanitizesError(t *testing.T) {
+	cases := []struct{ code, want string }{
+		{"Budget", "budget"},
+		{"model.rate_limit", "model.rate_limit"},
+		{"bad code with spaces", "bot_error"},
+		{"9lives", "bot_error"},
+		{strings.Repeat("a", 65), "bot_error"},
+		{strings.Repeat("a", 64), strings.Repeat("a", 64)},
+	}
+	for _, tc := range cases {
+		ev := &recorder{}
+		b := newBotAPI(t, okHandler(ev))
+		c := newClient(t, b.server.URL, keyFile(t))
+		p := c.PosterWith(turn(), nil, posterOpts())
+		msg := strings.Repeat("é", MaxErrorMessage+10)
+		if err := p.Finish(context.Background(), "failed", "", tc.code, msg, Usage{}); err != nil {
+			t.Fatalf("Finish(%q): %v", tc.code, err)
+		}
+		k3 := ev.k3()
+		if len(k3) != 1 {
+			t.Fatalf("K3 requests = %d, want 1", len(k3))
+		}
+		errObj, _ := k3[0].body["error"].(map[string]any)
+		if errObj["code"] != tc.want {
+			t.Errorf("code %q sent as %v, want %q", tc.code, errObj["code"], tc.want)
+		}
+		got, _ := errObj["message"].(string)
+		if n := utf8.RuneCountInString(got); n != MaxErrorMessage {
+			t.Errorf("message has %d characters, want %d", n, MaxErrorMessage)
+		}
 	}
 }
 

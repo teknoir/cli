@@ -5,7 +5,11 @@
 //
 //	K1 GET  {base}/council/work?wait=25&free=<n>   200 {"turn": WorkTurn}, 204 no work
 //	K2 POST {base}/council/turns/{turnId}/events   {"claimId","batch","events"} → 204
-//	K3 POST {base}/council/turns/{turnId}/finish   {"claimId","state",…,"usage"} → 204
+//	K3 POST {base}/council/turns/{turnId}/finish   {"claimId","state","final"?,"error"?,"usage"} → 204
+//
+// K3's error is {"code","message"}: the code matches ^[a-z][a-z0-9_.-]{0,63}$ (the server answers
+// 400 to any other) and the server keeps 4096 characters of the message. Finish sends codes that
+// do not match as bot_error and cuts the message to MaxErrorMessage.
 //
 // K2 and K3 answer 409 {"code":"turn_closed"|"claim_mismatch"} when the turn must be dropped, and
 // 404 when it is unknown.
@@ -21,6 +25,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -877,6 +882,34 @@ func (p *Poster) retryBatchLocked(b *batch, retryAfter time.Duration) {
 	b.retryAt = time.Now().Add(p.retryWait(b.attempts, retryAfter))
 }
 
+// MaxErrorMessage is the most characters of a turn's error message that K3 sends.
+const MaxErrorMessage = 4096
+
+// errCodePattern is what K3 takes as an error code.
+var errCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`)
+
+// errCodeOf is code as K3 takes it: lower-cased, and bot_error when it is still no code (an
+// error text, an empty or too long code), since the server refuses the whole finish for it.
+func errCodeOf(code string) string {
+	c := strings.ToLower(code)
+	if errCodePattern.MatchString(c) {
+		return c
+	}
+	return "bot_error"
+}
+
+// cutChars is s cut to at most n characters (runes).
+func cutChars(s string, n int) string {
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
+
 // sendFinish is one K3 attempt for fr, outside mu.
 func (p *Poster) sendFinish(ctx context.Context, fr *finishReq) {
 	body := map[string]any{"claimId": p.turn.ClaimID, "state": fr.state, "usage": fr.usage}
@@ -942,6 +975,10 @@ func (p *Poster) Finish(ctx context.Context, state, final, errCode, errMsg strin
 		return err
 	}
 	if p.fin == nil {
+		if errCode != "" {
+			errCode = errCodeOf(errCode)
+			errMsg = cutChars(errMsg, MaxErrorMessage)
+		}
 		p.fin = &finishReq{state: state, final: final, errCode: errCode, errMsg: errMsg, usage: usage}
 	}
 	p.finishCalled = true
