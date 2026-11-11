@@ -168,10 +168,11 @@ opencode run --standalone --format json --model teknoir/claude-sonnet-5-5#<effor
 | | |
 | --- | --- |
 | The binary | `opencode`, looked up on the PATH of the child's environment at run time. |
-| Its config | `/etc/teknoirbot/opencode.json`, passed as `OPENCODE_CONFIG`. |
+| Its config | `/etc/teknoirbot/opencode.json`, the only config it reads: passed as `OPENCODE_CONFIG`, with `OPENCODE_DISABLE_PROJECT_CONFIG=1` so no `opencode.json` in the work directory can replace it. A task that wrote one could send the bot's key to another URL. |
+| The skills | The kit's, `/etc/teknoirbot/kit/skills`, read through the config's `skills.paths`; nothing is linked into the work directory. |
+| Its config home | `XDG_CONFIG_HOME=/etc/teknoirbot/xdg`, read-only, with an empty `opencode` directory. The coder cannot write a global config there, and a task does not start when the image has no such directory. |
 | The work directory | `<work-dir>/chat-<the thread id's first 8 characters>`, its own git repository (`git init` on first use). A task's changed files are that repository's `git status --porcelain`. |
-| The skills | `/etc/teknoirbot/kit/skills` is linked into the work directory as `.agents/skills`, and kept out of the changed files and out of a commit of everything. |
-| The home | `<work-dir>/home`, with its XDG directories below it. Only `PATH`, `LANG`, `LC_ALL`, `TZ`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, the Kubernetes service variables, the bot-mode variables and `BUILDKIT_HOST` are passed through from the bot's own environment, plus `TEKNOIRBOT_MEMBER=coder` and the turn's id. |
+| The home | `<work-dir>/home`, with its XDG data, state and cache directories below it. Only `PATH`, `LANG`, `LC_ALL`, `TZ`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, the Kubernetes service variables, the bot-mode variables and `BUILDKIT_HOST` are passed through from the bot's own environment, plus `TEKNOIRBOT_MEMBER=coder` and the turn's id. |
 | The session | One OpenCode session per chat thread, remembered in `<work-dir>/home/.local/state/teknoirbot/sessions.json` (the 1000 most recent threads). A follow-up in the thread continues it. A thread keeps the effort it started with: OpenCode refuses a session resumed at another effort. |
 | One at a time | The bot runs one OpenCode process at a time; a second Coder task waits for it, and its turn shows a `wait` update while it does. |
 
@@ -186,6 +187,7 @@ Its limits and what a task that hits one reports:
 | A non-zero exit | `exit` |
 | A signal the council did not send | `crash` |
 | A prompt over 32 KiB, a bad turn or thread id | `bad_task` (nothing is started) |
+| No readable config file at `/etc/teknoirbot/opencode.json`, or no `opencode` directory under the config home: a wrong image | `start` (nothing is started, and the error names the path) |
 | Less than 2 GiB free under the work root before it starts, or less than 512 MiB while it runs | `disk` (nothing is started; a run that hits it is stopped as a cancel stops it) |
 
 The processes a task left running are killed when it ends, so a dev server or a watcher does not outlive it.

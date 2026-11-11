@@ -173,13 +173,13 @@ func TestOutputLimits(t *testing.T) {
 	if !utf8.ValidString(bigUpdate) {
 		t.Errorf("the message update is not valid UTF-8")
 	}
-	// The script itself wrote nothing, and the skills link is excluded: nothing changed.
+	// The script itself wrote nothing: nothing changed.
 	if len(rep.Changed) != 0 {
 		t.Errorf("changed %q, want nothing", rep.Changed)
 	}
 	for _, line := range rep.Changed {
 		if strings.Contains(line, ".agents") {
-			t.Errorf("changed %q lists the skills link", rep.Changed)
+			t.Errorf("changed %q lists a .agents path", rep.Changed)
 		}
 	}
 }

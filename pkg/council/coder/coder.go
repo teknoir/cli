@@ -33,7 +33,9 @@ const (
 	DefaultConfigFile = "/etc/teknoirbot/opencode.json"
 	DefaultWorkRoot   = "/work"
 	DefaultHome       = "/work/home"
-	DefaultSkillsDir  = "/etc/teknoirbot/kit/skills"
+	// DefaultConfigHome is OpenCode's XDG_CONFIG_HOME in the image: read-only, holding an empty
+	// opencode directory, so the coder cannot plant a global config of its own.
+	DefaultConfigHome = "/etc/teknoirbot/xdg"
 	DefaultTimeout    = 10 * time.Minute
 	DefaultKillGrace  = 10 * time.Second
 	// DefaultMinFreeBytes is the least free space under the work root a task may start with, and
@@ -81,9 +83,6 @@ const (
 	gitTimeout   = 10 * time.Second
 	gitWaitDelay = time.Second
 )
-
-// excludeLine keeps the skills link out of Changed and out of a commit of everything.
-const excludeLine = "/.agents/"
 
 // The kinds of Update.
 const (
@@ -140,10 +139,11 @@ type Config struct {
 	ConfigFile string
 	// WorkRoot holds one work directory per thread.
 	WorkRoot string
-	// Home is the child's HOME and the root of its XDG directories.
+	// Home is the child's HOME and the root of its XDG data, state and cache directories.
 	Home string
-	// SkillsDir is linked into every work directory as .agents/skills.
-	SkillsDir string
+	// ConfigHome is passed as XDG_CONFIG_HOME: a read-only directory that holds an empty opencode
+	// directory, so OpenCode writes nothing there and the coder cannot plant a global config.
+	ConfigHome string
 	// Timeout is the wall time of one OpenCode process.
 	Timeout time.Duration
 	// KillGrace is how long SIGTERM is given before SIGKILL.
@@ -298,8 +298,8 @@ func New(cfg Config) *Runner {
 	if cfg.Home == "" {
 		cfg.Home = DefaultHome
 	}
-	if cfg.SkillsDir == "" {
-		cfg.SkillsDir = DefaultSkillsDir
+	if cfg.ConfigHome == "" {
+		cfg.ConfigHome = DefaultConfigHome
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = DefaultTimeout
@@ -366,6 +366,15 @@ func (r *Runner) Run(ctx context.Context, task Task) Report {
 		return rep
 	}
 
+	// A wrong image must fail here, saying which path is missing, not later with OpenCode's own
+	// error for a config it could not read or a directory it could not write.
+	if err := r.checkOpenCode(); err != nil {
+		rep.Reason = ReasonStart
+		rep.Error = cutTotal(sanitize(err.Error()), MaxErrorBytes)
+		r.cfg.Logf("coder: turn %s: %v", turn, err)
+		return rep
+	}
+
 	env := r.environment(turn)
 	dir, err := r.workDir(thread)
 	if err != nil {
@@ -375,10 +384,6 @@ func (r *Runner) Run(ctx context.Context, task Task) Report {
 		return rep
 	}
 	r.gitInit(dir, env)
-	r.linkSkills(dir)
-	// Every run, not only the one that made the repository: a work dir from before this existed
-	// has the link and no exclude line.
-	r.ensureExcluded(dir)
 
 	// A thread's session keeps the effort it was started with: OpenCode, resumed at another, sends
 	// a mid-conversation system message the platform's model proxy does not allow.
@@ -740,99 +745,32 @@ func gitCommand(git, dir string, env []string, args ...string) (*exec.Cmd, conte
 	return cmd, cancel
 }
 
-// linkSkills makes the work directory's .agents/skills a symlink to the skills directory.
-func (r *Runner) linkSkills(dir string) {
-	src := r.cfg.SkillsDir
-	info, err := os.Stat(src)
-	if err != nil || !info.IsDir() {
-		return
-	}
-	agents := filepath.Join(dir, ".agents")
-	// A link where .agents should be is not followed: it would put the skills, and anything
-	// written beside them, somewhere outside the work dir.
-	if li, err := os.Lstat(agents); err == nil && li.Mode()&os.ModeSymlink != 0 {
-		r.cfg.Logf("coder: .agents is a symlink; the skills dir is not linked")
-		return
-	}
-	if err := os.MkdirAll(agents, 0o700); err != nil {
-		r.cfg.Logf("coder: make .agents: %v", err)
-		return
-	}
-	dst := filepath.Join(agents, "skills")
-	li, err := os.Lstat(dst)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		if err := os.Symlink(src, dst); err != nil {
-			r.cfg.Logf("coder: link the skills dir: %v", err)
-		}
-	case err != nil:
-		r.cfg.Logf("coder: inspect the skills link: %v", err)
-	case li.Mode()&os.ModeSymlink != 0:
-		if cur, err := os.Readlink(dst); err == nil && filepath.Clean(cur) == filepath.Clean(src) {
-			return
-		}
-		if err := os.Remove(dst); err != nil {
-			r.cfg.Logf("coder: replace the skills link: %v", err)
-			return
-		}
-		if err := os.Symlink(src, dst); err != nil {
-			r.cfg.Logf("coder: link the skills dir: %v", err)
-		}
-	default:
-		// A real file or directory there is the task's own doing: leave it.
-		r.cfg.Logf("coder: .agents/skills is not a symlink; left alone")
-	}
-}
-
-// ensureExcluded puts the skills link in the repository's own exclude file, so Changed does not
-// list it line after line and a task that commits everything does not commit a link to a path
-// outside the work dir. Errors are logged and ignored: the run goes on without it.
-func (r *Runner) ensureExcluded(dir string) {
-	gitDir := filepath.Join(dir, ".git")
-	// A .git that is a link or a file (a worktree or a submodule) is left alone: its exclude file
-	// is not in this directory.
-	if info, err := os.Lstat(gitDir); err != nil || !info.IsDir() {
-		return
-	}
-	infoDir := filepath.Join(gitDir, "info")
-	if info, err := os.Lstat(infoDir); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
-		r.cfg.Logf("coder: .git/info is not a directory; the skills link is not excluded")
-		return
-	}
-	path := filepath.Join(infoDir, "exclude")
-	data, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.TrimSuffix(line, "\r") == excludeLine {
-				return
-			}
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		r.cfg.Logf("coder: read .git/info/exclude: %v", err)
-		return
-	}
-	if err := os.Mkdir(infoDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		r.cfg.Logf("coder: make .git/info: %v", err)
-		return
-	}
-	// The line goes on its own: an exclude file without a final newline would otherwise join it
-	// to the last rule.
-	line := excludeLine + "\n"
-	if n := len(data); n > 0 && data[n-1] != '\n' {
-		line = "\n" + line
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+// checkOpenCode refuses a run whose OpenCode configuration is not where the image puts it: the
+// config file must be a readable regular file, and the config home must hold OpenCode's own
+// directory. Either being wrong is a wrong image, and OpenCode's own error for it is the less
+// clear one.
+func (r *Runner) checkOpenCode() error {
+	f, err := os.Open(r.cfg.ConfigFile)
 	if err != nil {
-		r.cfg.Logf("coder: open .git/info/exclude: %v", err)
-		return
+		return fmt.Errorf("council coder: OpenCode's config file %s is not readable: %w", r.cfg.ConfigFile, err)
 	}
-	if _, err := f.WriteString(line); err != nil {
-		r.cfg.Logf("coder: write .git/info/exclude: %v", err)
+	info, err := f.Stat()
+	_ = f.Close()
+	if err != nil {
+		return fmt.Errorf("council coder: OpenCode's config file %s: %w", r.cfg.ConfigFile, err)
 	}
-	if err := f.Close(); err != nil {
-		r.cfg.Logf("coder: close .git/info/exclude: %v", err)
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("council coder: OpenCode's config file %s is not a regular file", r.cfg.ConfigFile)
 	}
+	dir := filepath.Join(r.cfg.ConfigHome, "opencode")
+	di, err := os.Stat(dir)
+	switch {
+	case err != nil:
+		return fmt.Errorf("council coder: OpenCode's config home has no opencode directory %s: %w", dir, err)
+	case !di.IsDir():
+		return fmt.Errorf("council coder: OpenCode's config home has no opencode directory: %s is not a directory", dir)
+	}
+	return nil
 }
 
 // changed is git status --porcelain of the work directory, bounded.
@@ -883,9 +821,11 @@ func effortOf(effort string) string {
 }
 
 // environment is the child's whole environment: the pass-through variables that are set, the XDG
-// directories under Home, and the coder's own, and nothing else.
+// directories, and the coder's own, and nothing else. OpenCode reads only the image's config: a
+// project config in the work directory would let the coder change where its key is sent, and the
+// skills come from that config's own paths instead of the work directory.
 func (r *Runner) environment(turn string) []string {
-	env := make([]string, 0, len(passthrough)+8)
+	env := make([]string, 0, len(passthrough)+10)
 	seen := make(map[string]bool, len(passthrough))
 	for _, kv := range r.cfg.Environ() {
 		name, _, ok := strings.Cut(kv, "=")
@@ -901,8 +841,9 @@ func (r *Runner) environment(turn string) []string {
 		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
 		"XDG_STATE_HOME="+filepath.Join(home, ".local", "state"),
 		"XDG_CACHE_HOME="+filepath.Join(home, ".cache"),
-		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"XDG_CONFIG_HOME="+r.cfg.ConfigHome,
 		"OPENCODE_CONFIG="+r.cfg.ConfigFile,
+		"OPENCODE_DISABLE_PROJECT_CONFIG=1",
 		"TEKNOIRBOT_TURN="+turn,
 		"TEKNOIRBOT_MEMBER=coder",
 	)

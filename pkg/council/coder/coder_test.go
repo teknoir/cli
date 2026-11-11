@@ -75,10 +75,9 @@ func TestHappyPath(t *testing.T) {
 	if !contains(rep.Changed, "?? tool.txt") {
 		t.Errorf("changed %q, want an untracked tool.txt line", rep.Changed)
 	}
-	// The skills link is excluded: it is not the task's work.
 	for _, line := range rep.Changed {
 		if strings.Contains(line, ".agents") {
-			t.Errorf("changed %q lists the skills link", rep.Changed)
+			t.Errorf("changed %q lists a .agents path", rep.Changed)
 		}
 	}
 
@@ -90,14 +89,12 @@ func TestHappyPath(t *testing.T) {
 		t.Errorf("argv %q, want %q", argv, want)
 	}
 
-	// The work directory, and the skills link.
+	// The work directory, and no skills link in it: the skills come from the image's config.
 	if got := strings.TrimSpace(b.read("pwd")); got != b.workDir(testThread) {
 		t.Errorf("working directory %q, want %q", got, b.workDir(testThread))
 	}
-	link := filepath.Join(b.workDir(testThread), ".agents", "skills")
-	target, err := os.Readlink(link)
-	if err != nil || target != b.Skills {
-		t.Errorf("skills link: %q %v, want %q", target, err, b.Skills)
+	if _, err := os.Lstat(filepath.Join(b.workDir(testThread), ".agents")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the work dir has a .agents: %v", err)
 	}
 	info, err := os.Stat(b.workDir(testThread))
 	if err != nil {
@@ -114,8 +111,9 @@ func TestHappyPath(t *testing.T) {
 		"XDG_DATA_HOME=" + filepath.Join(b.Home, ".local", "share"),
 		"XDG_STATE_HOME=" + filepath.Join(b.Home, ".local", "state"),
 		"XDG_CACHE_HOME=" + filepath.Join(b.Home, ".cache"),
-		"XDG_CONFIG_HOME=" + filepath.Join(b.Home, ".config"),
-		"OPENCODE_CONFIG=/etc/teknoirbot/opencode.json",
+		"XDG_CONFIG_HOME=" + b.ConfigHome,
+		"OPENCODE_CONFIG=" + b.ConfigFile,
+		"OPENCODE_DISABLE_PROJECT_CONFIG=1",
 		"TEKNOIRBOT_TURN=" + testTurn,
 		"TEKNOIRBOT_MEMBER=coder",
 	} {
@@ -133,7 +131,7 @@ func TestHappyPath(t *testing.T) {
 	}
 	for _, name := range []string{
 		"HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
-		"OPENCODE_CONFIG", "TEKNOIRBOT_TURN", "TEKNOIRBOT_MEMBER",
+		"OPENCODE_CONFIG", "OPENCODE_DISABLE_PROJECT_CONFIG", "TEKNOIRBOT_TURN", "TEKNOIRBOT_MEMBER",
 	} {
 		allowed[name] = true
 	}
@@ -827,24 +825,94 @@ func TestGitConfigCannotHangTheRunner(t *testing.T) {
 	}
 }
 
-func TestSkillsExcluded(t *testing.T) {
+// TestConfigHomeWithoutOpenCode: the image must hold XDG_CONFIG_HOME/opencode, or OpenCode's own
+// error for the directory it cannot create says less than the path that is missing.
+func TestConfigHomeWithoutOpenCode(t *testing.T) {
 	needUnix(t)
 	b := newBed(t)
 	happyScript(t, b)
-	r := New(b.Config())
-	if rep := ctxRun(r, b.task("first")); rep.State != StateDone {
-		t.Fatalf("the first run: %q %q", rep.State, rep.Reason)
+	cfg := b.Config()
+	cfg.ConfigHome = filepath.Join(b.Root, "no-xdg")
+	if err := os.MkdirAll(cfg.ConfigHome, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	path := filepath.Join(b.workDir(testThread), ".git", "info", "exclude")
-	if got := countLines(readFile(t, path), excludeLine); got != 1 {
-		t.Fatalf("the exclude file has %d %q lines, want 1: %q", got, excludeLine, readFile(t, path))
+
+	rep := ctxRun(New(cfg), b.task("go"))
+	if rep.State != StateFailed || rep.Reason != ReasonStart {
+		t.Fatalf("state %q reason %q error %q, want start", rep.State, rep.Reason, rep.Error)
 	}
-	// A second run on the same work dir does not add it again.
-	if rep := ctxRun(r, b.task("second")); rep.State != StateDone {
-		t.Fatalf("the second run: %q %q", rep.State, rep.Reason)
+	if want := cfg.ConfigHome + "/opencode"; !strings.Contains(rep.Error, want) {
+		t.Errorf("error %q does not name %s", rep.Error, want)
 	}
-	if got := countLines(readFile(t, path), excludeLine); got != 1 {
-		t.Errorf("the exclude file has %d %q lines after a second run, want 1", got, excludeLine)
+	if argv := b.argv(); len(argv) != 0 {
+		t.Errorf("the task started with argv %q", argv)
+	}
+	if _, err := os.Lstat(b.workDir(testThread)); err == nil {
+		t.Error("the work dir was made for a task that may not start")
+	}
+}
+
+// TestConfigFileMissing: no OPENCODE_CONFIG file, no task.
+func TestConfigFileMissing(t *testing.T) {
+	needUnix(t)
+	b := newBed(t)
+	happyScript(t, b)
+	cfg := b.Config()
+	cfg.ConfigFile = filepath.Join(b.Root, "etc", "missing.json")
+
+	rep := ctxRun(New(cfg), b.task("go"))
+	if rep.State != StateFailed || rep.Reason != ReasonStart {
+		t.Fatalf("state %q reason %q error %q, want start", rep.State, rep.Reason, rep.Error)
+	}
+	if !strings.Contains(rep.Error, cfg.ConfigFile) {
+		t.Errorf("error %q does not name %s", rep.Error, cfg.ConfigFile)
+	}
+	if argv := b.argv(); len(argv) != 0 {
+		t.Errorf("the task started with argv %q", argv)
+	}
+}
+
+// TestConfigFileIsADirectory: the config file must be a file, not a directory that opens.
+func TestConfigFileIsADirectory(t *testing.T) {
+	needUnix(t)
+	b := newBed(t)
+	happyScript(t, b)
+	cfg := b.Config()
+	cfg.ConfigFile = filepath.Dir(b.ConfigFile)
+
+	rep := ctxRun(New(cfg), b.task("go"))
+	if rep.State != StateFailed || rep.Reason != ReasonStart {
+		t.Fatalf("state %q reason %q error %q, want start", rep.State, rep.Reason, rep.Error)
+	}
+	if !strings.Contains(rep.Error, cfg.ConfigFile) || !strings.Contains(rep.Error, "not a regular file") {
+		t.Errorf("error %q does not name %s as not a file", rep.Error, cfg.ConfigFile)
+	}
+	if argv := b.argv(); len(argv) != 0 {
+		t.Errorf("the task started with argv %q", argv)
+	}
+}
+
+// TestDefaultConfigHome: an unset ConfigHome is the image's, and it is what the child gets.
+func TestDefaultConfigHome(t *testing.T) {
+	r := New(Config{})
+	if got := r.cfg.ConfigHome; got != DefaultConfigHome {
+		t.Fatalf("the default config home is %q, want %q", got, DefaultConfigHome)
+	}
+	if DefaultConfigHome != "/etc/teknoirbot/xdg" {
+		t.Errorf("DefaultConfigHome is %q", DefaultConfigHome)
+	}
+	r = New(Config{Environ: func() []string {
+		// A config home and a project-config flag the bot's own environment sets: neither travels.
+		return []string{"XDG_CONFIG_HOME=/home/someone/.config", "OPENCODE_DISABLE_PROJECT_CONFIG=0"}
+	}})
+	env := r.environment(testTurn)
+	for _, wantLine := range []string{
+		"XDG_CONFIG_HOME=" + DefaultConfigHome,
+		"OPENCODE_DISABLE_PROJECT_CONFIG=1",
+	} {
+		if !hasEnv(strings.Join(env, "\n"), wantLine) {
+			t.Errorf("the environment lacks %q: %q", wantLine, env)
+		}
 	}
 }
 
@@ -879,33 +947,6 @@ func TestWorkDirSymlinkRefused(t *testing.T) {
 	}
 }
 
-func TestAgentsSymlinkRefused(t *testing.T) {
-	needUnix(t)
-	b := newBed(t)
-	dir := b.workDir(testThread)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(b.Root, "elsewhere")
-	if err := os.MkdirAll(target, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, filepath.Join(dir, ".agents")); err != nil {
-		t.Fatal(err)
-	}
-	rep := ctxRun(New(b.Config()), b.task("go"))
-	if rep.State != StateDone {
-		t.Fatalf("state %q reason %q error %q: a symlinked .agents is skipped, not failed", rep.State, rep.Reason, rep.Error)
-	}
-	entries, err := os.ReadDir(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("the .agents link's target has %d entries, want none", len(entries))
-	}
-}
-
 func TestStateDirSymlinkRefused(t *testing.T) {
 	needUnix(t)
 	b := newBed(t)
@@ -930,73 +971,6 @@ func TestStateDirSymlinkRefused(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
 		t.Errorf("the state link's target has %d entries (%v), want none", len(entries), err)
-	}
-}
-
-// countLines is how many lines of text are want.
-func countLines(text, want string) int {
-	n := 0
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSuffix(line, "\r") == want {
-			n++
-		}
-	}
-	return n
-}
-
-func TestSkillsLink(t *testing.T) {
-	needUnix(t)
-	b := newBed(t)
-	r := New(b.Config())
-	dir := b.workDir(testThread)
-	if err := os.MkdirAll(filepath.Join(dir, ".agents"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(dir, ".agents", "skills")
-
-	// A symlink to somewhere else is replaced.
-	elsewhere := filepath.Join(b.Root, "elsewhere")
-	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(elsewhere, link); err != nil {
-		t.Fatal(err)
-	}
-	r.linkSkills(dir)
-	if target, err := os.Readlink(link); err != nil || target != b.Skills {
-		t.Errorf("the link is %q %v, want %q", target, err, b.Skills)
-	}
-
-	// A real directory there is left alone.
-	if err := os.Remove(link); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(link, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	marker := filepath.Join(link, "keep")
-	if err := os.WriteFile(marker, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r.linkSkills(dir)
-	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink != 0 {
-		t.Errorf("the real directory was replaced: %v %v", info, err)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Errorf("the real directory's content is gone: %v", err)
-	}
-
-	// A missing SkillsDir is not an error, and makes no link.
-	cfg := b.Config()
-	cfg.SkillsDir = filepath.Join(b.Root, "no-skills")
-	r = New(cfg)
-	other := b.workDir(otherThr)
-	if err := os.MkdirAll(other, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	r.linkSkills(other)
-	if _, err := os.Lstat(filepath.Join(other, ".agents", "skills")); err == nil {
-		t.Error("a missing skills dir made a link")
 	}
 }
 

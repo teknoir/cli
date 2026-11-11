@@ -40,7 +40,8 @@ type TestBed struct {
 	Root       string
 	WorkRoot   string
 	Home       string
-	Skills     string
+	ConfigFile string
+	ConfigHome string
 	Bin        string
 	ScriptPath string
 	// EnvironFunc replaces Environ, for a test that needs a different PATH.
@@ -52,17 +53,22 @@ func newBed(t *testing.T) *TestBed {
 	t.Helper()
 	root := t.TempDir()
 	b := &TestBed{
-		t:        t,
-		Root:     root,
-		WorkRoot: filepath.Join(root, "work"),
-		Home:     filepath.Join(root, "home"),
-		Skills:   filepath.Join(root, "skills"),
-		Bin:      filepath.Join(root, "bin"),
+		t:          t,
+		Root:       root,
+		WorkRoot:   filepath.Join(root, "work"),
+		Home:       filepath.Join(root, "home"),
+		ConfigFile: filepath.Join(root, "etc", "opencode.json"),
+		ConfigHome: filepath.Join(root, "xdg"),
+		Bin:        filepath.Join(root, "bin"),
 	}
-	for _, dir := range []string{b.WorkRoot, b.Home, b.Skills, b.Bin} {
+	for _, dir := range []string{b.WorkRoot, b.Home, filepath.Dir(b.ConfigFile), filepath.Join(b.ConfigHome, "opencode"), b.Bin} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
+	}
+	// The image's config, and the empty opencode directory OpenCode needs under XDG_CONFIG_HOME.
+	if err := os.WriteFile(b.ConfigFile, []byte("{\"$schema\":\"https://opencode.ai/config.json\"}\n"), 0o600); err != nil {
+		t.Fatalf("write the config file: %v", err)
 	}
 	b.ScriptPath = filepath.Join(b.Bin, "opencode")
 	b.setScript("", 0)
@@ -80,10 +86,10 @@ func (b *TestBed) Config() Config {
 	return Config{
 		Binary:     b.Bin + "/opencode",
 		Model:      "teknoir/claude-sonnet-5-5",
-		ConfigFile: "/etc/teknoirbot/opencode.json",
+		ConfigFile: b.ConfigFile,
+		ConfigHome: b.ConfigHome,
 		WorkRoot:   b.WorkRoot,
 		Home:       b.Home,
-		SkillsDir:  b.Skills,
 		Timeout:    20 * time.Second,
 		KillGrace:  500 * time.Millisecond,
 		// The test binary's own environment is the pass-through source, so the script's
