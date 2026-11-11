@@ -18,6 +18,7 @@ usage, or follow the links below for full documentation.
 | [`exec`](exec.md) | | Run a command on a device over WireGuard and pass its exit code through. |
 | [`logs`](logs.md) | | Show the logs of a workload on a robot. |
 | [`inspect`](inspect.md) | | Read a robot's pods, logs and installed Helm releases without opening a session. |
+| [`chat`](chat.md) | | Chat with a TeknoirBot's council, or list your threads with it (`chat threads`). |
 | [`mqtt`](mqtt.md) | | Follow the MQTT messages of the teamspace's devices. |
 | [`mcp`](mcp.md) | | Run the read-only MCP server (stdio) for AI agents. |
 | [`api`](api.md) | | Call the fleet API directly. |
@@ -42,6 +43,7 @@ needs in the teamspace:
 | `whoami`, `api` | Any logged-in account; `api` shows whatever the fleet API shows the account. |
 | `inspect pod/logs/release` | The same access as opening a terminal in the robot (`pods/exec`), and `write` in the teamspace. |
 | `mqtt stream` | Any device role; the platform decides which topics the account may follow. |
+| `chat` | The bot's creator may always chat; a teamspace admin may chat with any bot of the teamspace. The platform answers `403` with the reason otherwise. |
 | `mcp` | Each tool needs what its command needs: `inspect_*` as `inspect pod/logs/release`, `mqtt_sample` as `mqtt stream`, `whoami` any logged-in account, the rest any device role. |
 | `config set/unset/delete/reset/try/untry/wait/promote`, `exec`, `port-forward` (forward a service over WireGuard) | Developer role; opening a session also needs permission to open terminals (`pods/exec`). |
 | `ssh`, `bootstrap`, `ansible*`, legacy `port-forward`, `socks-proxy` | Developer role **and** permission to open terminals: they read the device login (user name, key, password) from the platform, which gives it only to those. A viewer gets a clear `403`. |

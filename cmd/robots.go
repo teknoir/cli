@@ -268,5 +268,6 @@ func printRobot(w io.Writer, r *api.RobotDetail, now time.Time) {
 
 func init() {
 	rootCmd.AddCommand(newRobotsCmd(defaultEnv), newRobotCmd(defaultEnv),
-		newWhoamiCmd(defaultEnv), newAPICmd(defaultEnv), newInspectCmd(defaultEnv), newMqttCmd(defaultEnv))
+		newWhoamiCmd(defaultEnv), newAPICmd(defaultEnv), newInspectCmd(defaultEnv), newMqttCmd(defaultEnv),
+		newChatCmd(defaultEnv))
 }

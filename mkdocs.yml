@@ -28,6 +28,7 @@ nav:
       - agent: commands/agent.md
       - api: commands/api.md
       - inspect: commands/inspect.md
+      - chat: commands/chat.md
       - mqtt: commands/mqtt.md
       - mcp: commands/mcp.md
       - config: commands/config.md

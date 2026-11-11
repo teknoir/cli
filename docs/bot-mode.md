@@ -60,6 +60,7 @@ anything runs, with exit code 6 and this message:
 | `bootstrap` (and its subcommands) | It generates the scripts that install a device. |
 | `add` (and its subcommands), `domain` | They change where `tnctl` points, and a bot's platform is `$TEKNOIRBOT_API`. |
 | `ns` **with** a teamspace | A bot has exactly one teamspace. `tnctl ns` without one (or with `--list`) lists them. |
+| `chat` | It is the person's chat with a bot's council; a bot does not use it: `"tnctl chat" is not available to a TeknoirBot: a bot does not use the person chat.` |
 
 `--domain` and `--config` are refused with them (exit 2): a bot's platform comes from `$TEKNOIRBOT_API`.
 
@@ -106,5 +107,5 @@ in clear text, so anything else exits 6 with _TEKNOIRBOT_API must be https_.
 
 ## See also
 
-- [`whoami`](commands/whoami.md), [`api`](commands/api.md), [`inspect`](commands/inspect.md), [`mqtt stream`](commands/mqtt.md), [`mcp`](commands/mcp.md)
+- [`whoami`](commands/whoami.md), [`api`](commands/api.md), [`inspect`](commands/inspect.md), [`mqtt stream`](commands/mqtt.md), [`mcp`](commands/mcp.md), [`chat`](commands/chat.md)
 - [Configuration](configuration.md) — the user's `~/.tnctl.yaml`, which bot mode ignores.
