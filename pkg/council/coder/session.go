@@ -23,9 +23,12 @@ type sessionFile struct {
 	Threads map[string]sessionEntry `json:"threads"`
 }
 
-// sessionEntry is the OpenCode session of one council thread.
+// sessionEntry is the OpenCode session of one council thread, with the effort it was started with:
+// OpenCode refuses a session resumed at a different effort. An entry without an effort is one
+// written before the field existed, and its effort is unknown.
 type sessionEntry struct {
 	Session string `json:"session"`
+	Effort  string `json:"effort,omitempty"`
 	Updated int64  `json:"updated"`
 }
 
@@ -60,21 +63,22 @@ func loadSessions(home string) *sessionStore {
 	return s
 }
 
-// get is the thread's session, or "".
-func (s *sessionStore) get(thread string) string {
+// get is the thread's session and its effort; both are "" when there is no session.
+func (s *sessionStore) get(thread string) (session, effort string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.threads[thread].Session
+	entry := s.threads[thread]
+	return entry.Session, entry.Effort
 }
 
-// store records the session of a thread and writes the file.
-func (s *sessionStore) store(thread, session string) error {
+// store records the session of a thread and the effort it runs at, and writes the file.
+func (s *sessionStore) store(thread, session, effort string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !sessionPattern.MatchString(session) {
 		return nil
 	}
-	s.threads[thread] = sessionEntry{Session: session, Updated: time.Now().UnixMilli()}
+	s.threads[thread] = sessionEntry{Session: session, Effort: effort, Updated: time.Now().UnixMilli()}
 	return s.save()
 }
 

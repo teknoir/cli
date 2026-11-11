@@ -326,8 +326,18 @@ func (r *Runner) Run(ctx context.Context, task Task) Report {
 	// has the link and no exclude line.
 	r.ensureExcluded(dir)
 
+	// A thread's session keeps the effort it was started with: OpenCode, resumed at another, sends
+	// a mid-conversation system message the platform's model proxy does not allow.
 	sessions := loadSessions(r.cfg.Home)
-	args := r.argv(task, sessions.get(thread))
+	session, kept := sessions.get(thread)
+	effort := effortOf(task.Effort)
+	if session != "" && kept != "" {
+		if kept != effort {
+			r.cfg.Logf("coder: turn %s thread %s: keeps effort %s of its session (asked %s)", turn, thread, kept, effort)
+		}
+		effort = kept
+	}
+	args := r.argv(task, session, effort)
 
 	bin, err := lookPath(r.cfg.Binary, env)
 	if err != nil {
@@ -362,7 +372,7 @@ func (r *Runner) Run(ctx context.Context, task Task) Report {
 	// Setpgid makes the process the head of a new group, so its id is the group's, and it stays
 	// the group's id after the process is reaped.
 	pgid := cmd.Process.Pid
-	r.cfg.Logf("coder: turn %s thread %s: started with effort %s", turn, thread, effortOf(task.Effort))
+	r.cfg.Logf("coder: turn %s thread %s: started with effort %s", turn, thread, effort)
 
 	st := &state{}
 	budget := make(chan struct{}, 1)
@@ -406,7 +416,7 @@ func (r *Runner) Run(ctx context.Context, task Task) Report {
 
 	if rep.SessionID != "" {
 		// Also after a failed run: a retry continues the session instead of starting over.
-		if err := sessions.store(thread, rep.SessionID); err != nil {
+		if err := sessions.store(thread, rep.SessionID, effort); err != nil {
 			r.cfg.Logf("coder: turn %s: store the session: %v", turn, err)
 		}
 		r.cfg.Logf("coder: turn %s: session %s", turn, rep.SessionID)
@@ -725,12 +735,12 @@ func (r *Runner) changed(dir string, env []string) []string {
 	return changed
 }
 
-// argv is the OpenCode command line of a task. The message never starts with a dash: it starts
-// with a line naming the turn.
-func (r *Runner) argv(task Task, session string) []string {
+// argv is the OpenCode command line of a task, at the effort the run uses. The message never
+// starts with a dash: it starts with a line naming the turn.
+func (r *Runner) argv(task Task, session, effort string) []string {
 	args := []string{
 		"run", "--standalone", "--format", "json",
-		"--model", r.cfg.Model + "#" + effortOf(task.Effort),
+		"--model", r.cfg.Model + "#" + effort,
 	}
 	if session != "" {
 		args = append(args, "--session", session)

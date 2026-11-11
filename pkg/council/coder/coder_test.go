@@ -280,7 +280,7 @@ func TestSessions(t *testing.T) {
 	if hasFlag(argv, "--session") {
 		t.Errorf("a corrupt sessions file passed --session: %q", argv)
 	}
-	if got := loadSessions(b.Home).get(testThread); got != sesB {
+	if got, _ := loadSessions(b.Home).get(testThread); got != sesB {
 		t.Errorf("after the corrupt file the store holds %q for the thread, want %q", got, sesB)
 	}
 	data, err := os.ReadFile(path)
@@ -295,7 +295,7 @@ func TestSessions(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"version":99,"threads":{"`+testThread+`":{"session":"`+sesA+`","updated":1}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadSessions(b.Home).get(testThread); got != "" {
+	if got, _ := loadSessions(b.Home).get(testThread); got != "" {
 		t.Errorf("a version 99 file gave session %q", got)
 	}
 }
@@ -311,7 +311,7 @@ func TestSessionFromInvalidIDIgnored(t *testing.T) {
 	if rep.SessionID != "" {
 		t.Errorf("session %q, want none", rep.SessionID)
 	}
-	if got := loadSessions(b.Home).get(testThread); got != "" {
+	if got, _ := loadSessions(b.Home).get(testThread); got != "" {
 		t.Errorf("an invalid session was stored: %q", got)
 	}
 	path := filepath.Join(b.Home, ".local", "state", "teknoirbot", "sessions.json")
@@ -341,18 +341,19 @@ func TestSessionBound(t *testing.T) {
 	}
 	// The five oldest went.
 	for i := 0; i < 5; i++ {
-		if got := again.get("thr_" + padBase64(i, 22)); got != "" {
+		if got, _ := again.get("thr_" + padBase64(i, 22)); got != "" {
 			t.Errorf("thread %d was kept (%q)", i, got)
 		}
 	}
-	if got, want := again.get("thr_"+padBase64(MaxSessions+4, 22)), "ses_"+padAlnum(MaxSessions+4, 10); got != want {
-		t.Errorf("the newest thread is %q, want %q", got, want)
+	newest, _ := again.get("thr_" + padBase64(MaxSessions+4, 22))
+	if want := "ses_" + padAlnum(MaxSessions+4, 10); newest != want {
+		t.Errorf("the newest thread is %q, want %q", newest, want)
 	}
 
 	// Through the store, the file never holds more than the bound either.
 	other := loadSessions(t.TempDir())
 	for i := 0; i < MaxSessions+5; i++ {
-		if err := other.store("thr_"+padBase64(i, 22), "ses_"+padAlnum(i, 10)); err != nil {
+		if err := other.store("thr_"+padBase64(i, 22), "ses_"+padAlnum(i, 10), "high"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -823,5 +824,95 @@ func TestSkillsLink(t *testing.T) {
 	r.linkSkills(other)
 	if _, err := os.Lstat(filepath.Join(other, ".agents", "skills")); err == nil {
 		t.Error("a missing skills dir made a link")
+	}
+}
+
+// A thread's session keeps the effort it was started with: OpenCode refuses a resumed session at
+// another effort.
+func TestSessionKeepsItsEffort(t *testing.T) {
+	needUnix(t)
+	b := newBed(t)
+	writeFake(t, b, recordTwice(b, eventLine("text", sesA, textPart("one"))+"\n"))
+	r := New(b.Config())
+
+	first := b.task("one")
+	first.Effort = "high"
+	if rep := ctxRun(r, first); rep.State != StateDone {
+		t.Fatalf("first run: %q %q", rep.State, rep.Reason)
+	}
+	if argv := b.argv(); len(argv) < 6 || argv[5] != "teknoir/claude-sonnet-5-5#high" {
+		t.Errorf("first run argv %q", argv)
+	}
+
+	second := b.task("two")
+	second.Effort = "low"
+	if rep := ctxRun(r, second); rep.State != StateDone {
+		t.Fatalf("second run: %q %q", rep.State, rep.Reason)
+	}
+	argv := b.argv()
+	if len(argv) < 6 || argv[5] != "teknoir/claude-sonnet-5-5#high" {
+		t.Errorf("the second run changed the effort of the session: %q", argv)
+	}
+	if !hasArgv(argv, "--session", sesA) {
+		t.Errorf("the second run does not continue %s: %q", sesA, argv)
+	}
+}
+
+// An entry without an effort was written before the effort was recorded: the task's effort wins,
+// and is stored with the session.
+func TestSessionWithoutEffortTakesTheTaskEffort(t *testing.T) {
+	needUnix(t)
+	b := newBed(t)
+	path := filepath.Join(b.Home, ".local", "state", "teknoirbot", "sessions.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"threads":{"`+testThread+`":{"session":"`+sesB+`","updated":1}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeFake(t, b, fakeScript(b.Root, eventLine("text", sesA, textPart("hi"))+"\n", 0))
+	task := b.task("go")
+	task.Effort = "low"
+	if rep := ctxRun(New(b.Config()), task); rep.State != StateDone {
+		t.Fatalf("run: %q %q", rep.State, rep.Reason)
+	}
+	argv := b.argv()
+	if len(argv) < 6 || argv[5] != "teknoir/claude-sonnet-5-5#low" {
+		t.Errorf("the entry without an effort did not take the task's: %q", argv)
+	}
+	if !hasArgv(argv, "--session", sesB) {
+		t.Errorf("the run did not continue %s: %q", sesB, argv)
+	}
+	session, effort := loadSessions(b.Home).get(testThread)
+	if session != sesA || effort != "low" {
+		t.Errorf("the store holds (%q, %q), want (%q, %q)", session, effort, sesA, "low")
+	}
+}
+
+// A new thread gets its own effort.
+func TestNewThreadKeepsItsOwnEffort(t *testing.T) {
+	needUnix(t)
+	b := newBed(t)
+	path := filepath.Join(b.Home, ".local", "state", "teknoirbot", "sessions.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"threads":{"`+testThread+`":{"session":"`+sesB+`","effort":"high","updated":1}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeFake(t, b, fakeScript(b.Root, eventLine("text", sesA, textPart("hi"))+"\n", 0))
+	task := Task{TurnID: otherTurn, ThreadID: otherThr, Prompt: "go", Effort: "low"}
+	if rep := ctxRun(New(b.Config()), task); rep.State != StateDone {
+		t.Fatalf("run: %q %q", rep.State, rep.Reason)
+	}
+	argv := b.argv()
+	if len(argv) < 6 || argv[5] != "teknoir/claude-sonnet-5-5#low" {
+		t.Errorf("a new thread did not get its own effort: %q", argv)
+	}
+	if hasFlag(argv, "--session") {
+		t.Errorf("a new thread got --session: %q", argv)
+	}
+	if _, effort := loadSessions(b.Home).get(otherThr); effort != "low" {
+		t.Errorf("the new thread's effort is stored as %q", effort)
 	}
 }

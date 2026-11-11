@@ -54,7 +54,7 @@ func TestErrorEvent(t *testing.T) {
 	if rep.SessionID != sesA {
 		t.Errorf("session %q: it must be stored after a failed run", rep.SessionID)
 	}
-	if got := loadSessions(b.Home).get(testThread); got != sesA {
+	if got, _ := loadSessions(b.Home).get(testThread); got != sesA {
 		t.Errorf("stored session %q, want %q", got, sesA)
 	}
 }
