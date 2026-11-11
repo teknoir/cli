@@ -345,6 +345,12 @@ func TestBotModeRefusesTheCommandsItMayNotRun(t *testing.T) {
 		{"add", "domain", "x.example"},
 		{"ns", "someone-else"},
 		{"domain"},
+		{"chat", "scout", "hello"},
+		{"chat", "threads", "scout"},
+	}
+	// chat's refusal names its own reason: a bot does not chat with itself.
+	ownText := map[string]string{
+		"chat": `"tnctl chat" is not available to a TeknoirBot: a bot does not use the person chat.`,
 	}
 	// The commands do more than tnctl when cobra hands them the arguments: none of them may run.
 	for _, args := range cases {
@@ -378,6 +384,9 @@ func TestBotModeRefusesTheCommandsItMayNotRun(t *testing.T) {
 				path = "add domain"
 			}
 			want := `"tnctl ` + path + `" is not available to a TeknoirBot: it cannot open tunnels or hold device logins. For logs use "tnctl inspect logs".`
+			if own, ok := ownText[path]; ok {
+				want = own
+			}
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q, want %q", err, want)
 			}

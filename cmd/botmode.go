@@ -104,10 +104,22 @@ var botRefused = map[string]bool{
 	"bootstrap":         true,
 	"add":               true,
 	"domain":            true,
+	"chat":              true,
 }
 
-// botRefusedError is the refusal of such a command: exit code 6, the same as "not allowed".
+// botRefusedText is the refusal's own text, for the commands whose reason is not a tunnel or a device
+// login. Every other refused command gets botRefusedError's.
+var botRefusedText = map[string]string{
+	"chat": `"tnctl chat" is not available to a TeknoirBot: a bot does not use the person chat.`,
+}
+
+// botRefusedError is the refusal of such a command: exit code 6, the same as "not allowed". The
+// text is looked up by the command's first word, so "chat threads" gets chat's.
 func botRefusedError(path string) error {
+	first, _, _ := strings.Cut(path, " ")
+	if text, ok := botRefusedText[first]; ok {
+		return newErr(codeAuth, "%s", text)
+	}
 	return newErr(codeAuth, "%q is not available to a TeknoirBot: it cannot open tunnels or hold device logins. For logs use \"tnctl inspect logs\".", "tnctl "+path)
 }
 
