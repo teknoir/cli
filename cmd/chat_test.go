@@ -138,16 +138,18 @@ func frame(id int64, typ, data string) string {
 	return frameOf("trn_1", id, typ, data)
 }
 
-// frameOf is frame for another turn: turnID "" leaves the turnId out.
+// frameOf is frame for another turn: turnID "" leaves the turnId out. Every frame carries the time
+// it happened, as the platform's do.
 func frameOf(turnID string, id int64, typ, data string) string {
-	turn := ""
+	const at = `"at":1700000000000,`
+	head := at
 	if turnID != "" && !strings.Contains(data, `"turnId"`) {
-		turn = `"turnId":"` + turnID + `",`
+		head = `"turnId":"` + turnID + `",` + at
 	}
 	if id > 0 {
-		return fmt.Sprintf("id: %d\nevent: %s\ndata: {%s%s}\n\n", id, typ, turn, data)
+		return fmt.Sprintf("id: %d\nevent: %s\ndata: {%s%s}\n\n", id, typ, head, data)
 	}
-	return fmt.Sprintf("event: %s\ndata: {%s%s}\n\n", typ, turn, data)
+	return fmt.Sprintf("event: %s\ndata: {%s%s}\n\n", typ, head, data)
 }
 
 // writeFrames writes the frames of one turn.
