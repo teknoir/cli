@@ -40,6 +40,11 @@ const (
 	codeNoAccess       = "no_access"
 	codeModelError     = "model_error"
 	codeModelRefused   = "model_refused"
+	// The platform proxy's own refusals: no model was reached.
+	codeModelUnavailable = "model_unavailable"
+	codeModelBudget      = "model_budget"
+	codeModelBusy        = "model_busy"
+	codeModelRejected    = "model_rejected"
 )
 
 // The messages of the outcomes that are not spelled out at their site.

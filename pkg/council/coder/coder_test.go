@@ -3,9 +3,12 @@ package coder
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -219,6 +222,151 @@ func TestEffortMapping(t *testing.T) {
 				t.Errorf("model argument %q, want %q", argv[5], want)
 			}
 		})
+	}
+}
+
+// freeCounter is a Statfs for a test: the values it returns in order, the last one repeated.
+type freeCounter struct {
+	mu     sync.Mutex
+	values []uint64
+	err    error
+	calls  int
+}
+
+func (f *freeCounter) statfs(string) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	i := f.calls
+	f.calls++
+	if f.err != nil {
+		return 0, f.err
+	}
+	if len(f.values) == 0 {
+		return DefaultMinFreeBytes * 4, nil
+	}
+	if i >= len(f.values) {
+		i = len(f.values) - 1
+	}
+	return f.values[i], nil
+}
+
+func (f *freeCounter) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// TestDiskBeforeStart: free space under the work root below MinFreeBytes and no process starts.
+func TestDiskBeforeStart(t *testing.T) {
+	needUnix(t)
+	b := newBed(t)
+	happyScript(t, b)
+	cfg := b.Config()
+	cfg.Statfs = (&freeCounter{values: []uint64{1 << 20}}).statfs
+
+	rep := ctxRun(New(cfg), b.task("big install"))
+	if rep.State != StateFailed || rep.Reason != ReasonDisk {
+		t.Fatalf("state %q reason %q error %q, want disk", rep.State, rep.Reason, rep.Error)
+	}
+	want := "The bot's disk has less than 2 GiB free: free space under " + b.WorkRoot + " before asking for this."
+	if rep.Error != want {
+		t.Errorf("error %q, want %q", rep.Error, want)
+	}
+	if _, err := os.Stat(filepath.Join(b.Root, "argv")); err == nil {
+		t.Error("a process was started")
+	}
+	if rep.Steps != 0 || rep.SessionID != "" {
+		t.Errorf("report %+v", rep)
+	}
+}
+
+// TestDiskDuringRun: free space that falls below StopFreeBytes while OpenCode runs stops its
+// process group as a cancel does, and the report says the disk.
+func TestDiskDuringRun(t *testing.T) {
+	needUnix(t)
+	b := newBed(t)
+	pidFile := filepath.Join(b.Root, "pid")
+	childFile := filepath.Join(b.Root, "child.pid")
+	writeFake(t, b, "#!/bin/sh\n"+
+		"echo $$ > "+shellQuote(pidFile)+"\n"+
+		"sleep 30 &\n"+
+		"echo $! > "+shellQuote(childFile)+"\n"+
+		"sleep 30\n")
+	// Enough at the start, plenty for the first checks, then under the stop threshold.
+	counter := &freeCounter{values: []uint64{
+		DefaultMinFreeBytes * 4,
+		DefaultMinFreeBytes * 4,
+		DefaultMinFreeBytes * 4,
+		1 << 20,
+	}}
+	cfg := b.Config()
+	cfg.Statfs = counter.statfs
+	cfg.DiskCheckEvery = 20 * time.Millisecond
+	cfg.KillGrace = 300 * time.Millisecond
+
+	start := time.Now()
+	rep := ctxRun(New(cfg), b.task("fill the disk"))
+	if rep.State != StateFailed || rep.Reason != ReasonDisk {
+		t.Fatalf("state %q reason %q error %q, want disk", rep.State, rep.Reason, rep.Error)
+	}
+	if rep.Error != msgDiskStopped {
+		t.Errorf("error %q, want %q", rep.Error, msgDiskStopped)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("the disk stop took %v", elapsed)
+	}
+	pid := strings.TrimSpace(readFile(t, pidFile))
+	if pid == "" {
+		t.Fatal("the script did not record its pid")
+	}
+	if processAlive(t, pid) {
+		t.Errorf("the process %s survived the disk stop", pid)
+	}
+	child := strings.TrimSpace(readFile(t, childFile))
+	if child == "" {
+		t.Fatal("the script did not record its child's pid")
+	}
+	if processAlive(t, child) {
+		t.Errorf("the background child %s survived the disk stop", child)
+	}
+}
+
+// TestStatfsErrorSkipsTheDiskChecks: a platform that cannot tell its free space never fails a
+// task, and says so once.
+func TestStatfsErrorSkipsTheDiskChecks(t *testing.T) {
+	needUnix(t)
+	b := newBed(t)
+	// A run long enough for the disk checks to tick.
+	writeFake(t, b, "#!/bin/sh\nsleep 0.3\n"+fakeScript(b.Root, happyEvents(), 0)[len("#!/bin/sh\n"):])
+	counter := &freeCounter{err: errors.New("statfs: operation not supported")}
+	var mu sync.Mutex
+	var lines []string
+	cfg := b.Config()
+	cfg.Statfs = counter.statfs
+	cfg.DiskCheckEvery = 5 * time.Millisecond
+	cfg.Logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+
+	rep := ctxRun(New(cfg), b.task("Fix the bug"))
+	if rep.State != StateDone {
+		t.Fatalf("state %q reason %q error %q, want done", rep.State, rep.Reason, rep.Error)
+	}
+	if counter.count() < 2 {
+		t.Errorf("statfs was read %d times, want the run to check the disk too", counter.count())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	logged := 0
+	for _, line := range lines {
+		if strings.Contains(line, "free space under") {
+			logged++
+		}
+	}
+	if logged != 1 {
+		t.Errorf("the statfs error was logged %d times, want once: %v", logged, lines)
 	}
 }
 

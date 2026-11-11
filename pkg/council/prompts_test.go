@@ -47,6 +47,15 @@ func TestCaptainRouteSystemValues(t *testing.T) {
 	if got, auto := captainRouteSystem(f, "bogus"), captainRouteSystem(f, "auto"); got != auto {
 		t.Error("an unknown mode is not the auto prompt")
 	}
+	// A route that may convene says the Coder is for what the person asked, and only that route.
+	for _, mode := range []string{"auto", "council", ""} {
+		if !strings.Contains(captainRouteSystem(f, mode), onlyCoderWhenAsked) {
+			t.Errorf("the %s prompt does not keep the Coder to what the person asked", mode)
+		}
+	}
+	if strings.Contains(captainRouteSystem(f, "quick"), onlyCoderWhenAsked) {
+		t.Error("the quick prompt, which cannot convene, talks about convening")
+	}
 }
 
 func TestCaptainRouteSystemLevelNone(t *testing.T) {

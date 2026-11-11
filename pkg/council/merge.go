@@ -1,11 +1,21 @@
 package council
 
 import (
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/teknoir/cli/pkg/council/hub"
+	"github.com/teknoir/cli/pkg/council/internal/textsafe"
 )
+
+// keyStart is what a TeknoirBot key begins with.
+const keyStart = "tbk1."
+
+// maxKeyHold is the most of a buffer's end that is held back because it could be the start of a
+// bot key another write completes. A key is at most 176 bytes, so nothing longer can be one.
+const maxKeyHold = 200
 
 // emitter posts one event of a turn. hub.Poster is one; so is a test's recorder.
 type emitter interface {
@@ -49,7 +59,7 @@ func (m *merger) write(text string) {
 	}
 	m.buf = append(m.buf, text...)
 	if len(m.buf) >= m.maxBytes {
-		m.emitLocked()
+		m.emitLocked(false)
 		return
 	}
 	if m.timer == nil {
@@ -57,12 +67,12 @@ func (m *merger) write(text string) {
 	}
 }
 
-// flush emits what is buffered now.
+// flush emits everything buffered now, a key's start held back or not.
 func (m *merger) flush() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopTimerLocked()
-	m.emitLocked()
+	m.emitLocked(true)
 }
 
 // close flushes, then ignores every later write and timer.
@@ -70,7 +80,7 @@ func (m *merger) close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopTimerLocked()
-	m.emitLocked()
+	m.emitLocked(true)
 	m.closed = true
 }
 
@@ -83,19 +93,79 @@ func (m *merger) onTimer() {
 	if m.closed {
 		return
 	}
-	m.emitLocked()
+	m.emitLocked(false)
 }
 
-// emitLocked emits and clears the buffer, and stops the timer. Emit is called with mu held: the
-// event it posts is ordered against every other event of the member.
-func (m *merger) emitLocked() {
+// emitLocked emits the buffer, redacted, and stops the timer. Unless all is set, the buffer's end
+// that could be the start of a bot key is held back for a later write: the platform redacts a key
+// per event, so a key cut in two would pass in both halves. Emit is called with mu held: the event
+// it posts is ordered against every other event of the member.
+func (m *merger) emitLocked(all bool) {
 	m.stopTimerLocked()
 	if len(m.buf) == 0 {
 		return
 	}
 	text := string(m.buf)
-	m.buf = m.buf[:0]
-	m.e.Emit(hub.EventTextDelta, map[string]any{"member": m.member, "text": text})
+	cut := len(text)
+	if !all {
+		if from := holdFrom(text); from < cut {
+			cut = from
+		}
+		// A key whose own ids start with tbk1 is held from inside it (the last "tbk1." of the
+		// buffer is then the key's second id): the cut must not fall inside a key that redacting
+		// the piece would miss.
+		for _, loc := range textsafe.BotKeyPattern.FindAllStringIndex(text, -1) {
+			if loc[0] < cut && cut < loc[1] {
+				cut = loc[0]
+			}
+		}
+	}
+	// Never split a character: a held-back part grows to the next boundary.
+	for cut > 0 && cut < len(text) && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	if cut == 0 {
+		return
+	}
+	m.buf = append(m.buf[:0], m.buf[cut:]...)
+	out := text[:cut]
+	if all {
+		// Nothing follows this emit: a key the text ends inside can no longer be completed, and
+		// its pieces would pass a redaction that sees neither.
+		out = textsafe.RedactKeyTail(out)
+	}
+	m.e.Emit(hub.EventTextDelta, map[string]any{"member": m.member, "text": textsafe.RedactBotKeys(out)})
+}
+
+// holdFrom is where the buffer's end may still become a bot key: the earliest "tbk1." whose rest
+// could still grow into one, or the proper prefix of a key's start that the buffer ends with. It is
+// len(s) when nothing at the end can be a key's start.
+func holdFrom(s string) int {
+	from := len(s)
+	// Every "tbk1." counts, not only the last: an id may itself hold "tbk1", and the key then
+	// starts before it. Walking from the earliest is what keeps such a key whole.
+	for i := 0; i <= len(s)-len(keyStart); {
+		j := strings.Index(s[i:], keyStart)
+		if j < 0 {
+			break
+		}
+		if p := i + j; len(s)-p <= maxKeyHold && textsafe.KeyPrefixPattern.MatchString(s[p:]) {
+			from = p
+			break
+		}
+		i += j + 1
+	}
+	// A prefix of the key's start has no length bound of its own: it is held however far back the
+	// "tbk1." that looked like a key's start is.
+	for n := len(keyStart) - 1; n >= 1; n-- {
+		if strings.HasSuffix(s, keyStart[:n]) {
+			if p := len(s) - n; p < from {
+				from = p
+			}
+			break
+		}
+	}
+	return from
 }
 
 // stopTimerLocked stops the timer, if one runs.

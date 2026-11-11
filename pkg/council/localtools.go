@@ -175,3 +175,14 @@ var codeAskedRe = regexp.MustCompile(`(?i)\b(code|script|program|build|dashboard
 func codeAsked(prompt string) bool {
 	return codeAskedRe.MatchString(prompt)
 }
+
+// changeAsked matches a prompt that asks for code or for a change of the platform. Unlike
+// codeAsked it has no "app": "why is the app on r2 slow" is a question, not a request.
+var changeAskedRe = regexp.MustCompile(`(?i)\b(code|script|program|build|deploy|install|write|create|make|fix|change|update|set|configure|add|remove|edit|patch|dashboard|python|html)\b`)
+
+// changeAsked reports whether the person's prompt asks for code or a change. It gates a Coder
+// task the Captain convenes after it has read platform data: the person must have asked, not a
+// log, a message, a configuration or a tool result.
+func changeAsked(prompt string) bool {
+	return changeAskedRe.MatchString(prompt)
+}
