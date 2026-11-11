@@ -13,6 +13,19 @@ Captain runs it and writes the answer, Fleet looks at the bot's fleet and device
 its computer, and the Critic checks the answer before it is done. `tnctl chat` is a person's view of that
 conversation; a bot's own `tnctl` refuses it (see [Bot mode](../bot-mode.md)).
 
+## Who may chat
+
+Who may chat with a bot is who may open its desktop:
+
+| The bot's access | Who may chat |
+| --- | --- |
+| Act as me (`creator`) | Its creator. |
+| Read only (`read`), Off (`none`) | Its creator, and the teamspace's admins. |
+
+The caller also needs permission to open a terminal (`pods/exec`) in the teamspace. Anyone else gets the
+platform's `403` with the reason: `you cannot chat with <bot>: <reason>`, exit 6. A bot that is suspended, or
+one that has not started yet, has no council online, and the platform's reason says so.
+
 ## One turn, or a conversation
 
 ```bash
@@ -28,8 +41,9 @@ both terminals — the command starts a conversation:
 ```text
 scout (creator, online) — council tnctl/v0.3.0
 Captain  claude-sonnet-5-5  high
-Fleet    claude-sonnet-5-5  medium
-Coder    claude-sonnet-5-5  medium
+Fleet    claude-haiku-5-5   medium
+Coder    claude-sonnet-5-5  high
+Critic   claude-sonnet-5-5  medium
 tokens today: 123456 of 5000000
 > 
 ```

@@ -1,6 +1,6 @@
 # Bot mode
 
-A **TeknoirBot** is a computer that runs an AI agent for a person. Inside it, `tnctl` runs in **bot mode**:
+A **TeknoirBot** is a computer with an AI council for a person. Inside it, `tnctl` runs in **bot mode**:
 every fleet API call goes to the bot API with the bot's own key, instead of to the platform with the user's
 Keycloak login. The bot works only in its own teamspace, cannot read device logins, and cannot open tunnels.
 
@@ -44,6 +44,12 @@ Everything a person's `tnctl` does with the fleet API: `robots`, `robot` (show, 
 `remove`), `config`, `devices`, `device`, `whoami`, `api`, `inspect`, `mqtt stream` and `mcp` (limited to the
 bot's teamspace). The platform decides what the bot's creator may do in the teamspace (`whoami` reports
 `access none`, `read` or `creator`).
+
+It also runs the one command that is the bot's own: [`council serve`](commands/council.md), the process of its
+council image, which takes the chat turns the platform queues for the bot and answers them with the bot's key.
+A bot's `mcp` runs without the council tools: `--council` is for a person's own agent, and `tnctl mcp
+--council` and `tnctl agent install --council` are both refused before anything starts (exit 2) with
+`--council is for a person's own agent: a TeknoirBot cannot drive a council`.
 
 A bot may **not** run the commands that open a session or hold a device login. They are refused before
 anything runs, with exit code 6 and this message:
@@ -107,5 +113,5 @@ in clear text, so anything else exits 6 with _TEKNOIRBOT_API must be https_.
 
 ## See also
 
-- [`whoami`](commands/whoami.md), [`api`](commands/api.md), [`inspect`](commands/inspect.md), [`mqtt stream`](commands/mqtt.md), [`mcp`](commands/mcp.md), [`chat`](commands/chat.md)
+- [`whoami`](commands/whoami.md), [`api`](commands/api.md), [`inspect`](commands/inspect.md), [`mqtt stream`](commands/mqtt.md), [`mcp`](commands/mcp.md), [`chat`](commands/chat.md), [`council`](commands/council.md)
 - [Configuration](configuration.md) — the user's `~/.tnctl.yaml`, which bot mode ignores.
