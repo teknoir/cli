@@ -183,6 +183,9 @@ func TestQuickTurn(t *testing.T) {
 	if start := dataOf(t, p.ofType(hub.EventTurnStart)[0]); start["mode"] != modeAuto {
 		t.Errorf("turn_start mode %v", start["mode"])
 	}
+	if len(h.model.requests(roleCritic)) != 0 {
+		t.Error("a quick turn called the Critic")
+	}
 }
 
 // ---------- 2. mode quick offers no convene ----------
@@ -302,7 +305,6 @@ func TestCouncilTurnModelSlots(t *testing.T) {
 	h.model.push(roleFleet,
 		&scriptStep{msg: apiMessage([]map[string]any{{"type": "text", "text": reportJSON("one")}}, "end_turn"), block: release, entered: entered},
 		&scriptStep{msg: apiMessage([]map[string]any{{"type": "text", "text": reportJSON("two")}}, "end_turn"), entered: entered})
-	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
 	h.model.push(roleAnswer, textStep("the final", "end_turn"))
 	h.start(t)
 	select {
@@ -417,7 +419,6 @@ func TestInvalidConvene(t *testing.T) {
 	valid := toolStep("tool_use", conveneCall("tu_2", taskOf(slugFleet, "the facts", "x")))
 	h.model.push(roleRoute, invalid, valid)
 	h.model.push(roleFleet, textStep(reportJSON("the report"), "end_turn"))
-	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
 	h.model.push(roleAnswer, textStep("the final", "end_turn"))
 	h.start(t)
 	p := h.waitFinish(t)
@@ -480,7 +481,6 @@ func TestFleetEvidenceKept(t *testing.T) {
 	h.model.push(roleFleet,
 		toolStep("tool_use", apiCall{id: "tu_call_1", name: "list_robots"}),
 		textStep(reportJSON("the report", "tu_call_1", "tu_other"), "end_turn"))
-	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
 	h.model.push(roleAnswer, textStep("the final", "end_turn"))
 	h.start(t)
 	p := h.waitFinish(t)
@@ -613,6 +613,9 @@ func TestFleetRoundLimit(t *testing.T) {
 	if !fleet[standardFleetRounds].ToolChoiceNone {
 		t.Error("the 11th call does not force an answer")
 	}
+	if n := len(h.model.requests(roleCritic)); n != 1 {
+		t.Errorf("%d critic requests, want 1: a forced report is incomplete", n)
+	}
 }
 
 // ---------- 8. the turn caps ----------
@@ -689,6 +692,180 @@ func TestTokenCap(t *testing.T) {
 	}
 	if res := p.result(); res.State != stateDone {
 		t.Errorf("state %q", res.State)
+	}
+}
+
+// The council's own budget lowers the turn's token cap (7.4): the route call is allowed at 0 spent,
+// and its 90 000 tokens leave the members, and then the reviewer, no room under the council's 100 000.
+func TestCouncilBudgetCapsTheTurn(t *testing.T) {
+	h := councilWithRepeatingFleet(t, 2, model.Usage{Input: 90_000})
+	h.hub.queue[0].Options.Mode = modeCouncil
+	h.useSnapshot(t, "read")
+	h.hub.queue[0].Council.Budget = &hub.RosterBudget{MaxTokens: 100_000}
+	h.model.push(roleAnswer, textStep("the answer after the cap", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	budgets := p.ofType(hub.EventBudget)
+	if len(budgets) != 1 {
+		t.Fatalf("%d budget events: %v", len(budgets), budgets)
+	}
+	d := dataOf(t, budgets[0])
+	if d["what"] != "tokens" || d["limit"].(float64) != 100_000 {
+		t.Errorf("budget event %v", d)
+	}
+	if res := p.result(); res.State != stateDone {
+		t.Errorf("state %q %q", res.State, res.ErrCode)
+	}
+	if left := h.model.leftover(); len(left) != 1 || left[roleFleet] != 1 {
+		t.Errorf("unused scripted answers %v, want the repeating Fleet step alone", left)
+	}
+	if n := len(h.model.requests(roleCritic)); n != 0 {
+		t.Errorf("%d critic requests, want none: the reviewer is refused by the council's cap", n)
+	}
+	if n := len(p.ofType(hub.EventCritique)); n != 0 {
+		t.Errorf("%d critique events, want none", n)
+	}
+	answers := h.model.requests(roleAnswer)
+	if len(answers) != 1 || !answers[0].ToolChoiceNone {
+		t.Fatalf("the answer call: %v", answers)
+	}
+	last := paramText(answers[0].Messages[len(answers[0].Messages)-1])
+	if !strings.Contains(last, `{"issues":[],"note":"The critique was not run (budget)."}`) {
+		t.Errorf("the synthesis has no (budget) note: %s", last)
+	}
+}
+
+// The same turn with no council budget: the repeating Fleet never reports, so the reviewer runs and
+// the turn is not stopped by tokens.
+func TestCouncilBudgetControl(t *testing.T) {
+	h := councilWithRepeatingFleet(t, 2, model.Usage{Input: 90_000})
+	h.hub.queue[0].Options.Mode = modeCouncil
+	h.useSnapshot(t, "read")
+	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
+	h.model.push(roleAnswer, textStep("the answer", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	if n := len(p.ofType(hub.EventBudget)); n != 0 {
+		t.Errorf("%d budget events, want none: %v", n, p.ofType(hub.EventBudget))
+	}
+	if n := len(h.model.requests(roleCritic)); n != 1 {
+		t.Fatalf("%d critic requests, want 1", n)
+	}
+	if n := len(p.ofType(hub.EventCritique)); n != 1 {
+		t.Errorf("%d critique events, want 1", n)
+	}
+	if res := p.result(); res.State != stateDone {
+		t.Errorf("state %q %q", res.State, res.ErrCode)
+	}
+	if left := h.model.leftover(); len(left) != 1 || left[roleFleet] != 1 {
+		t.Errorf("unused scripted answers %v, want the repeating Fleet step alone", left)
+	}
+}
+
+// An auto turn's upgrade does not raise the council's cap: 60 000 stays 60 000, and the reserve is a
+// quarter of it.
+func TestCouncilBudgetSurvivesTheUpgrade(t *testing.T) {
+	h := councilWithRepeatingFleet(t, 2, model.Usage{Input: 50_000})
+	h.useSnapshot(t, "read")
+	h.hub.queue[0].Council.Budget = &hub.RosterBudget{MaxTokens: 60_000}
+	h.model.push(roleAnswer, textStep("the answer after the cap", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	budgets := p.ofType(hub.EventBudget)
+	if len(budgets) != 1 {
+		t.Fatalf("%d budget events: %v", len(budgets), budgets)
+	}
+	d := dataOf(t, budgets[0])
+	if d["what"] != "tokens" || d["limit"].(float64) != 60_000 {
+		t.Errorf("budget event %v, want tokens at 60000", d)
+	}
+	if res := p.result(); res.State != stateDone {
+		t.Errorf("state %q %q", res.State, res.ErrCode)
+	}
+	if left := h.model.leftover(); len(left) != 1 || left[roleFleet] != 1 {
+		t.Errorf("unused scripted answers %v, want the repeating Fleet step alone", left)
+	}
+}
+
+// A council budget above the turn's cap raises nothing: an auto turn stays at capsQuick's 150 000.
+func TestCouncilBudgetAboveTheCapChangesNothing(t *testing.T) {
+	h := newHarness(t, newWork(kindAsk, "", "how many robots are degraded?"))
+	h.useSnapshot(t, "read")
+	h.hub.queue[0].Council.Budget = &hub.RosterBudget{MaxTokens: 500_000}
+	first := toolStep("tool_use", apiCall{id: "tu_1", name: "list_robots", input: map[string]any{}})
+	first.usage = model.Usage{Input: 140_000}
+	h.model.push(roleRoute, first, textStep("there are two", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	budgets := p.ofType(hub.EventBudget)
+	if len(budgets) != 1 {
+		t.Fatalf("%d budget events: %v", len(budgets), budgets)
+	}
+	d := dataOf(t, budgets[0])
+	if d["what"] != "tokens" || d["limit"].(float64) != float64(capsQuick.tokens) {
+		t.Errorf("budget event %v, want tokens at %d", d, capsQuick.tokens)
+	}
+	if res := p.result(); res.State != stateDone || res.Final != "there are two" {
+		t.Errorf("finish %q %q %q", res.State, res.Final, res.ErrCode)
+	}
+	if left := h.model.leftover(); len(left) > 0 {
+		t.Errorf("unused scripted answers: %v", left)
+	}
+}
+
+// The spec's minimum: a council budget of 10 000 leaves 2 500 for the answer, so the route call runs,
+// and the members and the reviewer are refused.
+func TestCouncilBudgetMinimum(t *testing.T) {
+	h := newHarness(t, newWork(kindAsk, "", "why is the robot degraded?"))
+	h.hub.queue[0].Options.Mode = modeCouncil
+	h.useSnapshot(t, "read")
+	h.hub.queue[0].Council.Budget = &hub.RosterBudget{MaxTokens: 10_000}
+	convene := toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x")))
+	convene.usage = model.Usage{Input: 8_000}
+	h.model.push(roleRoute, convene)
+	h.model.push(roleAnswer, textStep("the answer on the question alone", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	if n := len(h.model.requests(roleRoute)); n != 1 {
+		t.Errorf("%d route requests, want 1", n)
+	}
+	if n := len(h.model.requests(roleFleet)); n != 0 {
+		t.Errorf("%d fleet requests, want none", n)
+	}
+	if n := len(h.model.requests(roleCritic)); n != 0 {
+		t.Errorf("%d critic requests, want none", n)
+	}
+	budgets := p.ofType(hub.EventBudget)
+	if len(budgets) != 1 {
+		t.Fatalf("%d budget events: %v", len(budgets), budgets)
+	}
+	d := dataOf(t, budgets[0])
+	if d["what"] != "tokens" || d["limit"].(float64) != 10_000 {
+		t.Errorf("budget event %v, want tokens at 10000", d)
+	}
+	answers := h.model.requests(roleAnswer)
+	if len(answers) != 1 || !answers[0].ToolChoiceNone {
+		t.Fatalf("the answer call: %v", answers)
+	}
+	last := paramText(answers[0].Messages[len(answers[0].Messages)-1])
+	if !strings.Contains(last, `{"issues":[],"note":"The critique was not run (budget)."}`) {
+		t.Errorf("the synthesis has no (budget) note: %s", last)
+	}
+	if res := p.result(); res.State != stateDone {
+		t.Errorf("state %q %q", res.State, res.ErrCode)
+	}
+	if left := h.model.leftover(); len(left) > 0 {
+		t.Errorf("unused scripted answers: %v", left)
 	}
 }
 
@@ -960,7 +1137,6 @@ func TestSynthesisModelError(t *testing.T) {
 	h := newHarness(t, newWork(kindAsk, "", "why is the robot degraded?"))
 	h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x"))))
 	h.model.push(roleFleet, textStep(reportJSON("the fleet's report"), "end_turn"))
-	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
 	h.model.push(roleAnswer, &scriptStep{err: errors.New("connection reset")})
 	h.start(t)
 	p := h.waitFinish(t)
@@ -1326,7 +1502,10 @@ func TestCoderTaskAfterToolDataWhenAsked(t *testing.T) {
 // TestFleetTaskAfterToolData: tool data does not touch a Fleet-only convene.
 func TestFleetTaskAfterToolData(t *testing.T) {
 	h := toolDataRoute(t, "why is r2 degraded?", taskOf(slugFleet, "the robot's problems", "find the facts"))
-	answerAfterConvene(h, 1)
+	// A Fleet report with no proposal and no truncation skips the Critic (D17), so only the report
+	// and the answer are scripted.
+	h.model.push(roleFleet, textStep(reportJSON("fleet's report"), "end_turn"))
+	h.model.push(roleAnswer, textStep("the final", "end_turn"))
 	h.start(t)
 	h.waitFinish(t)
 	h.stop(t)
@@ -1668,6 +1847,9 @@ func TestEffort(t *testing.T) {
 		t.Run(tc.turn, func(t *testing.T) {
 			work := newWork(kindAsk, "", "why is the robot degraded?")
 			work.Options.Effort = tc.turn
+			// Thorough, so the Critic runs on a report with no proposal: its effort is what the test
+			// checks.
+			work.Options.Mode = modeCouncil
 			h := newHarness(t, work)
 			h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x"))))
 			h.model.push(roleFleet, textStep(reportJSON("the report"), "end_turn"))
@@ -1677,6 +1859,9 @@ func TestEffort(t *testing.T) {
 			h.waitFinish(t)
 			h.stop(t)
 
+			if len(h.model.requests(roleCritic)) == 0 {
+				t.Fatal("no Critic request")
+			}
 			for _, r := range h.model.requests(roleRoute) {
 				if r.Effort != tc.captain {
 					t.Errorf("the route's effort %q", r.Effort)
@@ -1832,6 +2017,9 @@ func TestFleetOwnTokenLimit(t *testing.T) {
 	if !fleet[2].ToolChoiceNone {
 		t.Error("Fleet's answer after its own token limit is not forced")
 	}
+	if n := len(h.model.requests(roleCritic)); n != 1 {
+		t.Errorf("%d critic requests, want 1: a forced report is incomplete", n)
+	}
 	for _, e := range p.ofType(hub.EventBudget) {
 		if d := dataOf(t, e); d["what"] != "time" {
 			t.Errorf("Fleet emitted a budget event: %v", d)
@@ -1933,7 +2121,6 @@ func TestSynthesisTool(t *testing.T) {
 	h := newHarness(t, newWork(kindAsk, "", "why is the robot degraded?"))
 	h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x"))))
 	h.model.push(roleFleet, textStep(reportJSON("the fleet's report"), "end_turn"))
-	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
 	h.model.push(roleAnswer,
 		toolStep("tool_use", apiCall{id: "tu_s1", name: "list_robots", input: map[string]any{}}),
 		textStep("the verified answer", "end_turn"))
@@ -2111,7 +2298,10 @@ func TestLostTurnWithNoBudget(t *testing.T) {
 
 // ---------- a skipped critique says so ----------
 
-// A critique skipped for the time leaves a note in the synthesis' prompt, and posts no event.
+// A critique skipped for the time leaves a note in the synthesis' prompt, and posts no event. It is
+// an auto turn whose Fleet task timed out: the stopped report is incomplete, so the policy asks for
+// the reviewer, and the critique step then skips it because the time has run out, which is what this
+// pins. It is the end-to-end check that a stopped report is not skipped as "not needed".
 func TestSkippedCritiqueIsNoted(t *testing.T) {
 	work := newWork(kindAsk, "", "why is the robot degraded?")
 	work.Deadline = time.Now().Add(1500 * time.Millisecond).UnixMilli()
@@ -2139,6 +2329,9 @@ func TestSkippedCritiqueIsNoted(t *testing.T) {
 	}
 	if len(p.ofType(hub.EventCritique)) != 0 {
 		t.Error("a skipped critique posted an event")
+	}
+	if n := len(h.model.requests(roleCritic)); n != 0 {
+		t.Errorf("%d Critic requests after the time ran out", n)
 	}
 }
 
@@ -2238,7 +2431,8 @@ func TestWhoamiDeadline(t *testing.T) {
 // ---------- Fleet's retry after a cut-off tool call ----------
 
 // A Fleet answer cut at max_tokens inside a tool call: the retry request carries a tool_result for
-// that call, and Fleet reports rather than reporting a model error.
+// that call, and Fleet reports rather than reporting a model error. The call never ran, so the report
+// is incomplete and the reviewer reads it (7.5).
 func TestFleetMaxTokensRetry(t *testing.T) {
 	h := newHarness(t, newWork(kindAsk, "", "why is the robot degraded?"))
 	h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x"))))
@@ -2298,6 +2492,39 @@ func TestFleetMaxTokensRetry(t *testing.T) {
 	}
 	if len(p.ofType(hub.EventToolCall)) != 0 {
 		t.Errorf("a cut-off tool call ran: %v", h.tools.called())
+	}
+	if n := len(h.model.requests(roleCritic)); n != 1 {
+		t.Errorf("%d critic requests, want 1: a cut answer's tool calls did not run", n)
+	}
+	if n := len(p.ofType(hub.EventCritique)); n != 1 {
+		t.Errorf("%d critique events, want 1", n)
+	}
+}
+
+// A Fleet answer cut at max_tokens whose text is a valid report but whose tool call never ran: no
+// retry, and the report still counts as incomplete, so the reviewer reads it.
+func TestFleetMaxTokensReportWithUnrunCall(t *testing.T) {
+	h := newHarness(t, newWork(kindAsk, "", "why is the robot degraded?"))
+	h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x"))))
+	h.model.push(roleFleet,
+		mixedStep("max_tokens", reportJSON("cut but valid"), apiCall{id: "tu_cut", name: "list_robots", input: map[string]any{}}))
+	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
+	h.model.push(roleAnswer, textStep("the final", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	if n := len(h.model.requests(roleFleet)); n != 1 {
+		t.Errorf("%d fleet requests, want 1 (no retry)", n)
+	}
+	if len(p.ofType(hub.EventToolCall)) != 0 {
+		t.Errorf("a cut-off tool call ran: %v", h.tools.called())
+	}
+	if n := len(h.model.requests(roleCritic)); n != 1 {
+		t.Errorf("%d critic requests, want 1: the cut answer's tool call did not run", n)
+	}
+	if left := h.model.leftover(); len(left) != 0 {
+		t.Errorf("unused scripted steps: %v", left)
 	}
 }
 

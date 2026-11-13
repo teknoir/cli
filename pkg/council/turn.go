@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -243,6 +244,9 @@ type turn struct {
 	// council is the council this turn runs: the platform's snapshot, or the embedded Standard
 	// council. orchestrate sets it once, before any phase starts, and never writes it again.
 	council *turnCouncil
+	// truncated is set when any tool result of the turn, the lead's own included, was cut (spec 7.5);
+	// it is never cleared.
+	truncated atomic.Bool
 }
 
 // newTurn is a turn of the daemon, with its own context and budget.
@@ -417,6 +421,9 @@ func (t *turn) orchestrate() outcome {
 		return failedOutcome(codeBadTurn, msgBadTurn)
 	}
 	t.council = c
+	if b := c.snap.Budget; b != nil {
+		t.budget.limitTokens(int64(b.MaxTokens))
+	}
 
 	data := map[string]any{"mode": mode}
 	if w.Kind == kindAsk {
@@ -494,7 +501,8 @@ func (t *turn) memberTurn(level string, facts json.RawMessage) outcome {
 	return doneOutcome(final)
 }
 
-// askTurn routes the question, convenes the members, has the Critic read them and answers.
+// askTurn routes the question, convenes the members, has the Critic read them when the turn needs it
+// (7.5), and answers.
 func (t *turn) askTurn(level string, facts json.RawMessage, mode string) outcome {
 	route := t.route(level, facts, mode)
 	if route.terminal != nil {
@@ -519,12 +527,19 @@ func (t *turn) askTurn(level string, facts json.RawMessage, mode string) outcome
 		return *out
 	}
 
-	// The reviewer reads the members' reports, when the council has one.
+	// The reviewer reads the members' reports when the council has one and the turn needs it (7.5).
 	var crit critique
 	if len(reports) > 0 {
-		if t.council.reviewer == nil {
+		need, why := needCritique(mode == modeCouncil, t.council.snap.Unattended, t.truncated.Load(), reports)
+		switch {
+		case t.council.reviewer == nil:
+			t.d.cfg.Logf("turn=%s critique: skipped (no reviewer)", t.work.ID)
 			crit = critiqueSkip("no reviewer in this council")
-		} else {
+		case !need:
+			t.d.cfg.Logf("turn=%s critique: skipped (%s)", t.work.ID, why)
+			crit = critiqueSkip(why)
+		default:
+			t.d.cfg.Logf("turn=%s critique: %s", t.work.ID, why)
 			crit, out = t.critique(reports)
 			if out != nil {
 				return *out
@@ -1097,6 +1112,9 @@ func (t *turn) runToolBlocks(ctx context.Context, r *runRole, task int, blocks [
 				return results, ev, false
 			}
 		}
+		if res.Truncated {
+			t.truncated.Store(true)
+		}
 		// A cut result is kept whole for read_result, and what the model gets says so.
 		text, digest := tools.Render(b.Name, res, t.storeResult(b.Name, res))
 		if emit {
@@ -1280,6 +1298,7 @@ func (t *turn) workPhase(workCtx context.Context, level string, facts json.RawMe
 					Proposals:     []proposal{},
 					Confidence:    confidenceLow,
 					OpenQuestions: []string{},
+					partial:       true,
 				}
 				results[i] = memberResult{member: task.Member, task: i, report: &rep}
 				return
@@ -1393,8 +1412,12 @@ func (t *turn) memberTask(workCtx context.Context, role *runRole, factsF promptF
 	var text string
 	var last *anthropic.Message
 	rounds := 0
+	// unfinished: the member's last answer was forced by its round or token limit, or cut at max_tokens with
+	// tool calls it never ran; its report then counts as incomplete (7.5).
+	unfinished := false
 	for {
 		force := rounds >= maxRounds || own >= maxOwn
+		unfinished = force
 		r := req
 		r.ToolChoiceNone = force
 		msg, u, err := t.call(workCtx, false, r, nil)
@@ -1429,6 +1452,9 @@ func (t *turn) memberTask(workCtx context.Context, role *runRole, factsF promptF
 		req.Messages = append(req.Messages, msg.ToParam(), anthropic.NewUserMessage(results...))
 	}
 
+	if last.StopReason == anthropic.StopReasonMaxTokens && len(toolUses(last)) > 0 {
+		unfinished = true
+	}
 	parsed, perr := parseReport(text)
 	if perr != nil {
 		// One retry, forced to the report JSON.
@@ -1473,6 +1499,7 @@ func (t *turn) memberTask(workCtx context.Context, role *runRole, factsF promptF
 		ids[e.ID] = true
 	}
 	parsed.keepEvidence(ids)
+	parsed.partial = unfinished
 	return done(parsed), ev, false
 }
 
@@ -1675,8 +1702,9 @@ func (t *turn) critique(reports []memberResult) (critique, *outcome) {
 	return crit, nil
 }
 
-// critiqueSkip is the critique the synthesis gets when the Critic did not run: a note saying why,
-// no issues, and no critique event.
+// critiqueSkip is the critique the synthesis gets when the Critic did not run: the council has no
+// reviewer, the turn does not need one (7.5), or time, the budget, a model error or a refusal
+// stopped it. It is a note saying why, no issues, and no critique event.
 func critiqueSkip(why string) critique {
 	return critique{Issues: []issue{}, Note: "The critique was not run (" + why + ")."}
 }

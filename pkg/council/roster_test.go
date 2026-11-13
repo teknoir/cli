@@ -1493,6 +1493,12 @@ func TestUnknownPlanSlug(t *testing.T) {
 	if len(results) != 1 || results[0].report == nil || results[0].report.Summary != "ghost is not in this council." {
 		t.Fatalf("the results are %+v", results)
 	}
+	if !results[0].report.partial {
+		t.Error("the report of a slug the council has not is not marked partial")
+	}
+	if need, why := needCritique(false, false, false, results); !need || why != "incomplete" {
+		t.Errorf("needCritique = %v, %q, want true, \"incomplete\"", need, why)
+	}
 	p := wp.poster.(*fakePoster)
 	if n := len(p.ofType(hub.EventMemberStart)) + len(p.ofType(hub.EventMemberDone)); n != 0 {
 		t.Errorf("%d member events for a slug the council has not", n)

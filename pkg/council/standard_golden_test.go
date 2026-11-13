@@ -32,8 +32,8 @@ import (
 // (with the access level it ran at), every event, and how the turn finished. That covers what the
 // refactor rewrites: the prompts, the parsed answers, the forced answers and the tool plumbing.
 //
-// One scenario is expected to change on purpose: 9b (a Fleet report with no proposals, where the
-// Critic runs today) is re-recorded by the step that makes the Critic conditional.
+// One scenario changed on purpose: 9b, an auto turn with complete evidence, high confidence and no
+// proposal, where the Critic is skipped (D17 and 7.5) and the synthesis carries "(not needed)".
 //
 // Run with -update to rewrite the files:
 //
@@ -440,8 +440,9 @@ func proposalsReport(summary string, proposals int, evidence ...string) string {
 }
 
 // autoOneFleetTaskEffort is an auto turn at read whose Fleet task reports the given report, with
-// the turn's effort set.
-func autoOneFleetTaskEffort(t *testing.T, effort, summary, fleetReport string) *testHarness {
+// the turn's effort set. critic scripts the Critic's answer; a scenario whose reports need no
+// reviewer (D17) leaves it out.
+func autoOneFleetTaskEffort(t *testing.T, effort, summary, fleetReport string, critic bool) *testHarness {
 	work := newWork(kindAsk, "", "how many robots are degraded?")
 	work.Options.Effort = effort
 	h := goldenHarness(t, work)
@@ -450,32 +451,34 @@ func autoOneFleetTaskEffort(t *testing.T, effort, summary, fleetReport string) *
 	h.model.pushUsed(roleFleet,
 		toolStep("tool_use", apiCall{id: "tu_call_1", name: "list_robots", input: map[string]any{}}),
 		textStep(fleetReport, "end_turn"))
-	h.model.pushUsed(roleCritic, textStep(critiqueAnswer(), "end_turn"))
+	if critic {
+		h.model.pushUsed(roleCritic, textStep(critiqueAnswer(), "end_turn"))
+	}
 	h.model.pushUsed(roleAnswer, textStep(summary, "end_turn"))
 	return h
 }
 
 // autoOneFleetTask is autoOneFleetTaskEffort at the harness' effort.
-func autoOneFleetTask(t *testing.T, summary, fleetReport string) *testHarness {
-	return autoOneFleetTaskEffort(t, "", summary, fleetReport)
+func autoOneFleetTask(t *testing.T, summary, fleetReport string, critic bool) *testHarness {
+	return autoOneFleetTaskEffort(t, "", summary, fleetReport, critic)
 }
 
 // scenarioAutoOneProposal is an auto turn at read: an untruncated Fleet result and a report with
 // one proposal; the Critic runs.
 func scenarioAutoOneProposal(t *testing.T) *testHarness {
-	return autoOneFleetTask(t, "one robot is degraded", proposalsReport("one robot is degraded", 1, "tu_call_1"))
+	return autoOneFleetTask(t, "one robot is degraded", proposalsReport("one robot is degraded", 1, "tu_call_1"), true)
 }
 
-// scenarioAutoNoProposal is the same with no proposals. Today the Critic runs all the same; the
-// step that makes the Critic conditional re-records this file on purpose.
+// scenarioAutoNoProposal is the same with no proposals: an auto turn with complete evidence, high
+// confidence and no proposal skips the Critic (D17), and the synthesis carries "(not needed)".
 func scenarioAutoNoProposal(t *testing.T) *testHarness {
-	return autoOneFleetTask(t, "one robot is degraded", proposalsReport("one robot is degraded", 0, "tu_call_1"))
+	return autoOneFleetTask(t, "one robot is degraded", proposalsReport("one robot is degraded", 0, "tu_call_1"), false)
 }
 
 // scenarioAutoOneProposalLowEffort is scenario 9a with the turn's effort at low: the override shows
 // in every request the turn makes.
 func scenarioAutoOneProposalLowEffort(t *testing.T) *testHarness {
-	return autoOneFleetTaskEffort(t, "low", "one robot is degraded", proposalsReport("one robot is degraded", 1, "tu_call_1"))
+	return autoOneFleetTaskEffort(t, "low", "one robot is degraded", proposalsReport("one robot is degraded", 1, "tu_call_1"), true)
 }
 
 // scenarioForcedAnswerAfterRounds is an auto turn at read where Fleet spends every tool round it

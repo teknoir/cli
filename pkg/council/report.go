@@ -32,6 +32,10 @@ type report struct {
 	Confidence    string     `json:"confidence"`
 	OpenQuestions []string   `json:"open_questions"`
 	Cut           bool       `json:"cut,omitempty"`
+	// partial: the member did not finish (a stopped report, a text that was not a report, an answer
+	// forced by its round or token limit or cut with tool calls it never ran, or a plan task for a
+	// member the council has not); never in the JSON.
+	partial bool
 }
 
 // issue is one problem the Critic found.
@@ -268,6 +272,7 @@ func rawReport(text string) report {
 		Proposals:     []proposal{},
 		Confidence:    confidenceLow,
 		OpenQuestions: []string{},
+		partial:       true,
 	}
 }
 
@@ -279,6 +284,7 @@ func stoppedReport(name, why string) report {
 		Proposals:     []proposal{},
 		Confidence:    confidenceLow,
 		OpenQuestions: []string{},
+		partial:       true,
 	}
 }
 

@@ -125,8 +125,14 @@ of the Captain's notes — the data asked, not the person — only the sentence 
 itself, and otherwise the notes follow the request as data.
 
 A council turn runs the plan's tasks at once — Fleet's and the Coder's work in parallel — and then the
-Critic reads their reports and tool digests (it is skipped when there are no reports). The Captain writes the
-answer last, with the reports and the critique as data, in three tool rounds at most.
+Critic reads their reports and tool digests when the turn needs it: in council mode, when any tool result
+of the turn was cut, when a member did not finish (it stopped, wrote no report, ran out of tool rounds or
+tokens, or was cut off with tool calls it never ran), when a report says its confidence is low, when a
+report proposes a change, or when the Coder was convened. An auto turn skips it when its members all
+finished with complete results, no report says its confidence is low, no report proposes a change and the
+Coder was not convened, and the Captain is told the critique was not needed. A council with no reviewer
+skips it too. The Captain writes the answer last, with the reports and the critique as data, in three tool
+rounds at most.
 
 ## Budgets and deadlines
 
@@ -139,7 +145,10 @@ answer last, with the reports and the critique as data, in three tool rounds at 
 Tokens are counted as input plus cache write plus output; a cache read is free.
 
 - **The answer is held back.** A work call starts only while the turn has used fewer than its calls minus one
-  and fewer than its tokens minus 20,000. The answer call needs one call left and is not stopped by tokens.
+  and fewer than its tokens minus 20,000 (or minus a quarter of its tokens, when that is less). The answer
+  call needs one call left and is not stopped by tokens.
+- **A council's own budget** (set on the platform) lowers the token cap of each of its ask turns (not
+  member turns), never raises it, and keeps it lowered when an auto turn convenes.
 - **Fleet's own loop** gets 10 tool rounds and 120,000 tokens of its own, then it must write its report.
 - **The Coder's steps** spend the same token budget. When the reserve is reached OpenCode is stopped and the
   Coder reports `budget`.
@@ -260,6 +269,7 @@ It writes to stderr only, one line an event, prefixed `council: `:
 ```text
 council: turn=trn_… kind=ask mode=auto
 council: turn=trn_… critique: 2 evidence entries dropped
+council: turn=trn_… critique: skipped (not needed)
 council: coder: turn=trn_… thread=thr_…: started with effort high
 council: turn=trn_… state=done code= calls=6 tokens=18422 ms=12345
 ```
