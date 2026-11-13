@@ -3,7 +3,6 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -144,6 +143,9 @@ func mcpIndent(raw json.RawMessage) string {
 // mcpCut is text cut to mcpMaxResult.
 func mcpCut(text string) string { return mcpCutMax(text, mcpMaxResult) }
 
+// mcpCutHook, when set, is called after every resultcut.Cut of mcpCutMax; a test counts the cuts.
+var mcpCutHook func()
+
 // mcpCutMax is text cut to max. A result that is an array, or an object whose largest member is
 // one, is cut at whole items into one JSON object that says how much is shown and carries the cut
 // JSON in "result", so an agent reads valid JSON and knows what it is missing. Anything else is cut
@@ -156,17 +158,26 @@ func mcpCutMax(text string, max int) string {
 	}
 	budget := max - 1024
 	cut := resultcut.Cut(text, budget)
+	if mcpCutHook != nil {
+		mcpCutHook()
+	}
 	for cut.Unit == "items" && json.Valid([]byte(cut.Shown)) {
 		out := mcpCutObject(cut, max)
 		over := len(out) - max
 		if over <= 0 {
 			return out
 		}
-		if budget-over < 64 {
+		// Shrink from what was shown: the cut moves only at whole items, so taking the overflow off
+		// the budget alone would cut again and again to the same output.
+		next := cut.ShownBytes - over
+		if next < 64 {
 			break // a smaller cut would be shorter than its own note
 		}
-		budget -= over
+		budget = next
 		cut = resultcut.Cut(text, budget)
+		if mcpCutHook != nil {
+			mcpCutHook()
+		}
 	}
 	return cut.Shown + resultcut.LineCutTrailer(cut)
 }
@@ -439,6 +450,11 @@ type mcpServerOptions struct {
 	// Captures is the store the server uses. A caller that owns it removes its files when the
 	// session ends; a nil one makes the server its own.
 	Captures *mcpCaptureStore
+	// PageEscapedMax is how many bytes of escaped text one mqtt_read page may take (0: the default,
+	// mcpPageEscapedMax), and IndexMax how long a spilled index may be (0: mcpIndexMax). The council
+	// cuts what it reads at 16 KiB, so it asks for pages and indexes that fit.
+	PageEscapedMax int
+	IndexMax       int
 }
 
 // newMCPServer builds the read-only server.
@@ -707,12 +723,13 @@ func newMCPServerOpts(e *cliEnv, opts mcpServerOptions) *mcp.Server {
 			return result(mcpPromQueryHint(raw)), nil, nil
 		})
 
-	addTool(s, "mqtt_sample", "Listen to the MQTT messages of the teamspace's devices for a few seconds and return what arrived: use it to see what a device publishes. It is the cheap preview: a text payload over 4096 bytes, or a binary one over 4096 base64 characters, is cut and marked payloadTruncated, with payloadBytes its full length, and truncated says whether any was cut. For whole payloads use mqtt_get_sample. It stops at max messages, after seconds, when the stream ends, or when the sample is full; stoppedBy says which. serverDropped counts what the platform dropped, by reason (size, rate, slow, other); messages over 256 KiB are dropped by the platform. One sample runs at a time: put every topic (up to 8) in one call instead of calling it in parallel. "+mcpUntrustedNote,
+	addTool(s, "mqtt_sample", "Listen to the MQTT messages of the teamspace's devices for a few seconds and return what arrived: use it to see what a device publishes. It is the cheap preview: a text payload over 4096 bytes, or a binary one over 4096 base64 characters, is cut and marked payloadTruncated, with payloadBytes its full length, and truncated says whether any payload was cut or the sample filled up (stoppedBy size). For whole payloads use mqtt_get_sample. It stops at max messages, after seconds, when the stream ends, or when the sample is full; stoppedBy says which. serverDropped counts what the platform dropped, by reason (size, rate, slow, other); messages over 256 KiB are dropped by the platform. One sample runs at a time: put every topic (up to 8) in one call instead of calling it in parallel. "+mcpUntrustedNote,
 		mcpSampleTool(e, sampleSlot, result))
 
-	addTool(s, "mqtt_get_sample", mcpGetSampleDescription, mcpGetSampleTool(e, sampleSlot, captures))
+	sizes := mcpSizes{pageEscaped: opts.PageEscapedMax, indexMax: opts.IndexMax}.norm()
+	addTool(s, "mqtt_get_sample", mcpGetSampleDescription, mcpGetSampleTool(e, sampleSlot, captures, sizes))
 
-	addTool(s, "mqtt_read", mcpReadDescription, mcpReadTool(captures))
+	addTool(s, "mqtt_read", mcpReadDescriptionFor(sizes.pageEscaped), mcpReadTool(captures, sizes))
 
 	addTool(s, "inspect_pod", "Show a pod of a robot: phase, containers and recent events. "+mcpInspectNote+" "+mcpUntrustedNote,
 		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpInspectPodInput) (*mcp.CallToolResult, any, error) {
@@ -934,13 +951,8 @@ func mcpSampleCut(m *api.StreamMessage) bool {
 // mcpPayloadBytes is a message's payload size: a text payload's UTF-8 length, or what a binary one
 // decodes to.
 func mcpPayloadBytes(m *api.StreamMessage) int {
-	if m.Payload != "" || m.PayloadBase64 == "" {
-		return len(m.Payload)
-	}
-	if b, err := base64.StdEncoding.DecodeString(m.PayloadBase64); err == nil {
-		return len(b)
-	}
-	return base64.StdEncoding.DecodedLen(len(m.PayloadBase64))
+	line, _ := sampleMsgOf(0, m)
+	return line.Bytes
 }
 
 // mcpSampleText cuts s to at most mcpSamplePayloadMax bytes, where a rune starts.

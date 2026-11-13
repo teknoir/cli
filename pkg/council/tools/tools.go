@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -262,8 +263,12 @@ func (s *Set) Call(ctx context.Context, level, name string, input json.RawMessag
 	}
 	text := strings.Join(parts, "\n")
 	out := Result{Text: text, Full: text, IsError: res.IsError}
-	if hint, total, cut := upstreamCut(text); cut {
-		out.Truncated, out.Upstream, out.Hint, out.UpstreamTotal = true, true, hint, total
+	// Only a successful result can say it was cut upstream: an error's text is free-form and may
+	// quote what a device wrote, so it must not forge the header's claims.
+	if !out.IsError {
+		if hint, total, cut := upstreamCut(text); cut {
+			out.Truncated, out.Upstream, out.Hint, out.UpstreamTotal = true, true, hint, total
+		}
 	}
 	if len(text) > maxText {
 		// 1 KiB less than the limit leaves room for the header and the wrapper.
@@ -275,8 +280,8 @@ func (s *Set) Call(ctx context.Context, level, name string, input json.RawMessag
 
 // The hints an upstream cut gets when the tool says nothing of its own.
 const (
-	hintInspectLogs = "the platform cut the log; narrow tail or since"
-	hintInspectPod  = "the platform listed only the newest events"
+	hintInspectLogs = "The log passed the platform's 1 MiB limit and was cut: narrow tail or since."
+	hintInspectPod  = "The platform listed only the newest events."
 )
 
 // upstreamCut reports whether text is a result its tool already cut, and what it said about it: its
@@ -284,8 +289,9 @@ const (
 // whole result had. A tool says it cut its result in one of four ways:
 //
 //   - a top-level "truncated": true, the server's own wrapper (mcpCut) and mcp_sample's truncated;
-//   - a top-level "truncated" object with a member that is true, which is inspect_logs
-//     (api.InspectLogsResponse: "truncated": {"bytes": …, "lines": …});
+//   - a top-level "truncated" object (inspect_logs, api.InspectLogsResponse: "truncated": {"bytes":
+//     …, "lines": …}) whose "bytes" is true, or that has a true member other than "lines". Only
+//     "lines" true is not a cut: it is the window the call asked for, the last tail lines;
 //   - a top-level "eventsTruncated": true, which is inspect_pod;
 //   - a final line that resultcut.LineCutTrailer wrote, whose totals are in its own header.
 func upstreamCut(text string) (hint string, total int, ok bool) {
@@ -300,7 +306,9 @@ func upstreamCut(text string) (hint string, total int, ok bool) {
 	switch {
 	case rawJSONTrue(v["truncated"]):
 		return sanitizeHint(rawString(v["hint"])), rawInt(v["totalItems"]), true
-	case jsonObjectHasTrue(v["truncated"]):
+	case logsBytesCut(v["truncated"]):
+		return sanitizeHint(hintInspectLogs), rawInt(v["totalItems"]), true
+	case jsonObjectHasTrueExcept(v["truncated"], "lines", "bytes"):
 		return sanitizeHint(firstHint(rawString(v["hint"]), hintInspectLogs)), rawInt(v["totalItems"]), true
 	case rawJSONTrue(v["eventsTruncated"]):
 		return sanitizeHint(firstHint(rawString(v["hint"]), hintInspectPod)), rawInt(v["totalItems"]), true
@@ -311,8 +319,18 @@ func upstreamCut(text string) (hint string, total int, ok bool) {
 // rawJSONTrue reports whether raw is the JSON literal true.
 func rawJSONTrue(raw json.RawMessage) bool { return string(bytes.TrimSpace(raw)) == "true" }
 
-// jsonObjectHasTrue reports whether raw is a JSON object with any member that is true.
-func jsonObjectHasTrue(raw json.RawMessage) bool {
+// logsBytesCut reports whether raw is the inspect_logs "truncated" object with bytes true.
+func logsBytesCut(raw json.RawMessage) bool {
+	var t struct {
+		Bytes bool `json:"bytes"`
+		Lines bool `json:"lines"`
+	}
+	return len(bytes.TrimSpace(raw)) > 0 && bytes.TrimSpace(raw)[0] == '{' && json.Unmarshal(raw, &t) == nil && t.Bytes
+}
+
+// jsonObjectHasTrueExcept reports whether raw is a JSON object with a member that is true and not
+// one of skip.
+func jsonObjectHasTrueExcept(raw json.RawMessage, skip ...string) bool {
 	if len(raw) == 0 || bytes.TrimSpace(raw)[0] != '{' {
 		return false
 	}
@@ -320,8 +338,8 @@ func jsonObjectHasTrue(raw json.RawMessage) bool {
 	if json.Unmarshal(raw, &m) != nil {
 		return false
 	}
-	for _, v := range m {
-		if rawJSONTrue(v) {
+	for k, v := range m {
+		if rawJSONTrue(v) && !slices.Contains(skip, k) {
 			return true
 		}
 	}
@@ -369,7 +387,8 @@ func sanitizeHint(hint string) string {
 		return r
 	}, hint)
 	clean = untrustedTag.ReplaceAllStringFunc(clean, func(m string) string {
-		return "&lt;" + m[1:]
+		_, n := utf8.DecodeRuneInString(m)
+		return "&lt;" + m[n:]
 	})
 	return cutUTF8(clean, maxHintHeader)
 }
@@ -442,8 +461,11 @@ func renderHeader(r Result, ref string) string {
 			line += fmt.Sprintf(" (%d items in all; the shownItems and shownBytes inside are the tool's own cut, not what you see here)", r.UpstreamTotal)
 		}
 		line += "."
-		if r.Hint != "" {
-			line += " " + r.Hint
+		if h := strings.TrimSpace(r.Hint); h != "" {
+			if !strings.HasSuffix(h, ".") && !strings.HasSuffix(h, "!") && !strings.HasSuffix(h, "?") {
+				h += "."
+			}
+			line += " " + h
 		}
 		line += " Do not infer missing items, counts or absences."
 		lines = append(lines, line)
@@ -451,6 +473,10 @@ func renderHeader(r Result, ref string) string {
 	if r.Cut.Truncated {
 		c := r.Cut
 		counts := fmt.Sprintf("shown %d of %d bytes, %d of %d %s", c.ShownBytes, c.TotalBytes, c.ShownItems, c.TotalItems, c.Unit)
+		if c.Unit == "lines" && json.Valid([]byte(r.Full)) {
+			// The lines of an indented JSON text are its wrapper's, not the content's: no counts.
+			counts = fmt.Sprintf("shown %d of %d bytes of JSON text", c.ShownBytes, c.TotalBytes)
+		}
 		var line string
 		switch {
 		case ref == "":
@@ -480,14 +506,19 @@ func fieldOf(c resultcut.Result) string {
 }
 
 // untrustedTag matches the block's own tags, in any case, and the ways a device can space, case or
-// split one to slip past: whitespace, a NUL or a backslash between the "<" and the name, and a "/"
-// before it anywhere. Only the "<" is escaped, so the text stays readable.
-var untrustedTag = regexp.MustCompile(`(?i)<[\s\x00/\\]*untrusted`)
+// split one to slip past: after the "<" (or its fullwidth and small look-alikes) any C0 control,
+// DEL, NEL, Unicode separator or format character, "/" or backslash, and format characters between
+// the letters of the name. Only the opener is escaped, so the text stays readable.
+var untrustedTag = func() *regexp.Regexp {
+	const gap = "[\\s\\x00-\\x20\\x7f\\x{85}\\p{Z}\\p{Cf}/\\\\]*"
+	const name = "u\\p{Cf}*n\\p{Cf}*t\\p{Cf}*r\\p{Cf}*u\\p{Cf}*s\\p{Cf}*t\\p{Cf}*e\\p{Cf}*d"
+	return regexp.MustCompile("(?i)(?:<|\\x{FF1C}|\\x{FE64})" + gap + name)
+}()
 
 // Untrusted is text inside the block that says where it came from: source, and the sha256 of the
 // whole text the shown part belongs to. An <untrusted or </untrusted inside the text is escaped, in
-// any case and with a "/", a backslash, a NUL or white space between the bracket and the name, so
-// that a payload cannot close the block and pass for the platform's own words.
+// any case and with look-alike openers, separators, controls and format characters around the name
+// (see untrustedTag), so that a payload cannot close the block and pass for the platform's own words.
 func Untrusted(source string, whole []byte, shown string) string {
 	sum := sha256.Sum256(whole)
 	var b strings.Builder
@@ -497,7 +528,8 @@ func Untrusted(source string, whole []byte, shown string) string {
 	b.WriteString(hex.EncodeToString(sum[:]))
 	b.WriteString(`">` + "\n")
 	b.WriteString(untrustedTag.ReplaceAllStringFunc(shown, func(m string) string {
-		return "&lt;" + m[1:]
+		_, n := utf8.DecodeRuneInString(m)
+		return "&lt;" + m[n:]
 	}))
 	b.WriteString("\n</untrusted>")
 	return b.String()

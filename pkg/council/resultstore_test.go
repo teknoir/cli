@@ -2,6 +2,8 @@ package council
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -162,6 +164,12 @@ func TestReadResultPagesReassemble(t *testing.T) {
 			t.Fatalf("read_result at %d: %s", offset, page.Text)
 		}
 		hdr, pageText := pageBody(t, page.Text)
+		if i == 0 {
+			sum := sha256.Sum256([]byte(answer))
+			if !strings.Contains(page.Text, `sha256="`+hex.EncodeToString(sum[:])+`"`) {
+				t.Errorf("a page does not carry the sha256 of the whole answer: %q", page.Text[:min(len(page.Text), 200)])
+			}
+		}
 		var from, to, total, nextOffset int
 		line, err := fmt.Sscanf(hdr, "PAGE: bytes %d..%d of %d (ref r1); nextOffset %d", &from, &to, &total, &nextOffset)
 		if line == 3 {
@@ -316,5 +324,11 @@ func TestReadResultPage(t *testing.T) {
 	}
 	if n := strings.Count(res.Text, "sha256=\""); n != 1 {
 		t.Errorf("the page carries %d sha256 attributes", n)
+	}
+	// The attribute is the hash of the whole text, not of the page: that is how a page is recognised
+	// as part of the result it came from.
+	sum := sha256.Sum256([]byte(full))
+	if !strings.Contains(res.Text, `sha256="`+hex.EncodeToString(sum[:])+`"`) {
+		t.Errorf("the page does not carry the sha256 of the whole result: %q", res.Text[:min(len(res.Text), 200)])
 	}
 }

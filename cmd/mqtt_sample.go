@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -168,21 +169,30 @@ type mqttSampleWriter struct {
 }
 
 // newMqttSampleWriter opens --out, refusing a file that already holds something: the capture is
-// appended to nothing. It never truncates and never follows a symlink of the check's: the file is
-// opened as it is, and refused unless what was opened is a regular file of size 0, so that a path
-// swapped after the check cannot make tnctl write into something of its own.
+// appended to nothing. It never truncates and never follows a link. A new file is made with O_EXCL,
+// which refuses any symbolic link, dangling or not; an existing one is opened with O_NOFOLLOW (where
+// the system has it), and refused unless what was opened is a regular file of size 0 with one name,
+// so that a link planted at the path cannot make tnctl write into something of someone else's.
 func newMqttSampleWriter(out, errw io.Writer, f mqttSampleFlags) (*mqttSampleWriter, error) {
 	w := &mqttSampleWriter{out: out, errw: errw, json: f.json}
 	if f.out == "" {
 		return w, nil
 	}
-	file, err := os.OpenFile(f.out, os.O_WRONLY|os.O_CREATE, 0o600)
-	if err != nil {
+	file, err := os.OpenFile(f.out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		file, err = os.OpenFile(f.out, os.O_WRONLY|mqttNoFollow, 0o600)
+		if err != nil {
+			return nil, newErr(codeError, "%s exists and cannot be used (a symbolic link is refused): %v", f.out, err)
+		}
+	} else if err != nil {
 		return nil, newErr(codeError, "%v", err)
 	}
 	st, err := file.Stat()
 	if err == nil && !st.Mode().IsRegular() {
 		err = fmt.Errorf("%s is not a regular file", f.out)
+	}
+	if err == nil {
+		err = mqttSingleLink(st, f.out)
 	}
 	if err == nil && st.Size() > 0 {
 		err = fmt.Errorf("%s exists and is not empty: give a new file, or empty this one", f.out)

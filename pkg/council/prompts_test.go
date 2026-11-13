@@ -252,6 +252,15 @@ func TestReadSkill(t *testing.T) {
 		!strings.Contains(err.Error(), "is the end of the guide") || !strings.Contains(err.Error(), "there is no more") {
 		t.Errorf("offset len(body): %q, %q, %v", page, digest, err)
 	}
+	// An offset inside a character is an error: the page would start with a continuation byte.
+	for i := 0; i < len(body); i++ {
+		if !utf8.RuneStart(body[i]) {
+			if _, _, err := readSkill("teknoir-platform", i); err == nil || !strings.Contains(err.Error(), "inside a character") {
+				t.Errorf("offset %d is inside a character: %v", i, err)
+			}
+			break
+		}
+	}
 	// The last character's offset still reads: the page is that character.
 	if last := len(body) - 1; utf8.RuneStart(body[last]) {
 		if page, _, err := readSkill("teknoir-platform", last); err != nil || page != body[last:] {

@@ -206,10 +206,11 @@ read-only and all scoped to your identity:
 The three `inspect_*` tools never turn a Shell on; when it is off they fail with the platform's
 own message saying so (the result names no error code).
 `mqtt_sample` collects a few messages and stops, with a long payload cut;
-`mqtt_get_sample` returns them whole (spilling a large sample to a capture that `mqtt_read` pages
-through, or reads one JSON field of with `path`).
+`mqtt_get_sample` returns them whole (a sample whose payload text, base64 for a binary one, passes 12288
+bytes or whose answer does not fit is spilled to a capture that `mqtt_read` pages through, or reads one JSON
+field of with `path`; an index that leaves messages out of its list says `truncated`).
 
-These tools write nothing. Started as `tnctl mcp --council` (a person's own agent only), the server
+These tools write nothing to the platform; `mqtt_get_sample` keeps the samples it spills as `0600` files in its own capture directory, deleted after 30 minutes or when the session ends. Started as `tnctl mcp --council` (a person's own agent only), the server
 also has the `council_*` tools, which hand work to a TeknoirBot's council (skill `teknoir-council`).
 Every other write goes through `tnctl`, so that the TeknoirBot's permission rules and the platform's
 own checks see it. If the server is not registered, use the `tnctl` commands in the

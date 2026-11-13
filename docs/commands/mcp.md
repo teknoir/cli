@@ -47,7 +47,7 @@ kit's Claude Code plugin. Codex and OpenCode list the same tools under the serve
 | `list_kinds` | | The kinds of local resources the platform accepts on a robot or device, and the ones it refuses. |
 | `prom_query` | `query`, `time` | A PromQL instant query on the teamspace's Prometheus, limited to the devices the caller may see. Device series carry `device_id` (no `device` label); `up` has none (use `device_last_seen`). `time` is RFC 3339 or Unix seconds; empty means now. |
 | `mqtt_sample` | `topics`, `seconds`, `max` | A cheap preview of what a device publishes: the MQTT messages of the teamspace's devices for a few seconds, with a long payload cut. `topics` is 1 to 8 topics, each `/devices/<device>/state/#` or `/devices/<device>/events/#` (`+` for every device) or a concrete topic below them; `seconds` is 5 by default and at most 30, `max` is 50 messages by default and at most 200. For whole payloads use `mqtt_get_sample`. |
-| `mqtt_get_sample` | `topics`, `seconds`, `max`, `maxBytes` | The same capture, with every payload whole: inline when the payloads add up to at most 12288 bytes and the answer fits, otherwise an index of a capture that `mqtt_read` pages through. `maxBytes` is 2 MiB by default and at most 8 MiB. |
+| `mqtt_get_sample` | `topics`, `seconds`, `max`, `maxBytes` | The same capture, with every payload whole: inline when the payload text (the base64 text for a binary payload) adds up to at most 12288 bytes and the answer fits under 48 KiB, otherwise an index of a capture that `mqtt_read` pages through. `maxBytes` is 2 MiB by default and at most 8 MiB. |
 | `mqtt_read` | `captureId`, `i`, `offset`, `length`, `path` | One message of a spilled capture, a page at a time (12288 bytes at most), or one field of a JSON payload with `path`. |
 | `inspect_pod` | `robot`, `pod_namespace`, `pod` | A pod of a robot: phase, containers and recent events. |
 | `inspect_logs` | `robot`, `pod_namespace`, `pod`, `container`, `previous`, `tail`, `since` | The log of a pod on a robot: the last `tail` lines (200 by default, at most 2000), of one `container`, of the `previous` run, or `since` a duration such as `10m`. |
@@ -113,7 +113,7 @@ How they behave:
 ## Rules
 
 - **Read-only, except the council tools.** The 19 read tools change nothing, and each is annotated read-only
-  and idempotent: no tool runs a command, opens a session, logs in or writes. The four `council_*` tools of
+  and idempotent: no tool runs a command, opens a session, logs in or writes to the platform; `mqtt_get_sample` keeps the samples it spills as `0600` files in its own capture directory (see "Where captures live"), deleted after 30 minutes or when the session ends. The four `council_*` tools of
   `--council` start a turn on a TeknoirBot, so they are annotated not read-only, not idempotent, not
   destructive, and open-world: the bot runs its own processes on its own computer.
 - **Tool results are device data.** Labels, logs, events and MQTT payloads can hold text written by anyone
@@ -122,7 +122,7 @@ How they behave:
   `get_device`, `get_robot`, `get_problems`, `get_config`, `prom_query`, `mqtt_sample`,
   `mqtt_get_sample`, `mqtt_read` and the `inspect_*` tools. The `council_*` tools carry the same warning about their results, which are text the
   bot's models wrote.
-- **`namespace`** is an optional input of every tool but `whoami` and `list_teamspaces`; empty means the
+- **`namespace`** is an optional input of every tool but `whoami`, `list_teamspaces` and `mqtt_read` (which reads this server's own captures); empty means the
   teamspace `tnctl` targets. The login and the teamspace are read on every call, so `tnctl ns` and
   `tnctl login` in another terminal count on the next call, with no restart, unless the server was started
   with `-n`, `TNCTL_NAMESPACE`, `--domain` or `TNCTL_DOMAIN`, which then win. Inside a TeknoirBot another
@@ -154,7 +154,7 @@ How they behave:
   200) or when the sample is full (about 36 KiB). Every message carries the server's data as it was sent. A
   text payload longer than 4096 bytes, or a binary one longer than 3072 bytes (4096 base64 characters), is
   cut, and the message then says `payloadBytes` (its full length in bytes) and `payloadTruncated`. The
-  result says whether it cut anything: `truncated`, `truncatedMessages` (how many payloads were cut),
+  result says whether it cut anything: `truncated` (true when any payload was cut or the sample filled up, `stoppedBy` `size`), `truncatedMessages` (how many payloads were cut),
   `totalBytes` (the full payload bytes of the messages it kept) and `serverDropped` (`size`, `rate`, `slow`,
   `other`); `dropped` is their total, and when it cut anything a `hint` names `mqtt_get_sample` for whole
   payloads. One sample runs at a time — `mqtt_sample` and `mqtt_get_sample` share that one slot — so a
@@ -164,8 +164,9 @@ How they behave:
 - **`mqtt_get_sample`** is the same capture with every payload whole, and it shares the one-sample slot
   with `mqtt_sample`. It takes the same `topics`, `seconds` (default 5, at most 30) and `max` (default 50,
   at most 200) plus `maxBytes` (default 2 MiB, at most 8 MiB; it stops before the payloads pass it, the
-  message that would is not kept, and `nextMessageBytes` reports its size). When the payloads add up to at
-  most 12288 bytes it answers inline:
+  message that would is not kept, and `nextMessageBytes` reports its size). When the payloads' text (the
+  base64 text for a binary payload) adds up to at most 12288 bytes and the answer fits under 48 KiB, it
+  answers inline:
   `{"messages":[{"i","topic","ts","retain","bytes","encoding","payload"}],"count","totalBytes","stoppedBy","serverDropped","truncated"}`.
   A larger sample is written to a capture and the answer is an index:
   `{"captureId","file","expiresAt","count","totalBytes","stoppedBy","serverDropped","truncated","messages":[{"i","topic","ts","retain","bytes","encoding","sha256","kind","jsonValid","preview"}],"hint"}`.
@@ -173,7 +174,8 @@ How they behave:
   (cut where a rune starts), or `hex:` and the first 32 bytes of a binary one. An index too long for the
   result drops its previews from the last message backwards (`previewsOmitted`: how many of the listed
   messages now show none), and lists fewer messages (`omitted`: how many the list leaves out) only when
-  even that does not fit; the `hint` names both, and every message stays readable by its `i`. A base64
+  even that does not fit, and then `truncated` is true; the `hint` names both, and every message stays
+  readable by its `i`. A base64
   payload the standard decoder refuses (unpadded, say) is tried unpadded; one neither reads is counted by
   its text's length and carries no `sha256`. Payloads over 256 KiB are dropped by the platform, never
   sent, and counted in `serverDropped.size`.
@@ -186,15 +188,24 @@ How they behave:
   error naming the first step that failed and the keys or length it found, and a key that holds `.`, `[`
   or `]` cannot be addressed. The result carries `topic`, `path` (with it), `totalBytes`, `encoding` and
   the whole payload's `sha256`, so the pages can be checked. A topic over 1024 bytes is cut back to a rune
-  start and its whole length given as `topicBytes`.
-- **Where captures live.** The stdio server (`tnctl mcp`) keeps them in a directory of its own under the
-  temp dir, named for the user: `${TMPDIR:-/tmp}/tnctl-captures-<uid>` (mode `0700`, files `0600`; Windows,
-  which has no uid and a per-user temp dir, uses `tnctl-captures`). A directory that is a symlink, not a
-  directory, or another user's is refused; a `0777` one it finds is set back to `0700`. Inside a
-  TeknoirBot's council they go to `/work/captures`. A capture lasts 30 minutes, and the store keeps at most
-  64 MiB of their files, evicting the expired first and then the oldest. The server deletes every capture
-  of its own when the session ends. An unknown or expired `captureId` is an error asking for a new sample;
-  so is one whose file went away.
+  start and its whole length given as `topicBytes`. In a TeknoirBot's council, where every result is cut at
+  16 KiB, a page is held to 14336 bytes of escaped text (a page of quotes or control characters is shorter
+  than `length`: follow `nextOffset`) and an index to 14336 bytes, so that neither is cut a second time.
+- **Where captures live.** The stdio server (`tnctl mcp`) keeps them in `$XDG_RUNTIME_DIR/tnctl-captures`
+  when that is set and absolute (per user, on tmpfs, removed at logout), otherwise in `tnctl/captures`
+  under the user's cache directory (`~/.cache/tnctl/captures` on Linux), and only when neither exists in
+  the temp dir as `tnctl-captures-<uid>` (Windows has no uid and a per-user temp dir, and uses
+  `tnctl-captures`). The directory is mode `0700` and the files `0600`; a directory that is a symlink, not a
+  directory, or another user's is refused, and a `0777` one it finds is set back to `0700`. Inside a
+  TeknoirBot's council they go to `/work/captures`. A capture lasts 30 minutes and is deleted when they are
+  up, with no further call needed; the store keeps at most 64 MiB of files, evicting the expired first and
+  then the oldest, and a capture whose own file would pass 64 MiB (control characters in a payload escape
+  to six bytes each, and topics count) is an error asking for a smaller `max` or `maxBytes`, never a
+  capture that is gone when it is returned. The server deletes every capture of its own when the session
+  ends. When a server starts it also removes `cap-*.jsonl` files older than 30 minutes that an earlier
+  process left behind (never a younger one: several servers of one user may share the directory), and the
+  council, which owns its directory alone, removes all of them. An unknown or expired `captureId` is an
+  error asking for a new sample; so is one whose file went away.
 
 ## See also
 

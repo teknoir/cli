@@ -141,12 +141,12 @@ preview**: a payload over 4096 bytes (a binary one over 3072) comes back cut, ma
 
 `mqtt_get_sample` takes the same `topics`, `seconds` (default 5, at most 30) and `max` (default 50,
 at most 200) plus `maxBytes` (default 2 MiB, at most 8 MiB) and returns every payload **whole**. A
-sample whose payloads add up to at most 12288 bytes and whose answer fits comes back inline;
+sample whose payload text (base64 text for a binary payload) adds up to at most 12288 bytes and whose answer fits under 48 KiB comes back inline;
 otherwise it is written to a capture that lasts 30 minutes, and the answer is an index: one entry per
 message with `kind` (`json`, `text`, `jpeg`, `png`, `gzip`, `binary`), `sha256`, `bytes` and a
 `preview`, plus a `captureId`. An index too long for the answer drops previews from its last message
-backwards (`previewsOmitted`) and then leaves messages out of its list (`omitted`); every message is
-still readable by its `i`.
+backwards (`previewsOmitted`) and then leaves messages out of its list (`omitted`, and `truncated` is
+true); every message is still readable by its `i`.
 
 Read the index first and take only what the task needs: a 256 KiB payload is about 22 pages.
 

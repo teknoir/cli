@@ -174,13 +174,13 @@ func TestMCPGetSampleOmitsPreviews(t *testing.T) {
 	store := newCaptureStore(t.TempDir())
 	c := &mcpCapturedSample{}
 	for i := 0; i < 200; i++ {
-		line, data := sampleMsgOf(i, &api.StreamMessage{
+		line, _ := sampleMsgOf(i, &api.StreamMessage{
 			Topic: fmt.Sprintf("/devices/d1/state/x%d", i), Payload: strings.Repeat("p", 512),
 			TS: "2026-11-08T10:00:00.000Z"})
 		if len(line.TS) != 24 {
 			t.Fatalf("the timestamp is %d characters", len(line.TS))
 		}
-		c.messages = append(c.messages, mcpCapturedMessage{line: line, data: data, kind: "text"})
+		c.messages = append(c.messages, mcpCapturedMessage{line: line, kind: "text"})
 	}
 	res, err := c.spill(store)
 	if err != nil {
@@ -188,6 +188,12 @@ func TestMCPGetSampleOmitsPreviews(t *testing.T) {
 	}
 	if res.PreviewsOmitted == 0 {
 		t.Errorf("%d previews omitted: the index did not fit", res.PreviewsOmitted)
+	}
+	if res.PreviewsOmitted > len(res.Messages) {
+		t.Errorf("%d previews omitted, but only %d messages are listed", res.PreviewsOmitted, len(res.Messages))
+	}
+	if res.Truncated != (res.Omitted > 0) {
+		t.Errorf("truncated %v with %d omitted", res.Truncated, res.Omitted)
 	}
 	// The previews paid for the room first: every message still listed shows none.
 	for i, m := range res.Messages {
@@ -419,8 +425,8 @@ func TestMCPGetSampleIndexStaysBounded(t *testing.T) {
 		t.Fatalf("the topic is %d characters", len(topic))
 	}
 	for i := 0; i < 200; i++ {
-		line, data := sampleMsgOf(i, &api.StreamMessage{Topic: topic, Payload: strings.Repeat("p", 512), TS: "t"})
-		c.messages = append(c.messages, mcpCapturedMessage{line: line, data: data, kind: "text"})
+		line, _ := sampleMsgOf(i, &api.StreamMessage{Topic: topic, Payload: strings.Repeat("p", 512), TS: "t"})
+		c.messages = append(c.messages, mcpCapturedMessage{line: line, kind: "text"})
 	}
 	store := newCaptureStore(t.TempDir())
 	res, err := c.spill(store)
@@ -439,6 +445,9 @@ func TestMCPGetSampleIndexStaysBounded(t *testing.T) {
 	}
 	if len(res.Messages)+res.Omitted != 200 {
 		t.Errorf("%d listed and %d omitted, want 200 together", len(res.Messages), res.Omitted)
+	}
+	if res.Truncated != (res.Omitted > 0) {
+		t.Errorf("truncated %v with %d omitted", res.Truncated, res.Omitted)
 	}
 	// The index the agent sees, with mcpResult's indentation, still fits the result cap whole.
 	mcpAssertWhole(t, mcpText(t, mcpResult(marshalRaw(res))), "captureId", "messages", "hint")
@@ -959,21 +968,6 @@ func TestCaptureStoreFailedWrite(t *testing.T) {
 		t.Errorf("%d files left behind by the failed flush: %v", len(entries), entries)
 	}
 	mcpCaptureOpenFile = oldOpen
-
-	// A write error inside lines counts too.
-	_, _, err = store.writeCapture(func(w *bufio.Writer) (int, int, error) {
-		_, werr := w.WriteString(strings.Repeat("x", 1<<16))
-		return 0, 0, werr
-	})
-	if err != nil {
-		t.Fatalf("%v: a buffered write that fits should not fail here", err)
-	}
-	store.mu.Lock()
-	n := len(store.caps)
-	store.mu.Unlock()
-	if n != 1 {
-		t.Errorf("%d captures", n)
-	}
 }
 
 func TestCaptureStoreGetDropsExpired(t *testing.T) {
@@ -1521,22 +1515,5 @@ func TestMCPPathBadListIndex(t *testing.T) {
 		if !res.IsError || !strings.Contains(text, "is not a list index") || !strings.Contains(text, "use a whole number from 0, like items[0]") {
 			t.Errorf("%s: %+v %q", path, res.IsError, text)
 		}
-	}
-}
-
-// A base64 payload the standard decoder refuses is tried unpadded, and one neither reads is
-// counted by its text and carries no hash: never a zero-filled buffer described as its bytes.
-func TestMqttSampleUnpaddedBase64(t *testing.T) {
-	line, data := sampleMsgOf(0, &api.StreamMessage{Topic: "/devices/d1/state/x", PayloadBase64: "AAE"})
-	if line.Encoding != "base64" || line.Bytes != 2 || !bytes.Equal(data, []byte{0x00, 0x01}) {
-		t.Errorf("line %+v, data %x; want two bytes and 0001", line, data)
-	}
-	if got := sha256Hex(data); got != sha256Hex([]byte{0x00, 0x01}) {
-		t.Errorf("the hash is %s", got)
-	}
-	// Neither decoder reads it: no bytes, the text's length, and no hash.
-	line, data = sampleMsgOf(0, &api.StreamMessage{Topic: "/devices/d1/state/x", PayloadBase64: "!!!"})
-	if data != nil || line.Bytes != 3 || line.SHA256 != "" {
-		t.Errorf("line %+v, data %x; want no bytes and 3 characters", line, data)
 	}
 }

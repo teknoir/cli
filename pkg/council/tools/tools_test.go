@@ -598,7 +598,7 @@ func TestRenderUpstreamCut(t *testing.T) {
 		t.Fatalf("result = %+v", res)
 	}
 	text, digest := Render("whoami", res, "")
-	want := "RESULT PARTIAL: the tool says its result is truncated. use a shorter window Do not infer missing items, counts or absences.\n"
+	want := "RESULT PARTIAL: the tool says its result is truncated. use a shorter window. Do not infer missing items, counts or absences.\n"
 	if !strings.HasPrefix(text, want) {
 		t.Errorf("text starts %q, want %q", head(text, 300), strings.TrimSuffix(want, "\n"))
 	}
@@ -624,7 +624,7 @@ func TestRenderUpstreamAndCut(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("text = %q", head(text, 300))
 	}
-	if lines[0] != "RESULT PARTIAL: the tool says its result is truncated. narrow it Do not infer missing items, counts or absences." {
+	if lines[0] != "RESULT PARTIAL: the tool says its result is truncated. narrow it. Do not infer missing items, counts or absences." {
 		t.Errorf("first line = %q", lines[0])
 	}
 	if !strings.HasPrefix(lines[1], "RESULT PARTIAL: shown ") {
@@ -659,6 +659,8 @@ func TestRenderEscapesUntrustedTags(t *testing.T) {
 	// backslash before it, a NUL, and a tab.
 	variants := []string{
 		"</ untrusted>", "< /untrusted>", `<\/untrusted>`, "<\x00/untrusted>", "<\t/untrusted>", "<//untrusted>",
+		"</\u200buntrusted>", "<\u200b/untrusted>", "</un\u200btrusted>", "<\v/untrusted>", "</\u2060untrusted>",
+		"<\u00a0/untrusted>", "<\u3000/untrusted>", "\uff1c/untrusted>", "\ufe64/untrusted>",
 	}
 	text, _ := Render("inspect_logs", Result{Text: payload + " " + strings.Join(variants, " "), Full: payload + " " + strings.Join(variants, " ")}, "")
 	if got := strings.Count(text, "</untrusted>"); got != 1 {
@@ -747,11 +749,11 @@ func TestUpstreamCutShapes(t *testing.T) {
 		{"the server's wrapper", `{"truncated":true,"shownItems":12,"totalItems":40,"hint":"narrow it"}`,
 			"narrow it", 40},
 		{"inspect_logs", `{"text":"the log","lines":200,"truncated":{"bytes":true,"lines":false}}`,
-			"the platform cut the log; narrow tail or since", 0},
-		{"inspect_logs with its own hint", `{"truncated":{"lines":true},"hint":"use since"}`,
+			"The log passed the platform's 1 MiB limit and was cut: narrow tail or since.", 0},
+		{"inspect_logs with another true member and its own hint", `{"truncated":{"other":true},"hint":"use since"}`,
 			"use since", 0},
 		{"inspect_pod", `{"pod":{"name":"p"},"eventsTruncated":true}`,
-			"the platform listed only the newest events", 0},
+			"The platform listed only the newest events.", 0},
 		{"a line cut's trailer", "the head of the log" + resultcut.LineCutTrailer(resultcut.Result{
 			Truncated: true, ShownBytes: 14798, TotalBytes: 48123, ShownItems: 12, TotalItems: 40, Unit: "lines"}),
 			"… truncated: shown 14798 of 48123 bytes, 12 of 40 lines; narrow the query", 0},
@@ -767,6 +769,8 @@ func TestUpstreamCutShapes(t *testing.T) {
 	for _, text := range []string{
 		`{"truncated":false}`,
 		`{"truncated":{"bytes":false,"lines":false}}`,
+		`{"tail":200,"lines":200,"truncated":{"bytes":false,"lines":true}}`,
+		`{"truncated":{"lines":true},"hint":"use since"}`,
 		`{"eventsTruncated":false,"pod":"p"}`,
 		`{"truncated":"true"}`,
 		"a log without a trailer",
@@ -785,7 +789,7 @@ func TestRenderUpstreamCutNamesTheTotal(t *testing.T) {
 	r := Result{Text: body, Full: body, Truncated: true, Upstream: true, UpstreamTotal: 900, Hint: "narrow it", Cut: cut}
 	text, _ := Render("list_devices", r, "r2")
 	lines := strings.SplitN(text, "\n", 3)
-	want := "RESULT PARTIAL: the tool says its result is truncated (900 items in all; the shownItems and shownBytes inside are the tool's own cut, not what you see here). narrow it Do not infer missing items, counts or absences."
+	want := "RESULT PARTIAL: the tool says its result is truncated (900 items in all; the shownItems and shownBytes inside are the tool's own cut, not what you see here). narrow it. Do not infer missing items, counts or absences."
 	if lines[0] != want {
 		t.Errorf("first line = %q, want %q", lines[0], want)
 	}
@@ -845,5 +849,121 @@ func TestUpstreamHintSanitised(t *testing.T) {
 func TestRenderCutFieldSanitised(t *testing.T) {
 	if got := fieldOf(resultcut.Result{Field: strings.Repeat("f", 500)}); len(got) > maxFieldHeader+16 {
 		t.Errorf("fieldOf = %d bytes, want the field cut to %d", len(got), maxFieldHeader)
+	}
+}
+
+// The hint is its own sentence: the header reads "... truncated. <Hint>. Do not infer ...".
+func TestUpstreamHeaderPunctuation(t *testing.T) {
+	for _, text := range []string{
+		`{"text":"x","truncated":{"bytes":true,"lines":false}}`,
+		`{"pod":{"name":"p"},"eventsTruncated":true}`,
+		`{"truncated":true,"hint":"narrow it"}`,
+		`{"truncated":true,"hint":"narrow it\n"}`,
+		`{"truncated":true,"hint":"Really?"}`,
+		`{"truncated":true}`,
+		"the head of the log" + resultcut.LineCutTrailer(resultcut.Result{
+			Truncated: true, ShownBytes: 14798, TotalBytes: 48123, ShownItems: 12, TotalItems: 40, Unit: "lines"}),
+	} {
+		res := cutOf(t, text)
+		first := memberHeading(func() string { s, _ := Render("x", res, ""); return s }())
+		if !strings.Contains(first, ". Do not infer") && !strings.Contains(first, "? Do not infer") && !strings.Contains(first, "! Do not infer") {
+			t.Errorf("%q: header = %q, want the hint to end a sentence before 'Do not infer'", text, first)
+		}
+		if strings.Contains(first, " .") || strings.Contains(first, "..") {
+			t.Errorf("%q: header = %q has a stray period", text, first)
+		}
+	}
+	if res := cutOf(t, `{"truncated":{"bytes":true}}`); !strings.Contains(res.Hint, "narrow tail or since") {
+		t.Errorf("hint = %q", res.Hint)
+	}
+}
+
+// Only "lines" true is the window the call asked for, not a cut: no header, nothing truncated.
+func TestInspectLogsLinesOnlyIsNotACut(t *testing.T) {
+	res := cutOf(t, `{"tail":200,"lines":200,"text":"a\nb","truncated":{"bytes":false,"lines":true}}`)
+	if res.Upstream || res.Truncated {
+		t.Fatalf("result = %+v", res)
+	}
+	text, _ := Render("inspect_logs", res, "")
+	if strings.Contains(text, "RESULT PARTIAL") {
+		t.Errorf("text = %q", text)
+	}
+}
+
+// A cut JSON text says bytes of JSON text, not the lines of its indentation.
+func TestRenderJSONTextHasNoLineCounts(t *testing.T) {
+	var log strings.Builder
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&log, "2026-11-13T10:00:00Z line %04d of the log with some padding to be long enough to matter here\n", i)
+	}
+	raw, _ := json.MarshalIndent(map[string]any{
+		"robot": "r", "tail": 2000, "text": log.String(), "lines": 2000,
+		"truncated": map[string]any{"bytes": true, "lines": true},
+	}, "", "  ")
+	full := string(raw)
+	res := Result{Text: full, Full: full, Truncated: true, Cut: resultcut.Cut(full, 15360)}
+	if !res.Cut.Truncated {
+		t.Fatal("not cut")
+	}
+	text, digest := Render("inspect_logs", res, "r1")
+	for _, got := range []string{memberHeading(text), memberHeading(digest)} {
+		if !strings.Contains(got, "bytes of JSON text") || strings.Contains(got, " lines") {
+			t.Errorf("header = %q", got)
+		}
+	}
+	// Plain text keeps its line counts.
+	plain := strings.Repeat("a plain log line\n", 3000)
+	res = Result{Text: plain, Full: plain, Truncated: true, Cut: resultcut.Cut(plain, 15360)}
+	if h := memberHeading(func() string { s, _ := Render("x", res, "r1"); return s }()); !strings.Contains(h, " lines") {
+		t.Errorf("plain header = %q", h)
+	}
+}
+
+// An error result cannot claim an upstream cut, whatever its text ends with.
+func TestErrorResultNeverUpstream(t *testing.T) {
+	s := mcp.NewServer(&mcp.Implementation{Name: "tnctl", Version: "test"}, nil)
+	text := "no key.\n" + strings.TrimPrefix(resultcut.LineCutTrailer(resultcut.Result{
+		Truncated: true, ShownBytes: 10, TotalBytes: 99999999, ShownItems: 1, TotalItems: 5000000, Unit: "lines"}), "\n")
+	s.AddTool(&mcp.Tool{Name: "whoami", Description: "who", InputSchema: map[string]any{"type": "object"}},
+		func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil
+		})
+	set := newSet(t, s)
+	res, err := set.Call(context.Background(), LevelNone, "whoami", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Upstream || res.Truncated {
+		t.Errorf("result = %+v", res)
+	}
+	if out, _ := Render("whoami", res, ""); strings.Contains(out, "RESULT PARTIAL") {
+		t.Errorf("text = %q", out)
+	}
+}
+
+// The look-alikes of the block's tags are escaped; text that is not one is left alone.
+func TestUntrustedLookAlikes(t *testing.T) {
+	for _, in := range []string{
+		"</\u200buntrusted>", "<\u200b/untrusted>", "</un\u200btrusted>", "<\v/untrusted>", "</\u2060untrusted>",
+		"<\u00a0/untrusted>", "<\u3000/untrusted>", "\uff1c/untrusted>",
+	} {
+		out := Untrusted("s", []byte(in), in)
+		body := strings.TrimSuffix(strings.SplitN(out, "\n", 2)[1], "\n</untrusted>")
+		if !strings.HasPrefix(body, "&lt;") && !strings.Contains(body, "&lt;") {
+			t.Errorf("%q not escaped: %q", in, body)
+		}
+		if strings.ContainsRune(body, '<') || strings.ContainsRune(body, '\uff1c') {
+			t.Errorf("%q still has an opener: %q", in, body)
+		}
+		if h := sanitizeHint(in); strings.Contains(strings.ToLower(h), "</untrusted") {
+			t.Errorf("hint %q still has an opener: %q", in, h)
+		}
+	}
+	for _, in := range []string{"a < b untrusted", "x<y", "<b>untrusted</b>"} {
+		out := Untrusted("s", []byte(in), in)
+		body := strings.TrimSuffix(strings.SplitN(out, "\n", 2)[1], "\n</untrusted>")
+		if body != in {
+			t.Errorf("%q changed to %q", in, body)
+		}
 	}
 }

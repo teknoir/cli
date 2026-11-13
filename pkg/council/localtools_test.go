@@ -358,7 +358,7 @@ func TestNoCutMarker(t *testing.T) {
 		readSkillPageInTest(t),
 		mustRender(t),
 	} {
-		if strings.Contains(text, "[cut]\"") {
+		if strings.Contains(text, "[cut]") {
 			t.Errorf("a result still carries [cut]: %q", cutUTF8(text, 200, "…"))
 		}
 	}
@@ -383,7 +383,7 @@ func TestNoCutMarker(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(data), `"[cut]"`) {
+		if strings.Contains(string(data), "[cut]\"") {
 			t.Errorf("%s still writes the old [cut] marker", name)
 		}
 	}

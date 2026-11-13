@@ -41,9 +41,9 @@ const (
 	// to the capture store instead.
 	mcpInlineMax = 12288
 
-	// mcpIndexMax caps a spilled sample's answer. 200 messages with 8 maximum-length topics and a
-	// 512-byte payload each fit below it; when the previews would pass it, they are dropped from the
-	// last message backwards.
+	// mcpIndexMax caps a spilled sample's answer. When the previews would pass it, they are dropped
+	// from the last message backwards; when even preview-less entries do not fit, the list is shortened
+	// (omitted says how many messages it leaves out) and every message stays readable by its i.
 	mcpIndexMax = 40960
 
 	// mcpPreviewMax and mcpPreviewBudget bound the previews of one index.
@@ -52,10 +52,30 @@ const (
 )
 
 // mcpGetSampleDescription is what the tool tells the agent.
-const mcpGetSampleDescription = "Listen to the MQTT messages of the teamspace's devices for a few seconds and return them whole: each payload as the stream sent it, unlike mqtt_sample, which cuts a long one. A sample whose payloads add up to at most 12288 bytes and whose answer fits comes back inline; otherwise it is written to a capture that lasts 30 minutes and the result is an index (kind, sha256, a preview per message), to read with mqtt_read by index, offset and length, or one JSON field with path. An index too long for the answer drops previews from its last message backwards (previewsOmitted: how many listed messages now show none) and then leaves messages out of its list (omitted: how many); every message is still readable by its i. Payloads over 256 KiB are dropped by the platform and counted in serverDropped.size. mqtt_sample is the cheaper preview when whole payloads are not needed. It stops at max messages, after seconds, when the stream ends, or when the next message would pass maxBytes; stoppedBy says which. One sample runs at a time: put every topic (up to 8) in one call instead of calling it in parallel. " + mcpUntrustedNote
+const mcpGetSampleDescription = "Listen to the MQTT messages of the teamspace's devices for a few seconds and return them whole: each payload as the stream sent it, unlike mqtt_sample, which cuts a long one. A sample whose payload text (base64 text for a binary payload) adds up to at most 12288 bytes and whose answer fits under 48 KiB comes back inline; otherwise it is written to a capture that lasts 30 minutes and the result is an index (kind, sha256, a preview per message), to read with mqtt_read by index, offset and length, or one JSON field with path. An index too long for the answer drops previews from its last message backwards (previewsOmitted: how many listed messages now show none) and then leaves messages out of its list (omitted: how many, and then truncated is true); every message is still readable by its i. Payloads over 256 KiB are dropped by the platform and counted in serverDropped.size. mqtt_sample is the cheaper preview when whole payloads are not needed. It stops at max messages, after seconds, when the stream ends, or when the next message would pass maxBytes; stoppedBy says which. One sample runs at a time: put every topic (up to 8) in one call instead of calling it in parallel. " + mcpUntrustedNote
 
 // mcpReadDescription is what mqtt_read tells the agent.
 const mcpReadDescription = "Read one message of a capture mqtt_get_sample spilled: the payload's text, or its base64 text, from offset for at most length bytes (12288 at most, about 22 reads of a 256 KiB payload), with nextOffset for the next page; or, with path, one field of a JSON payload such as detections[0].label, marshalled compactly and paged the same way. A capture lasts 30 minutes; after that, take a new sample. " + mcpUntrustedNote
+
+// mcpReadDescriptionFor is mqtt_read's description for a server whose pages are held to pageEscaped
+// bytes of escaped text: when that is smaller than the default, it says so, so that the agent expects
+// a page of quotes or control characters to be shorter than length.
+func mcpReadDescriptionFor(pageEscaped int) string {
+	if pageEscaped >= mcpPageEscapedMax {
+		return mcpReadDescription
+	}
+	return strings.Replace(mcpReadDescription, "(12288 at most, about 22 reads of a 256 KiB payload)",
+		fmt.Sprintf("(12288 at most, and a page is cut earlier where its text, JSON-escaped, would pass %d bytes: use nextOffset)", pageEscaped), 1)
+}
+
+// mcpGetSampleHintFor is the hint of a server whose pages are held to pageEscaped bytes of escaped
+// text.
+func mcpGetSampleHintFor(pageEscaped int) string {
+	if pageEscaped >= mcpPageEscapedMax {
+		return mcpGetSampleHint
+	}
+	return strings.Replace(mcpGetSampleHint, "length up to 12288)", fmt.Sprintf("length up to 12288; a page stops where its escaped text would pass %d bytes)", pageEscaped), 1)
+}
 
 // mcpGetSampleHint is what a spilled sample tells the agent to do next.
 const mcpGetSampleHint = "Each payload is whole in the capture. Read one with mqtt_read (captureId, i, offset, length up to 12288), or one field of a JSON payload with path, for example path=detections[0].label. The capture lasts 30 minutes."
@@ -135,7 +155,7 @@ type mcpInlineResult struct {
 
 // mcpGetSampleTool is the mqtt_get_sample handler. It shares the server's sample slot, and therefore
 // its one open stream, with mqtt_sample.
-func mcpGetSampleTool(e *cliEnv, slot *mcpSampleSlot, captures *mcpCaptureStore) func(context.Context, *mcp.CallToolRequest, mcpGetSampleIn) (*mcp.CallToolResult, any, error) {
+func mcpGetSampleTool(e *cliEnv, slot *mcpSampleSlot, captures *mcpCaptureStore, sz mcpSizes) func(context.Context, *mcp.CallToolRequest, mcpGetSampleIn) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in mcpGetSampleIn) (*mcp.CallToolResult, any, error) {
 		if err := api.ValidateStreamTopics(in.Topics); err != nil {
 			return nil, nil, err
@@ -186,7 +206,7 @@ func mcpGetSampleTool(e *cliEnv, slot *mcpSampleSlot, captures *mcpCaptureStore)
 			}
 			return mcpResult(raw), nil, nil
 		}
-		res, err := c.spill(captures)
+		res, err := c.spillSized(captures, sz)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -205,13 +225,32 @@ type mcpSampleRequest struct {
 	maxBytes     int
 }
 
+// mcpSizes are the limits that depend on who reads the answer: how much escaped text one mqtt_read
+// page may take and how long a spilled index may be. The zero value is the stdio server's.
+type mcpSizes struct {
+	pageEscaped int
+	indexMax    int
+}
+
+// norm fills the zero fields with the defaults.
+func (z mcpSizes) norm() mcpSizes {
+	if z.pageEscaped <= 0 {
+		z.pageEscaped = mcpPageEscapedMax
+	}
+	if z.indexMax <= 0 {
+		z.indexMax = mcpIndexMax
+	}
+	return z
+}
+
 // mcpCapturedMessage is one message mqtt_get_sample kept, whole. line.Payload is what a page reads;
-// data is the payload's decoded bytes, which its size, its hash and its kind are taken from.
+// preview is the first 32 decoded bytes of a binary payload (nil for text), all a preview needs: the
+// size, the hash and the kind were taken from the whole bytes when the message arrived.
 type mcpCapturedMessage struct {
-	line   sampleMsg
-	data   []byte
-	kind   string
-	jsonOK bool
+	line    sampleMsg
+	preview []byte
+	kind    string
+	jsonOK  bool
 }
 
 // mcpCapturedSample is what mqtt_get_sample saw: the messages and why it stopped.
@@ -224,7 +263,8 @@ type mcpCapturedSample struct {
 
 // mcpCollectSample is one whole-message sample: it keeps every message as it arrives, up to max
 // messages or maxBytes of payloads (the message that would pass the limit is not kept), and reports
-// what the platform dropped. Memory is bounded by maxBytes plus the one message past it.
+// what the platform dropped. Memory is bounded by the payloads' encoded text (maxBytes of payload, a
+// third more for base64) plus the topics, and the one message past the limit.
 func mcpCollectSample(ctx context.Context, fl *api.Fleet, req mcpSampleRequest) (*mcpCapturedSample, error) {
 	c := &mcpCapturedSample{messages: []mcpCapturedMessage{}}
 	payloadBytes := 0
@@ -240,9 +280,12 @@ func mcpCollectSample(ctx context.Context, fl *api.Fleet, req mcpSampleRequest) 
 		if payloadBytes+line.Bytes > req.maxBytes {
 			return "size", line.Bytes, nil
 		}
-		c.messages = append(c.messages, mcpCapturedMessage{
-			line: line, data: data, kind: mcpPayloadKind(line.Encoding, data), jsonOK: mcpJSONPayload(line.Encoding, data),
-		})
+		msg := mcpCapturedMessage{line: line, kind: mcpPayloadKind(line.Encoding, data), jsonOK: mcpJSONPayload(line.Encoding, data)}
+		if line.Encoding != "utf8" {
+			// Only the first bytes a preview shows are kept, as a copy: the decoded array is not.
+			msg.preview = append([]byte(nil), data[:min(32, len(data))]...)
+		}
+		c.messages = append(c.messages, msg)
 		payloadBytes += line.Bytes
 		if len(c.messages) >= req.max {
 			return "max", 0, nil
@@ -290,9 +333,16 @@ func (c *mcpCapturedSample) inline() mcpInlineResult {
 	return res
 }
 
-// spill writes the sample to the capture store and returns its index. The previews are dropped from
-// the last message backwards until the index fits mcpIndexMax.
+// spill writes the sample to the capture store and returns its index, at the default sizes.
 func (c *mcpCapturedSample) spill(captures *mcpCaptureStore) (*mcpGetSampleIndex, error) {
+	return c.spillSized(captures, mcpSizes{})
+}
+
+// spillSized writes the sample to the capture store and returns its index. The previews are dropped
+// from the last message backwards until the index fits sz.indexMax; then messages are left out of
+// its list, last first, which makes it truncated.
+func (c *mcpCapturedSample) spillSized(captures *mcpCaptureStore, sz mcpSizes) (*mcpGetSampleIndex, error) {
+	sz = sz.norm()
 	id, entry, err := captures.writeCapture(func(w *bufio.Writer) (int, int, error) {
 		for _, m := range c.messages {
 			b, err := mcpMarshal(m.line)
@@ -312,7 +362,7 @@ func (c *mcpCapturedSample) spill(captures *mcpCaptureStore) (*mcpGetSampleIndex
 	res := &mcpGetSampleIndex{
 		CaptureID: id, File: entry.file, ExpiresAt: entry.expires.UTC().Format(time.RFC3339),
 		Count: len(c.messages), TotalBytes: c.totalBytes(), StoppedBy: c.stoppedBy,
-		NextMessageBytes: c.nextMessageBytes, ServerDropped: c.dropped, Hint: mcpGetSampleHint,
+		NextMessageBytes: c.nextMessageBytes, ServerDropped: c.dropped, Hint: mcpGetSampleHintFor(sz.pageEscaped),
 	}
 	for _, m := range c.messages {
 		topic, topicBytes := mcpTopicPage(m.line.Topic)
@@ -322,42 +372,51 @@ func (c *mcpCapturedSample) spill(captures *mcpCaptureStore) (*mcpGetSampleIndex
 			Preview: mcpPreview(m, previewLen),
 		})
 	}
-	for i := len(res.Messages) - 1; i >= 0; i-- {
-		if mcpIndexFits(res) {
-			break
+	// One loop, one step at a time: blank the last preview that is left, else leave the last message
+	// out. After each step the counts and the hint are made again, so that they describe the list as
+	// it is. A capture of 200 messages with long topics fills the cap on its own, without any
+	// preview; every message stays readable by its index i, which mqtt_read takes.
+	res.PreviewsOmitted = c.previewsOmitted(res)
+	res.Hint = mcpSpillHintFor(res, sz.pageEscaped)
+	for !mcpIndexFitsMax(res, sz.indexMax) && len(res.Messages) > 1 {
+		blanked := false
+		for i := len(res.Messages) - 1; i >= 0; i-- {
+			if res.Messages[i].Preview != "" {
+				res.Messages[i].Preview = ""
+				blanked = true
+				break
+			}
 		}
-		res.Messages[i].Preview = ""
+		if !blanked {
+			res.Messages = res.Messages[:len(res.Messages)-1]
+			res.Omitted++
+		}
+		res.PreviewsOmitted = c.previewsOmitted(res)
+		res.Hint = mcpSpillHintFor(res, sz.pageEscaped)
 	}
-	// A capture of 200 messages with long topics fills the cap on its own, without any preview:
-	// listing fewer of them keeps the result whole, and every message stays readable by its index i,
-	// which mqtt_read takes.
-	for !mcpIndexFits(res) && len(res.Messages) > 1 {
-		res.Messages = res.Messages[:len(res.Messages)-1]
-		res.Omitted++
-	}
-	// Counted after the loop: a preview dropped for room is one a caller may have lost, and the
-	// number says how many.
-	res.PreviewsOmitted = 0
+	// A list that leaves messages out is a cut result, and says so the way every cut result does.
+	res.Truncated = res.Omitted > 0
+	return res, nil
+}
+
+// previewsOmitted is how many listed messages show no preview although their payload has text.
+func (c *mcpCapturedSample) previewsOmitted(res *mcpGetSampleIndex) int {
+	n := 0
 	for _, m := range res.Messages {
 		if m.Preview == "" && m.I < len(c.messages) && c.messages[m.I].line.Payload != "" {
-			res.PreviewsOmitted++
+			n++
 		}
 	}
-	// The hint is part of the result and counts against the same cap: when it no longer fits, the
-	// last messages go, as they do above, and the hint says so.
-	res.Hint = mcpSpillHint(res)
-	for !mcpIndexFits(res) && len(res.Messages) > 1 {
-		res.Messages = res.Messages[:len(res.Messages)-1]
-		res.Omitted++
-		res.Hint = mcpSpillHint(res)
-	}
-	return res, nil
+	return n
 }
 
 // mcpSpillHint is the spilled sample's hint: what to read, and what the index could not show in
 // full, so that an agent neither guesses at a missing message nor reads a preview for a payload.
-func mcpSpillHint(res *mcpGetSampleIndex) string {
-	hint := mcpGetSampleHint
+func mcpSpillHint(res *mcpGetSampleIndex) string { return mcpSpillHintFor(res, mcpPageEscapedMax) }
+
+// mcpSpillHintFor is mcpSpillHint for a server whose pages are held to pageEscaped bytes.
+func mcpSpillHintFor(res *mcpGetSampleIndex, pageEscaped int) string {
+	hint := mcpGetSampleHintFor(pageEscaped)
 	if res.Omitted > 0 {
 		hint += fmt.Sprintf(" The index lists messages 0 to %d of %d; the other %d (i %d to %d) are whole in the capture too: read them with mqtt_read by i.",
 			len(res.Messages)-1, res.Count, res.Omitted, len(res.Messages), res.Count-1)
@@ -370,12 +429,25 @@ func mcpSpillHint(res *mcpGetSampleIndex) string {
 
 // mcpIndexFits reports whether a spilled sample's answer fits: under mcpIndexMax as compact JSON,
 // and under mcpMaxResult once mcpResult has indented it (a cut index would not parse).
-func mcpIndexFits(v any) bool {
+func mcpIndexFits(v any) bool { return mcpIndexFitsMax(v, mcpIndexMax) }
+
+// mcpIndexFitsMax is mcpIndexFits for a server whose indexes are held to indexMax compact bytes.
+// A smaller cap than the default belongs to a reader that cuts what it gets (the council's 16 KiB):
+// its indented answer must stay within 2 KiB of the cap, so that the index is shortened here, by its
+// own omitted and previewsOmitted, and not cut there.
+func mcpIndexFitsMax(v any, indexMax int) bool {
 	b, err := mcpMarshal(v)
-	if err != nil || len(b) > mcpIndexMax {
+	if err != nil || len(b) > indexMax {
 		return false
 	}
-	return mcpFitsResult(v)
+	if indexMax >= mcpIndexMax {
+		return mcpFitsResult(v)
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, b, "", "  "); err != nil {
+		return false
+	}
+	return buf.Len() <= indexMax+2048
 }
 
 // mcpFitsResult reports whether v survives mcpResult whole: marshalled, indented, and under
@@ -418,7 +490,7 @@ func mcpJSONPayload(encoding string, data []byte) bool {
 // 32 bytes in hex of a binary one.
 func mcpPreview(m mcpCapturedMessage, n int) string {
 	if m.line.Encoding != "utf8" {
-		b := m.data
+		b := m.preview
 		if len(b) > 32 {
 			b = b[:32]
 		}
@@ -436,7 +508,7 @@ func mcpPreview(m mcpCapturedMessage, n int) string {
 }
 
 // mcpReadTool is the mqtt_read handler.
-func mcpReadTool(captures *mcpCaptureStore) func(context.Context, *mcp.CallToolRequest, mcpReadIn) (*mcp.CallToolResult, any, error) {
+func mcpReadTool(captures *mcpCaptureStore, sz mcpSizes) func(context.Context, *mcp.CallToolRequest, mcpReadIn) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in mcpReadIn) (*mcp.CallToolResult, any, error) {
 		if in.Length < 0 || in.Length > mcpPageMax {
 			return nil, nil, usageErr("length must be from 1 to %d", mcpPageMax)
@@ -460,7 +532,7 @@ func mcpReadTool(captures *mcpCaptureStore) func(context.Context, *mcp.CallToolR
 			}
 			return nil, nil, newErr(codeError, "the capture could not be read: %v", err)
 		}
-		page, err := mcpPage(m, in)
+		page, err := mcpPageSized(m, in, sz.norm().pageEscaped)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -524,6 +596,11 @@ func mcpTopicPage(topic string) (string, int) {
 // mcpPage cuts the page the call asks for out of the message's text: the payload's own text (UTF-8,
 // or base64), or, with path, one field of a JSON payload marshalled compactly.
 func mcpPage(m sampleMsg, in mcpReadIn) (*mcpPageResult, error) {
+	return mcpPageSized(m, in, mcpPageEscapedMax)
+}
+
+// mcpPageSized is mcpPage with a page held to escapedMax bytes of escaped text.
+func mcpPageSized(m sampleMsg, in mcpReadIn, escapedMax int) (*mcpPageResult, error) {
 	length := in.Length
 	if length == 0 {
 		length = mcpPageMax
@@ -580,7 +657,7 @@ func mcpPage(m sampleMsg, in mcpReadIn) (*mcpPageResult, error) {
 			}
 			// A page always holds at least one rune, whatever its size: an empty page whose
 			// nextOffset is its own offset is a page the caller can never get past.
-			if end > in.Offset && (end+size-in.Offset > length || cost+c > mcpPageEscapedMax) {
+			if end > in.Offset && (end+size-in.Offset > length || cost+c > escapedMax) {
 				break
 			}
 			end += size
@@ -776,5 +853,22 @@ func mcpKeyList(obj map[string]any) string {
 		more = fmt.Sprintf(", and %d more", len(keys)-20)
 		keys = keys[:20]
 	}
+	// A key is a device's own string: each is cut to 64 bytes and quoted, so that it cannot put a
+	// line of its own into the error.
+	for i, k := range keys {
+		keys[i] = strconv.Quote(cutUTF8Bytes(k, 64))
+	}
 	return strings.Join(keys, ", ") + more
+}
+
+// cutUTF8Bytes is s cut to at most max bytes, at a rune start.
+func cutUTF8Bytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	n := max
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

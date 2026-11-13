@@ -131,12 +131,12 @@ the same escaping as `stream`, so a message is always one line.
 With `--json`, one compact JSON object per message, `i` counting from 0:
 
 ```json
-{"i":0,"topic":"/devices/vision-01/state/telemetry","ts":"2026-11-08T10:00:00Z","retain":false,"bytes":24,"encoding":"utf8","payload":"{\"cpu\":0.25,\"memory\":0.5}"}
+{"i":0,"topic":"/devices/vision-01/state/telemetry","ts":"2026-11-08T10:00:00Z","retain":false,"bytes":25,"encoding":"utf8","payload":"{\"cpu\":0.25,\"memory\":0.5}"}
 ```
 
 `encoding` is `utf8` or `base64`; with `base64` the payload is the base64 text exactly as the platform
 sent it. `--out FILE` writes those lines to FILE instead of stdout: the file is created with mode
-`0600`, an existing file is refused unless it is empty, and stdout then carries only the summary.
+`0600`, an existing file is refused unless it is an empty regular file with one name (a symbolic link, dangling or not, and a hard link are refused), and stdout then carries only the summary.
 
 ### The summary
 

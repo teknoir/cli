@@ -80,8 +80,10 @@ func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, n
 	// cut in front of it, or a whole answer reaches the council as a wrapper cut twice, with counts
 	// that disagree. Its captures are its own, and go with the session.
 	captures := newCaptureStore(filepath.Join(workDir, "captures"))
+	// Only this daemon uses the dir: whatever an earlier process left there can never be read again.
+	captures.sweepAll()
 	defer captures.removeAll()
-	ts, err := tools.New(ctx, newMCPServerOpts(e, mcpServerOptions{MaxResult: mcpCouncilMaxResult, Captures: captures}))
+	ts, err := tools.New(ctx, newMCPServerOpts(e, mcpServerOptions{MaxResult: mcpCouncilMaxResult, Captures: captures, PageEscapedMax: 14 << 10, IndexMax: 14 << 10}))
 	if err != nil {
 		return err
 	}
