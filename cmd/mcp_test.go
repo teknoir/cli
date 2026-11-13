@@ -42,9 +42,46 @@ var mcpToolNames = []string{
 	"list_kinds",
 	"prom_query",
 	"mqtt_sample",
+	"mqtt_get_sample",
+	"mqtt_read",
 	"inspect_pod",
 	"inspect_logs",
 	"inspect_release",
+}
+
+// mcpAssertWhole checks that text is a result mcpResult left alone: within the cap, one JSON
+// object, no cut wrapper's shownItems and no line cut's trailer, with the named keys present. A
+// check for a cut that cannot fail — the marker's old wording is gone — proves nothing.
+func mcpAssertWhole(t *testing.T, text string, keys ...string) {
+	t.Helper()
+	if len(text) > mcpMaxResult {
+		t.Errorf("the result is %d bytes, over the %d cap", len(text), mcpMaxResult)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &obj); err != nil || obj == nil {
+		t.Fatalf("the result is not one JSON object: %v in %.200q", err, text)
+	}
+	if _, ok := obj["shownItems"]; ok {
+		t.Errorf("the result is mcpResult's cut wrapper: %.200q", text)
+	}
+	if strings.Contains(text, "\n… truncated:") {
+		t.Errorf("the result ends with a line cut: %q", text[max(0, len(text)-100):])
+	}
+	for _, k := range keys {
+		if _, ok := obj[k]; !ok {
+			t.Errorf("the result has no %q: %s", k, mcpKeyJSON(obj))
+		}
+	}
+}
+
+// mcpKeyJSON names an object's keys, for a failure message.
+func mcpKeyJSON(obj map[string]json.RawMessage) string {
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
 }
 
 // mcpClient connects a client to s over an in-memory pipe (the server connects first, or the pipe
@@ -266,6 +303,8 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 		"get_config": {"target"}, "list_kinds": {},
 		"prom_query":      {"query"},
 		"mqtt_sample":     {"topics"},
+		"mqtt_get_sample": {"topics"},
+		"mqtt_read":       {"captureId", "i"},
 		"inspect_pod":     {"pod", "pod_namespace", "robot"},
 		"inspect_logs":    {"pod", "pod_namespace", "robot"},
 		"inspect_release": {"release", "release_namespace", "robot"},
@@ -303,22 +342,34 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"inspect_logs", "inspect_pod", "inspect_release", "get_problems", "prom_query", "mqtt_sample", "list_devices", "get_device", "get_robot", "get_config"} {
+	for _, name := range []string{"inspect_logs", "inspect_pod", "inspect_release", "get_problems", "prom_query", "mqtt_sample", "mqtt_get_sample", "mqtt_read", "list_devices", "get_device", "get_robot", "get_config"} {
 		for _, tool := range tools.Tools {
 			if tool.Name == name && !strings.HasSuffix(tool.Description, mcpUntrustedNote) {
 				t.Errorf("%s: description does not end with the untrusted note: %q", name, tool.Description)
 			}
 		}
 	}
-	// The description is what an agent reads: every stop of the sample, the payload cut and the one
-	// sample at a time must be in it.
+	// The description is what an agent reads: every stop of the sample, the payload cut, the one
+	// sample at a time, and which tool returns whole payloads must be in it.
 	for _, tool := range tools.Tools {
-		if tool.Name != "mqtt_sample" {
-			continue
-		}
-		for _, want := range []string{"when the sample is full", "stoppedBy", "payloadTruncated", "One sample runs at a time"} {
-			if !strings.Contains(tool.Description, want) {
-				t.Errorf("the mqtt_sample description lacks %q: %q", want, tool.Description)
+		switch tool.Name {
+		case "mqtt_sample":
+			for _, want := range []string{"when the sample is full", "stoppedBy", "payloadTruncated", "One sample runs at a time", "mqtt_get_sample", "256 KiB"} {
+				if !strings.Contains(tool.Description, want) {
+					t.Errorf("the mqtt_sample description lacks %q: %q", want, tool.Description)
+				}
+			}
+		case "mqtt_get_sample":
+			for _, want := range []string{"whole", "12288", "mqtt_read", "30 minutes", "256 KiB", "serverDropped.size", "cheaper preview"} {
+				if !strings.Contains(tool.Description, want) {
+					t.Errorf("the mqtt_get_sample description lacks %q: %q", want, tool.Description)
+				}
+			}
+		case "mqtt_read":
+			for _, want := range []string{"12288", "nextOffset", "path", "30 minutes"} {
+				if !strings.Contains(tool.Description, want) {
+					t.Errorf("the mqtt_read description lacks %q: %q", want, tool.Description)
+				}
 			}
 		}
 	}
@@ -361,7 +412,7 @@ func TestMCPServerStartsWithoutAFleet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 17 {
+	if len(tools.Tools) != 19 {
 		t.Fatalf("%d tools", len(tools.Tools))
 	}
 	if fleetCalls != 0 || domainCalls != 0 {
@@ -796,7 +847,9 @@ func TestMCPResultIsOneIndentedBlock(t *testing.T) {
 	}
 }
 
-func TestMCPTruncatesALongResultAtANewline(t *testing.T) {
+// A long JSON array is cut at whole items into one JSON object that says what is shown: the agent
+// reads valid JSON, and the missing items are counted rather than guessed at.
+func TestMCPCutsALongArrayIntoAWrapper(t *testing.T) {
 	noBotMode(t)
 	var items []string
 	size := 0
@@ -816,21 +869,66 @@ func TestMCPTruncatesALongResultAtANewline(t *testing.T) {
 	if res.StructuredContent != nil {
 		t.Error("structured content: the uncut answer is sent again")
 	}
-	full := mcpIndented(t, body)
-	const limit = 48 << 10
-	kept := strings.LastIndex(full[:limit], "\n")
-	if kept < 24<<10 {
-		t.Fatalf("the fixture has no newline in the last 24 KiB")
+	if len(text) > mcpMaxResult {
+		t.Errorf("the wrapped result is %d bytes, over the %d cap", len(text), mcpMaxResult)
 	}
-	want := full[:kept] + fmt.Sprintf("\n… truncated, %d bytes more; narrow the query", len(full)-kept)
-	if text != want {
-		t.Errorf("text is %d bytes; want %d bytes ending %q", len(text), len(want), want[len(want)-60:])
+	var wrapper struct {
+		Truncated  bool              `json:"truncated"`
+		ShownItems int               `json:"shownItems"`
+		TotalItems int               `json:"totalItems"`
+		Field      *string           `json:"field"`
+		ShownBytes int               `json:"shownBytes"`
+		TotalBytes int               `json:"totalBytes"`
+		Hint       string            `json:"hint"`
+		Result     []json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(text), &wrapper); err != nil {
+		t.Fatalf("the cut result is not one JSON object: %v in %.200q", err, text)
+	}
+	if !wrapper.Truncated || wrapper.Field != nil {
+		t.Errorf("wrapper = %+v, want truncated and no field", wrapper)
+	}
+	if wrapper.TotalItems != len(items) {
+		t.Errorf("totalItems = %d, want %d", wrapper.TotalItems, len(items))
+	}
+	if wrapper.ShownItems < 100 || wrapper.ShownItems >= len(items) || len(wrapper.Result) != wrapper.ShownItems {
+		t.Errorf("shownItems = %d, result holds %d of %d", wrapper.ShownItems, len(wrapper.Result), len(items))
+	}
+	// shownBytes counts the JSON that follows "result": in the wrapper.
+	const key = `"result":`
+	i := strings.Index(text, key)
+	shown := text[i+len(key) : len(text)-1]
+	if i < 0 || wrapper.ShownBytes != len(shown) {
+		t.Errorf("shownBytes = %d, want the %d bytes of the result", wrapper.ShownBytes, len(shown))
+	}
+	if wrapper.TotalBytes != len(mcpIndented(t, body)) {
+		t.Errorf("totalBytes = %d, want %d", wrapper.TotalBytes, len(mcpIndented(t, body)))
+	}
+	if !strings.Contains(wrapper.Hint, "narrow the query") {
+		t.Errorf("hint = %q", wrapper.Hint)
+	}
+	// The shown elements are the first ones of the answer.
+	for _, c := range []struct {
+		at   int
+		want string
+	}{{0, "robot-000000"}, {len(wrapper.Result) - 1, fmt.Sprintf("robot-%06d", wrapper.ShownItems-1)}} {
+		var got struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(wrapper.Result[c.at], &got); err != nil {
+			t.Fatalf("element %d: %v", c.at, err)
+		}
+		if got.Name != c.want {
+			t.Errorf("element %d is %q, want %q", c.at, got.Name, c.want)
+		}
 	}
 }
 
+// A result that is not an array is cut at a line, and ends with a sentence that counts what is
+// shown; the cut never splits a character.
 func TestMCPTruncatesASingleLongLineAtARuneBoundary(t *testing.T) {
 	noBotMode(t)
-	const limit = 48 << 10
+	limit := mcpMaxResult - 1024
 	body := fmt.Sprintf(`{"text":%q}`, strings.Repeat("ü", 150<<10))
 	p := newFakePlatform(t)
 	p.on("GET", "/robots/vs/inspect/pods/default/p/logs", 200, body)
@@ -846,42 +944,85 @@ func TestMCPTruncatesASingleLongLineAtARuneBoundary(t *testing.T) {
 	if !utf8.ValidString(text) {
 		t.Error("the cut is not at a rune boundary")
 	}
-	// The line is cut where a rune starts, so at most three bytes short of the cap, and the note
-	// counts the bytes that are gone.
-	const prefix = "\n… truncated, "
+	// The one line is longer than the cap, so it is cut where a rune starts: at most three bytes
+	// short of it.
+	const prefix = "\n… truncated: shown "
 	i := strings.Index(text, prefix)
 	if i < 0 {
 		t.Fatalf("no truncation note: ...%q", text[len(text)-80:])
 	}
 	kept := i
-	var more int
-	if _, err := fmt.Sscanf(text[i:], prefix+"%d bytes more; narrow the query", &more); err != nil {
+	var shown, total int
+	if _, err := fmt.Sscanf(text[i:], prefix+"%d of %d bytes", &shown, &total); err != nil {
 		t.Fatalf("note %q: %v", text[i:], err)
 	}
-	if got, want := more, len(full)-kept; got != want {
-		t.Errorf("note says %d bytes more, %d are gone", got, want)
+	if shown != kept || total != len(full) {
+		t.Errorf("note says %d of %d bytes, the cut kept %d of %d", shown, total, kept, len(full))
 	}
-	if kept < 24<<10 || kept > limit || kept < limit-utf8.UTFMax {
-		t.Errorf("kept %d of %d bytes", kept, len(full))
+	// The answer is JSON: its lines are the wrapper's, so the note counts bytes of JSON text only.
+	if !strings.HasSuffix(text, " bytes of JSON text; narrow the query") || strings.Contains(text[i:], " lines") {
+		t.Errorf("note = %q", text[i:])
+	}
+	if kept < limit-1 || kept > limit || kept < limit-utf8.UTFMax {
+		t.Errorf("kept %d of %d bytes, want just under the %d cap", kept, len(full), limit)
 	}
 }
 
 func TestMCPSmallResultHasNoTruncationLine(t *testing.T) {
 	c := mcpCase{tool: "get_overview", answer: `{"devices":1}`, reqs: []mcpWant{{method: "GET", path: "/overview"}}}
 	_, cs := mcpHarness(t, c)
-	if text := mcpText(t, mcpCall(t, cs, c.tool, nil)); strings.Contains(text, "truncated") {
-		t.Errorf("a small answer was cut: %q", text)
+	mcpAssertWhole(t, mcpText(t, mcpCall(t, cs, c.tool, nil)), "devices")
+}
+
+// An object whose largest member is an array is cut in that member, and the wrapper names it: the
+// other members are kept whole, in their order.
+func TestMCPCutsTheArrayOfAnObject(t *testing.T) {
+	items := make([]string, 0, 400)
+	for i := 0; i < 400; i++ {
+		items = append(items, fmt.Sprintf(`{"name":"device-%03d","state":"online","extra":"%s"}`, i, strings.Repeat("x", 100)))
+	}
+	body := `{"namespace":"team-one","devices":[` + strings.Join(items, ",") + `],"count":400}`
+	text := mcpText(t, mcpResult(json.RawMessage(body)))
+	if len(text) > mcpMaxResult {
+		t.Errorf("the wrapped result is %d bytes, over the %d cap", len(text), mcpMaxResult)
+	}
+	var wrapper struct {
+		Truncated  bool            `json:"truncated"`
+		ShownItems int             `json:"shownItems"`
+		TotalItems int             `json:"totalItems"`
+		Field      string          `json:"field"`
+		Result     json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(text), &wrapper); err != nil {
+		t.Fatalf("the cut result is not one JSON object: %v in %.200q", err, text)
+	}
+	var whole struct {
+		Devices []json.RawMessage `json:"devices"`
+	}
+	if err := json.Unmarshal(wrapper.Result, &whole); err != nil {
+		t.Fatalf("the result is not the object: %v", err)
+	}
+	if !wrapper.Truncated || wrapper.Field != "devices" || wrapper.TotalItems != 400 || len(whole.Devices) != wrapper.ShownItems {
+		t.Errorf("wrapper = %+v (%d elements)", wrapper, len(whole.Devices))
+	}
+	if wrapper.ShownItems < 200 || wrapper.ShownItems >= 400 {
+		t.Errorf("shownItems = %d of 400", wrapper.ShownItems)
+	}
+	if !strings.Contains(text, `"namespace": "team-one"`) || !strings.Contains(text, `"count": 400`) {
+		t.Errorf("the other members were lost: %.200q", text)
 	}
 }
 
-// The cut prefers the last newline before the cap only when it keeps at least 24 KiB; the cap is
-// 48 KiB. Each case puts the indented answer's last newline before the cap at nl.
+// The line cut goes back to the last newline only when that keeps at least half the cap; the cap is
+// 48 KiB less 1 KiB for the wrapper. Each case puts the indented answer's last newline before the
+// cap at nl.
 func TestMCPTruncationNewlineThreshold(t *testing.T) {
 	noBotMode(t)
+	limit := mcpMaxResult - 1024
 	for _, c := range []struct{ nl, kept int }{
-		{24 << 10, 24 << 10},   // exactly 24 KiB kept: cut at the newline
-		{24<<10 - 1, 48 << 10}, // one byte less: the line is cut at the cap
-		{36 << 10, 36 << 10},
+		{limit/2 - 1, limit / 2}, // the cut after the newline is exactly half the cap
+		{limit/2 - 2, limit},     // one byte less: the line is cut at the cap
+		{36 << 10, 36<<10 + 1},
 	} {
 		body := fmt.Sprintf(`{"a":%q,"b":%q}`, strings.Repeat("x", c.nl-12), strings.Repeat("y", 150<<10))
 		p := newFakePlatform(t)
@@ -890,10 +1031,10 @@ func TestMCPTruncationNewlineThreshold(t *testing.T) {
 		cs := mcpClient(t, newMCPServer(e))
 		text := mcpText(t, mcpCall(t, cs, "get_overview", nil))
 		full := mcpIndented(t, body)
-		if got := strings.LastIndex(full[:48<<10], "\n"); got != c.nl {
+		if got := strings.LastIndex(full[:limit], "\n"); got != c.nl {
 			t.Fatalf("fixture: last newline before the cap at %d, want %d", got, c.nl)
 		}
-		want := full[:c.kept] + fmt.Sprintf("\n… truncated, %d bytes more; narrow the query", len(full)-c.kept)
+		want := full[:c.kept] + fmt.Sprintf("\n… truncated: shown %d of %d bytes of JSON text; narrow the query", c.kept, len(full))
 		if text != want {
 			t.Errorf("newline at %d: kept %d bytes, want %d", c.nl, strings.Index(text, "\n… truncated"), c.kept)
 		}
@@ -1166,6 +1307,9 @@ func captureOSFile(t *testing.T, f **os.File) (stop func() string) {
 }
 
 func TestMCPWritesNothingToStdout(t *testing.T) {
+	// The spilling sample below writes a capture: it goes in this test's own directory, never the
+	// real temp dir's.
+	mcpCaptureFast(t)
 	noBotMode(t)
 	useLogin(t, map[string]any{"email": "a@b.c"}, "teknoir-demo")
 	initConfig()
@@ -1174,13 +1318,16 @@ func TestMCPWritesNothingToStdout(t *testing.T) {
 		mcpRegister(p, c)
 	}
 	p.on("GET", mcpAcmePath("/overview"), 500, `{"error":{"message":"boom"}}`)
-	p.on("GET", "/mqtt/stream", 200, "event: message\ndata: {\"topic\":\"/devices/d1/state/x\",\"payload\":\"hi\",\"retain\":false,\"ts\":\"2026-11-08T10:00:00Z\"}\n\n")
+	// Large enough that mqtt_get_sample spills it, so mqtt_read has a capture to read.
+	p.on("GET", "/mqtt/stream", 200, "event: message\ndata: {\"topic\":\"/devices/d1/state/x\",\"payload\":\""+
+		strings.Repeat("m", 20<<10)+"\",\"retain\":false,\"ts\":\"2026-11-08T10:00:00Z\"}\n\n")
 	e, _ := testEnv(t, p, nil)
 
 	ptermBuf := capturePterm(t)
 	stop := captureOSStdout(t)
 
 	cs := mcpClient(t, newMCPServer(e))
+	captureID := ""
 	for _, name := range mcpToolNames {
 		var args map[string]any
 		for _, c := range mcpCases() {
@@ -1188,11 +1335,24 @@ func TestMCPWritesNothingToStdout(t *testing.T) {
 				args = c.args
 			}
 		}
-		if args == nil && name == "mqtt_sample" {
+		if args == nil && (name == "mqtt_sample" || name == "mqtt_get_sample") {
 			args = map[string]any{"topics": []string{"/devices/+/state/#"}}
 		}
-		if res := mcpCall(t, cs, name, args); res == nil || res.IsError {
+		if name == "mqtt_read" {
+			args = map[string]any{"captureId": captureID, "i": 0}
+		}
+		res := mcpCall(t, cs, name, args)
+		if res == nil || res.IsError {
 			t.Errorf("%s did not succeed: %+v", name, res)
+			continue
+		}
+		if name == "mqtt_get_sample" {
+			// The spilling sample's id, so mqtt_read has something to read.
+			var idx struct {
+				CaptureID string `json:"captureId"`
+			}
+			_ = json.Unmarshal([]byte(mcpText(t, res)), &idx)
+			captureID = idx.CaptureID
 		}
 	}
 	if res := mcpCall(t, cs, "get_overview", map[string]any{"namespace": "acme"}); !res.IsError {
@@ -1621,11 +1781,12 @@ func TestMCPMqttSampleSizeCountsEscapes(t *testing.T) {
 			text := mcpText(t, res)
 			var got mcpSampleOut
 			err := json.Unmarshal([]byte(text), &got)
-			if res.IsError || err != nil || got.StoppedBy != "size" || strings.Contains(text, "truncated") {
+			if res.IsError || err != nil || got.StoppedBy != "size" {
 				tail := text[max(0, len(text)-80):]
-				t.Errorf("%d bytes (JSON error %v), %d messages, stopped by %q, ends %q; want size and no truncated line",
+				t.Errorf("%d bytes (JSON error %v), %d messages, stopped by %q, ends %q; want size",
 					len(text), err, len(got.Messages), got.StoppedBy, tail)
 			}
+			mcpAssertWhole(t, text, "messages", "stoppedBy")
 			mcpWaitEnded(t, ended)
 		})
 	}
@@ -1645,13 +1806,7 @@ func TestMCPMqttSampleStopsAtTheSizeCap(t *testing.T) {
 		if got.StoppedBy != "size" {
 			t.Errorf("stopped by %q, want size", got.StoppedBy)
 		}
-		var v any
-		if err := json.Unmarshal([]byte(text), &v); err != nil {
-			t.Errorf("the result is not valid JSON: %v", err)
-		}
-		if strings.Contains(text, "truncated") {
-			t.Errorf("the result was truncated by mcpResult: %d bytes", len(text))
-		}
+		mcpAssertWhole(t, text, "messages", "stoppedBy")
 		mcpWaitEnded(t, ended)
 	})
 
@@ -1668,9 +1823,7 @@ func TestMCPMqttSampleStopsAtTheSizeCap(t *testing.T) {
 		if got.StoppedBy != "max" && got.StoppedBy != "size" {
 			t.Errorf("stopped by %q, want max or size", got.StoppedBy)
 		}
-		if strings.Contains(text, "truncated") {
-			t.Errorf("the result was truncated by mcpResult: %d bytes", len(text))
-		}
+		mcpAssertWhole(t, text, "messages", "stoppedBy")
 	})
 }
 
@@ -2143,9 +2296,7 @@ func TestMCPGetRobotDetail(t *testing.T) {
 	if len(text) >= 12<<10 {
 		t.Errorf("the summary is %d bytes, want under 12 KiB", len(text))
 	}
-	if strings.Contains(text, "truncated") {
-		t.Errorf("the summary was cut: %q", text[len(text)-80:])
-	}
+	mcpAssertWhole(t, text, "phase", "detail", "more")
 	if !strings.Contains(text, "K3S_URL=https://<server-address>:6443") || strings.Contains(text, `\u003c`) || strings.Contains(text, `\u0026`) {
 		t.Errorf("the summary changed the platform's text: %q", text)
 	}
@@ -2301,5 +2452,122 @@ func TestMCPGetConfigDetail(t *testing.T) {
 		if got, want := mcpText(t, res), mcpIndented(t, `{"id":"HelmChart/default/app00","values":{"replicas":2}}`); res.IsError || got != want {
 			t.Errorf("resource with detail %q: %q (error %v), want %q", detail, got, res.IsError, want)
 		}
+	}
+}
+
+// ---------- the council's server does not cut in front of the council ----------
+
+// listDevicesOf is a server over a platform whose list_devices answers body.
+func listDevicesOf(t *testing.T, body string) *mcp.ClientSession {
+	t.Helper()
+	noBotMode(t)
+	p := newFakePlatform(t)
+	p.on("GET", "/devices", 200, body)
+	e, _ := testEnv(t, p, nil)
+	return mcpClient(t, newMCPServer(e))
+}
+
+// devicesBody is a list_devices answer of n devices, each about 3.5 KiB: about 200 KiB for 60.
+func devicesBody(n int) string {
+	items := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		items = append(items, fmt.Sprintf(`{"name":"device-%02d","state":"online","extra":"%s"}`, i, strings.Repeat("x", 3500)))
+	}
+	return "[" + strings.Join(items, ",") + "]"
+}
+
+// The council's server lets a 200 KiB list through whole: the council cuts at 16 KiB itself, with a
+// reference for the rest, so a cut here would only be cut again, with counts that disagree.
+func TestMCPCouncilServerDoesNotCut(t *testing.T) {
+	body := devicesBody(60)
+	if len(body) < 200<<10 {
+		t.Fatalf("the fixture is %d bytes, want at least 200 KiB", len(body))
+	}
+	noBotMode(t)
+	p := newFakePlatform(t)
+	p.on("GET", "/devices", 200, body)
+	e, _ := testEnv(t, p, nil)
+	cs := mcpClient(t, newMCPServerOpts(e, mcpServerOptions{MaxResult: mcpCouncilMaxResult}))
+
+	text := mcpText(t, mcpCall(t, cs, "list_devices", nil))
+	if len(text) < 200<<10 {
+		t.Errorf("the result is %d bytes, want the whole %d", len(text), len(body))
+	}
+	var devices []json.RawMessage
+	if err := json.Unmarshal([]byte(text), &devices); err != nil {
+		t.Fatalf("the result is not the whole JSON array: %v", err)
+	}
+	if len(devices) != 60 {
+		t.Errorf("%d devices, want 60", len(devices))
+	}
+	if strings.Contains(text, `"truncated"`) || strings.Contains(text, "\n… truncated:") {
+		t.Errorf("the council's server cut a result: %.200q", text)
+	}
+}
+
+// The agent's own server still cuts it, at 48 KiB, into a wrapper that says what it left out.
+func TestMCPDefaultServerCutsTheSameList(t *testing.T) {
+	body := devicesBody(60)
+	cs := listDevicesOf(t, body)
+	text := mcpText(t, mcpCall(t, cs, "list_devices", nil))
+	if len(text) > mcpMaxResult {
+		t.Fatalf("the result is %d bytes, over the %d cap", len(text), mcpMaxResult)
+	}
+	var wrapper struct {
+		Truncated  bool            `json:"truncated"`
+		ShownItems int             `json:"shownItems"`
+		TotalItems int             `json:"totalItems"`
+		Result     json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(text), &wrapper); err != nil {
+		t.Fatalf("the cut result is not one JSON object: %v in %.200q", err, text)
+	}
+	if !wrapper.Truncated || wrapper.TotalItems != 60 || wrapper.ShownItems == 0 || wrapper.ShownItems >= 60 {
+		t.Errorf("wrapper = %+v", wrapper)
+	}
+	if !json.Valid(wrapper.Result) {
+		t.Error("the wrapper's result is not valid JSON")
+	}
+}
+
+// The wrapper's own keys count against the cap too: a long key and a key of "<" characters push the
+// cut smaller until the whole result fits, and the result stays valid JSON.
+func TestMCPCutWrapperFitsTheCap(t *testing.T) {
+	for _, c := range []struct {
+		name, key string
+	}{
+		{"a 1000-byte key", strings.Repeat("k", 1000)},
+		{"a key of 200 <", strings.Repeat("<", 200)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			items := make([]string, 0, 400)
+			for i := 0; i < 400; i++ {
+				items = append(items, fmt.Sprintf(`{"name":"device-%03d","extra":"%s"}`, i, strings.Repeat("x", 100)))
+			}
+			body := "{" + strconv.Quote(c.key) + ":[" + strings.Join(items, ",") + "]}"
+			text := mcpText(t, mcpResult(json.RawMessage(body)))
+			if len(text) > mcpMaxResult {
+				t.Errorf("the wrapped result is %d bytes, over the %d cap", len(text), mcpMaxResult)
+			}
+			if !json.Valid([]byte(text)) {
+				t.Fatalf("the wrapper is not valid JSON: %v in %.200q", json.Valid([]byte(text)), text)
+			}
+			var wrapper struct {
+				Truncated  bool            `json:"truncated"`
+				ShownItems int             `json:"shownItems"`
+				Field      string          `json:"field"`
+				Result     json.RawMessage `json:"result"`
+			}
+			if err := json.Unmarshal([]byte(text), &wrapper); err != nil {
+				t.Fatalf("the wrapper: %v", err)
+			}
+			var cut map[string][]any
+			if err := json.Unmarshal(wrapper.Result, &cut); err != nil {
+				t.Fatalf("the wrapper's result: %v", err)
+			}
+			if !wrapper.Truncated || wrapper.Field != c.key || wrapper.ShownItems == 0 || len(cut[c.key]) != wrapper.ShownItems {
+				t.Errorf("wrapper = truncated %v, field %d bytes, %d shown of %d", wrapper.Truncated, len(wrapper.Field), wrapper.ShownItems, len(cut[c.key]))
+			}
+		})
 	}
 }

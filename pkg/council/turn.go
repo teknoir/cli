@@ -227,18 +227,21 @@ type turn struct {
 	budget *budget
 	poster Poster
 	merge  *merger
+	// results keeps the whole text of every cut tool result of this turn, for read_result.
+	results *resultStore
 }
 
 // newTurn is a turn of the daemon, with its own context and budget.
 func (d *Daemon) newTurn(work *hub.WorkTurn) *turn {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	t := &turn{
-		d:      d,
-		work:   work,
-		ctx:    ctx,
-		cancel: cancel,
-		start:  d.cfg.Now(),
-		budget: newBudget(capsFor(work)),
+		d:       d,
+		work:    work,
+		ctx:     ctx,
+		cancel:  cancel,
+		start:   d.cfg.Now(),
+		budget:  newBudget(capsFor(work)),
+		results: newResultStore(),
 	}
 	t.D = time.UnixMilli(work.Deadline)
 	if work.Deadline <= 0 {
@@ -629,9 +632,9 @@ func (t *turn) route(level string, facts json.RawMessage, mode string) routeResu
 // quick turn.
 func routeLocalTools(mode string) []anthropic.ToolUnionParam {
 	if mode == modeQuick {
-		return []anthropic.ToolUnionParam{readSkillTool()}
+		return []anthropic.ToolUnionParam{readSkillTool(), readResultTool()}
 	}
-	return []anthropic.ToolUnionParam{readSkillTool(), conveneTool()}
+	return []anthropic.ToolUnionParam{readSkillTool(), readResultTool(), conveneTool()}
 }
 
 // conveneBlock is the answer's convene_council call, if it has one.
@@ -645,7 +648,8 @@ func conveneBlock(blocks []toolUse) (toolUse, bool) {
 }
 
 // answeredToolData reports whether runToolBlocks has answered a tool other than read_skill: a
-// platform tool's result is text a device or an app wrote. The kit's own guides are not.
+// platform tool's result is text a device or an app wrote, and so is a page read_result gives back.
+// The kit's own guides are not.
 func answeredToolData(blocks []toolUse, overrides map[string]error) bool {
 	for _, b := range blocks {
 		if b.Name == toolReadSkill {
@@ -975,6 +979,9 @@ type evidence struct {
 	ID     string `json:"id"`
 	Tool   string `json:"tool"`
 	Digest string `json:"digest"`
+	// Truncated reports that the member saw only part of the result: a claim that rests on it is
+	// open unless the member paged the rest.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // runToolBlocks answers one answer's tool_use blocks, in order (4.7). overrides are the error
@@ -1004,40 +1011,82 @@ func (t *turn) runToolBlocks(ctx context.Context, level, member string, task int
 				return results, ev, false
 			}
 		}
+		// A cut result is kept whole for read_result, and what the model gets says so.
+		text, digest := tools.Render(b.Name, res, t.storeResult(b.Name, res))
 		if emit {
-			data := map[string]any{"member": member, "id": b.ID, "ok": !res.IsError, "summary": res.Digest}
+			data := map[string]any{"member": member, "id": b.ID, "ok": !res.IsError, "summary": digest}
 			if task >= 0 {
 				data["task"] = task
 			}
 			t.poster.Emit(hub.EventToolResult, data)
 		}
 		if task >= 0 {
-			ev = append(ev, evidence{Member: member, ID: b.ID, Tool: b.Name, Digest: res.Digest})
+			ev = append(ev, evidence{Member: member, ID: b.ID, Tool: b.Name, Digest: digest, Truncated: res.Truncated})
 		}
-		if res.Text == "" {
-			// The API refuses an empty text block in a tool_result.
-			res.Text = "(no output)"
-		}
-		results = append(results, anthropic.NewToolResultBlock(b.ID, res.Text, res.IsError))
+		results = append(results, anthropic.NewToolResultBlock(b.ID, text, res.IsError))
 	}
 	return results, ev, true
 }
 
-// callTool runs one tool: the council's own read_skill, or one of the MCP server's.
-func (t *turn) callTool(ctx context.Context, level string, b toolUse) (tools.Result, error) {
-	if b.Name != toolReadSkill {
-		return t.d.cfg.Tools.Call(ctx, level, b.Name, b.Input)
+// storeResult keeps a cut result for read_result and returns its reference, or "" when there is
+// nothing to keep: a result the model saw whole, or a store that is full.
+func (t *turn) storeResult(name string, res tools.Result) string {
+	if !res.Cut.Truncated {
+		return ""
 	}
-	var in struct {
-		Name string `json:"name"`
-	}
-	_ = json.Unmarshal(b.Input, &in)
-	text, digest, ok := readSkill(in.Name)
+	ref, ok := t.results.put(name, res.Full)
 	if !ok {
-		msg := "there is no guide named " + cutUTF8(in.Name, 64, "…") + "; use one of the guides your instructions list"
-		return tools.Result{Text: msg, Digest: msg, IsError: true}, nil
+		return ""
 	}
-	return tools.Result{Text: text, Digest: digest}, nil
+	return ref
+}
+
+// callTool runs one tool: the council's own read_skill and read_result, or one of the MCP server's.
+// A local tool runs under a recover: a bug in one of them must cost the model one tool result, not
+// end the daemon with the turns that run in it.
+func (t *turn) callTool(ctx context.Context, level string, b toolUse) (tools.Result, error) {
+	if f, ok := localTools[b.Name]; ok {
+		return t.callLocalTool(b, f), nil
+	}
+	return t.d.cfg.Tools.Call(ctx, level, b.Name, b.Input)
+}
+
+// localTool is one of the council's own tools, which no MCP server provides.
+type localTool func(t *turn, input json.RawMessage) tools.Result
+
+// localTools are the council's own tools, by name. A variable so that a test can add one: a panic
+// in a tool is tested with a tool of the test's, not by breaking a real one.
+var localTools = map[string]localTool{
+	toolReadResult: func(t *turn, input json.RawMessage) tools.Result { return t.readResult(input) },
+	toolReadSkill:  runReadSkill,
+}
+
+// callLocalTool runs the council's own tool and turns its panic into an error result, which is
+// logged with the value: the turn goes on, and the operator sees what happened.
+func (t *turn) callLocalTool(b toolUse, f localTool) (res tools.Result) {
+	defer func() {
+		if v := recover(); v != nil {
+			t.d.cfg.Logf("turn=%s tool=%s panicked: %v", t.work.ID, b.Name, v)
+			msg := "internal error in " + b.Name + "; the council logged it"
+			res = tools.Result{Text: msg, Digest: msg, IsError: true}
+		}
+	}()
+	return f(t, b.Input)
+}
+
+// runReadSkill is the read_skill tool: one page of a guide.
+func runReadSkill(t *turn, input json.RawMessage) tools.Result {
+	var in struct {
+		Name   string `json:"name"`
+		Offset int    `json:"offset"`
+	}
+	_ = json.Unmarshal(input, &in)
+	text, digest, err := readSkill(in.Name, in.Offset)
+	if err != nil {
+		msg := err.Error()
+		return tools.Result{Text: msg, Digest: msg, IsError: true}
+	}
+	return tools.Result{Text: text, Digest: digest}
 }
 
 // memberResult is one member's report of the turn.
@@ -1225,7 +1274,7 @@ func (t *turn) fleetTask(workCtx context.Context, level string, factsF promptFac
 
 	req := model.Request{
 		Model: model.ModelHaiku, Effort: effort, System: fleetSystem(factsF),
-		Messages: t.fleetMessages(task), Tools: withLocal(t.d.cfg.Tools.For(level), readSkillTool()),
+		Messages: t.fleetMessages(task), Tools: withLocal(t.d.cfg.Tools.For(level), readSkillTool(), readResultTool()),
 		MaxTokens: 8000, Format: reportSchema,
 	}
 
@@ -1430,6 +1479,9 @@ type critiqueInput struct {
 	Question string        `json:"question"`
 	Reports  []memberEntry `json:"reports"`
 	Evidence []evidence    `json:"evidence"`
+	// TruncatedCalls is how many evidence entries rest on a result the member saw only part of. It
+	// is counted before any evidence is dropped for size, so the Critic hears it either way.
+	TruncatedCalls int `json:"truncatedCalls"`
 }
 
 // critique asks the Critic for the problems in the reports (4.4).
@@ -1520,7 +1572,7 @@ func critiqueJSON(question string, reports []memberResult, entries []memberEntry
 	for _, r := range reports {
 		ev = append(ev, r.evidence...)
 	}
-	in := critiqueInput{Question: question, Reports: entries, Evidence: ev}
+	in := critiqueInput{Question: question, Reports: entries, Evidence: ev, TruncatedCalls: countTruncated(ev)}
 	raw, err := json.Marshal(in)
 	if err == nil && len(raw) <= maxCritiqueInput {
 		return string(raw), 0
@@ -1575,7 +1627,7 @@ func (t *turn) synthesize(level string, facts json.RawMessage, reports []memberR
 		Model:  model.ModelSonnet,
 		Effort: effortOf(t.work.Options.Effort, "high"),
 		System: captainAnswerSystem(factsOf(level, facts, personOf(t.work))),
-		Tools:  withLocal(t.d.cfg.Tools.For(level), readSkillTool()),
+		Tools:  withLocal(t.d.cfg.Tools.For(level), readSkillTool(), readResultTool()),
 		// MaxTokens is the answer's length.
 		MaxTokens: 16000,
 	}

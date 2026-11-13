@@ -2,10 +2,16 @@ package council
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"github.com/teknoir/cli/pkg/council/tools"
+	"github.com/teknoir/cli/pkg/resultcut"
 )
 
 // toolJSON is one tool's marshalled JSON.
@@ -100,6 +106,17 @@ func TestReadSkillToolSchema(t *testing.T) {
 		if enum[i] != want {
 			t.Errorf("enum[%d] = %v, want %s", i, enum[i], want)
 		}
+	}
+	// A guide is read a page at a time: the offset is required, so the model always says which.
+	req, _ := schema["required"].([]any)
+	if len(req) != 2 || req[0] != "name" || req[1] != "offset" {
+		t.Errorf("required = %v, want [name offset]", schema["required"])
+	}
+	if p, _ := props["offset"].(map[string]any); p["type"] != "integer" {
+		t.Errorf("offset = %v, want an integer", props["offset"])
+	}
+	if d, _ := m["description"].(string); !strings.Contains(d, "offset 0") {
+		t.Errorf("the description %q does not say to start at offset 0", d)
 	}
 }
 
@@ -270,4 +287,123 @@ func TestParseConveneFleetNeedsALevel(t *testing.T) {
 			t.Errorf("level %q: %v", level, err)
 		}
 	}
+}
+
+func TestReadResultToolSchema(t *testing.T) {
+	m := toolJSON(t, readResultTool())
+	if m["name"] != toolReadResult {
+		t.Errorf("name = %v", m["name"])
+	}
+	if m["strict"] != true {
+		t.Errorf("strict = %v, want true", m["strict"])
+	}
+	if m["description"] != "Read more of a tool result that came back RESULT PARTIAL in this turn: up to 12288 bytes of the whole result from offset." {
+		t.Errorf("description = %v", m["description"])
+	}
+	schema := schemaOf(t, m)
+	if schema["additionalProperties"] != false {
+		t.Errorf("additionalProperties = %v, want false", schema["additionalProperties"])
+	}
+	req, _ := schema["required"].([]any)
+	if len(req) != 2 || req[0] != "ref" || req[1] != "offset" {
+		t.Errorf("required = %v, want [ref offset]", schema["required"])
+	}
+	props, _ := schema["properties"].(map[string]any)
+	if p, _ := props["ref"].(map[string]any); p["type"] != "string" {
+		t.Errorf("ref = %v, want a string", props["ref"])
+	}
+	if p, _ := props["offset"].(map[string]any); p["type"] != "integer" {
+		t.Errorf("offset = %v, want an integer", props["offset"])
+	}
+	if len(props) != 2 {
+		t.Errorf("properties = %v, want exactly ref and offset", props)
+	}
+}
+
+// read_result is tool data: a page of a platform tool's result is text a device or an app wrote, so
+// it counts as an answer of tool data, which decides whether a Coder task needs an ask. read_skill
+// is the kit's own text and does not.
+func TestAnsweredToolDataCountsReadResult(t *testing.T) {
+	for _, tc := range []struct {
+		names []string
+		want  bool
+	}{
+		{[]string{toolReadSkill}, false},
+		{[]string{toolReadResult}, true},
+		{[]string{toolReadSkill, toolReadResult}, true},
+		{[]string{"list_devices"}, true},
+		{[]string{toolConvene}, true},
+	} {
+		blocks := make([]toolUse, 0, len(tc.names))
+		for i, n := range tc.names {
+			blocks = append(blocks, toolUse{ID: fmt.Sprint("tu_", i), Name: n})
+		}
+		if got := answeredToolData(blocks, nil); got != tc.want {
+			t.Errorf("answeredToolData(%v) = %v, want %v", tc.names, got, tc.want)
+		}
+		// Which is what decides the ask: a Coder task after read_result needs the person to have
+		// asked for a change, as after any other platform data.
+		turn := &turn{work: newWork(kindAsk, "", "why is r2 degraded?")}
+		plan := []conveneTask{{Member: memberCoder, Task: "x"}}
+		if got := turn.coderNeedsAnAsk(plan, tc.want); got != tc.want {
+			t.Errorf("coderNeedsAnAsk(plan, %v) = %v", tc.want, got)
+		}
+	}
+}
+
+// TestNoCutMarker: a cut result says how much is shown and how to read the rest; the old silent
+// "[cut]" marker is gone from the whole package.
+func TestNoCutMarker(t *testing.T) {
+	for _, text := range []string{
+		readSkillPageInTest(t),
+		mustRender(t),
+	} {
+		if strings.Contains(text, "[cut]") {
+			t.Errorf("a result still carries [cut]: %q", cutUTF8(text, 200, "…"))
+		}
+	}
+	// And no non-test file of the package writes it: the marker as a string literal, which is how a
+	// result would carry it (a bare "[cut]" in a comment is not a marker anyone sees).
+	var files []string
+	for _, dir := range []string{".", "tools"} {
+		matches, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, matches...)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files to scan: the glob is wrong")
+	}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "[cut]\"") {
+			t.Errorf("%s still writes the old [cut] marker", name)
+		}
+	}
+}
+
+// readSkillPageInTest is the first page of a guide.
+func readSkillPageInTest(t *testing.T) string {
+	t.Helper()
+	text, _, err := readSkill("teknoir-platform", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return text
+}
+
+// mustRender is a rendered cut result.
+func mustRender(t *testing.T) string {
+	t.Helper()
+	full := strings.Repeat("line\n", 4000)
+	cut := resultcut.Cut(full, 500)
+	text, _ := tools.Render("list_devices", tools.Result{Text: full, Full: full, Truncated: true, Cut: cut}, "r1")
+	return text
 }

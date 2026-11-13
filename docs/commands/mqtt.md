@@ -4,7 +4,12 @@ Follow the MQTT messages of the teamspace's devices, as a person or inside a Tek
 
 ```bash
 tnctl mqtt stream <topic>... [--count N] [--seconds S] [--json] [--reconnect]
+tnctl mqtt sample <topic>... [--count 50] [--seconds 10] [--max-bytes 16MiB] [--out FILE] [--json]
 ```
+
+`stream` follows the topics until it is stopped and shows a binary payload as `<base64:N bytes>`;
+[`sample`](#sample-a-finite-capture-of-whole-messages) captures a finite set of whole messages and ends
+with a summary.
 
 ## Topics
 
@@ -83,6 +88,87 @@ out, or `--seconds` ended before any answer came: a platform that cannot reach i
 A run whose `--seconds` ended before any stream opened exits with its last answer's code from this table, with
 `--reconnect` too: a `502` or `503` gives 1, a `504` 4, a bot's request budget `429` 9, a network failure 1
 (4 when it timed out); 4 when no answer came.
+
+## `sample`: a finite capture of whole messages
+
+```bash
+tnctl mqtt sample <topic>... [--count 50] [--seconds 10] [--max-bytes 16MiB] [--out FILE] [--json]
+```
+
+A finite capture of the messages that arrive, with every payload as the stream sent it. Use it when a
+message must survive as it was sent, or when the endless output of `stream` is not what you want. The
+topics are the [topics](#topics) of `stream`, 1 to 8 of them.
+
+| Flag | Description |
+| --- | --- |
+| `--count N` | Stop after N messages: 1 to 1000, default 50. |
+| `--seconds S` | Stop S seconds after the stream opened: 1 to 120, default 10. |
+| `--max-bytes N` | Stop before the payloads pass N bytes: 1KiB to 16MiB, default and maximum 16MiB. A plain byte count, or `KiB`, `MiB`, `K`, `M`, `KB`, `MB` (the same powers of 1024). |
+| `--out FILE` | Write the JSON lines to FILE and print only the summary on stdout. |
+| `--json` | Print each message as one JSON line. |
+
+The capture stops at the first of: `--count` messages (`stoppedBy: "count"`); `--seconds` after the
+stream opened (`"seconds"`); the next message that would push the total past `--max-bytes`, which is
+then not kept and whose size is reported as `nextMessageBytes` (`"size"`); the end of the stream
+(`"end"`); or Ctrl-C (`"interrupted"`, which still prints the summary and exits 0). Opening the stream
+has its own limit of 20 s: when it fires the command fails with exit 4 and says the platform did not
+open the stream, since an empty capture would otherwise read as "the device published nothing". There
+is no reconnect, and an error the platform reports ends the command with that error.
+
+Bytes are payload bytes: a text payload's UTF-8 length, or a binary one's decoded length.
+
+### Output
+
+Without `--json`, one line per message, `<topic> <payload>`. A text payload is printed whole; a binary
+one is printed as `base64:` followed by the whole base64 text — never as a placeholder. Both go through
+the same escaping as `stream`, so a message is always one line.
+
+```text
+/devices/vision-01/state/telemetry {"cpu":0.25,"memory":0.5}
+/devices/vision-01/events/frame base64:/9j/4AAQSkZJRgABAQ...
+```
+
+With `--json`, one compact JSON object per message, `i` counting from 0:
+
+```json
+{"i":0,"topic":"/devices/vision-01/state/telemetry","ts":"2026-11-08T10:00:00Z","retain":false,"bytes":25,"encoding":"utf8","payload":"{\"cpu\":0.25,\"memory\":0.5}"}
+```
+
+`encoding` is `utf8` or `base64`; with `base64` the payload is the base64 text exactly as the platform
+sent it. `--out FILE` writes those lines to FILE instead of stdout: the file is created with mode
+`0600`, an existing file is refused unless it is an empty regular file (on Linux and macOS a symbolic link, dangling or not, a hard link and a FIFO are also refused; Windows does not make these checks), and stdout then carries only the summary.
+
+### The summary
+
+The capture always ends with a summary.
+
+With `--json` or `--out` it is a JSON line, the last line of the output (in the file with `--out`, and
+on stdout as well):
+
+```json
+{"summary":{"messages":50,"bytes":1234567,"stoppedBy":"count","serverDropped":{"size":3,"rate":0,"slow":0,"other":0}}}
+```
+
+`nextMessageBytes` appears with `stoppedBy: "size"`, and `serverDropped` counts what the platform
+dropped, by reason; a dropped event with an unknown reason counts as `other`.
+
+Without `--json` or `--out` it is one stderr line:
+
+```text
+tnctl: 50 messages, 1234567 bytes, stopped by count; the platform dropped 3 (size 3); messages over 256 KiB are dropped by the platform
+```
+
+A message over 256 KiB is dropped by the platform and counted under `serverDropped.size`; it never
+arrives, and the summary says so. The exit code is 0 when a stream opened, whatever stopped it.
+
+```bash
+tnctl mqtt sample /devices/+/state/#
+tnctl mqtt sample /devices/cam-01/events/# --count 5 --out cam.jsonl
+tnctl mqtt sample /devices/+/events/# --seconds 60 --max-bytes 4MiB --json
+```
+
+The MCP server offers the same capture as the `mqtt_get_sample` tool, which returns payloads inline or
+in a capture that [`mqtt_read`](mcp.md) pages through.
 
 ## See also
 

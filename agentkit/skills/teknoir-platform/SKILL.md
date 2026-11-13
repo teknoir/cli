@@ -200,13 +200,17 @@ read-only and all scoped to your identity:
 
 `whoami`, `list_teamspaces`, `list_devices`, `get_device`, `list_robots`, `get_robot`,
 `list_robot_types`, `list_fleets`, `get_overview`, `get_problems`, `get_config`, `list_kinds`,
-`prom_query`, `inspect_pod`, `inspect_logs`, `inspect_release`, `mqtt_sample`.
+`prom_query`, `inspect_pod`, `inspect_logs`, `inspect_release`, `mqtt_sample`,
+`mqtt_get_sample`, `mqtt_read`.
 
 The three `inspect_*` tools never turn a Shell on; when it is off they fail with the platform's
 own message saying so (the result names no error code).
-`mqtt_sample` collects a few messages and stops.
+`mqtt_sample` collects a few messages and stops, with a long payload cut;
+`mqtt_get_sample` returns them whole (a sample whose payload text, base64 for a binary one, passes 12288
+bytes or whose answer does not fit is spilled to a capture that `mqtt_read` pages through, or reads one JSON
+field of with `path`; an index that leaves messages out of its list says `truncated`).
 
-These tools write nothing. Started as `tnctl mcp --council` (a person's own agent only), the server
+These tools write nothing to the platform; `mqtt_get_sample` keeps the samples it spills as `0600` files in its own capture directory, deleted after 30 minutes or when the session ends. Started as `tnctl mcp --council` (a person's own agent only), the server
 also has the `council_*` tools, which hand work to a TeknoirBot's council (skill `teknoir-council`).
 Every other write goes through `tnctl`, so that the TeknoirBot's permission rules and the platform's
 own checks see it. If the server is not registered, use the `tnctl` commands in the

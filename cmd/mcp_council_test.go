@@ -155,8 +155,8 @@ func TestMCPCouncilToolsAreListed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plain.Tools) != 17 {
-		t.Errorf("%d tools without --council, want the 17 read tools", len(plain.Tools))
+	if len(plain.Tools) != 19 {
+		t.Errorf("%d tools without --council, want the 19 read tools", len(plain.Tools))
 	}
 	for _, tool := range plain.Tools {
 		if strings.HasPrefix(tool.Name, "council_") {
@@ -169,8 +169,8 @@ func TestMCPCouncilToolsAreListed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 21 {
-		t.Fatalf("%d tools, want 21", len(tools.Tools))
+	if len(tools.Tools) != 23 {
+		t.Fatalf("%d tools, want 23", len(tools.Tools))
 	}
 	want := map[string][]string{
 		"council_info":   {"bot"},

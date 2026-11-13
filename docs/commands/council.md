@@ -95,8 +95,9 @@ What the platform's tools give a member follows the bot's access level, and so d
 | `creator` (Act as me) | every tool, `inspect_*` included | the same | its own computer, and `tnctl` as the bot at `creator` |
 
 The Critic gets no tool at all. The Captain and Fleet also get `read_skill`, which reads one of the kit's
-guides (`teknoir-platform`, `teknoir-robots`, `teknoir-config`, `teknoir-debug`, `teknoir-mqtt-streams`), and
-the Captain gets `convene_council`: 1 to 3 tasks for `fleet` and `coder`, at most one of them a Coder task, a
+seven guides (`teknoir-platform`, `teknoir-robots`, `teknoir-config`, `teknoir-debug`, `teknoir-mqtt-streams`,
+`teknoir-k3s-apps`, `teknoir-council`) a page at a time, and `read_result`, which pages the rest of a cut tool
+result; the Captain gets `convene_council`: 1 to 3 tasks for `fleet` and `coder`, at most one of them a Coder task, a
 task of at most 4000 characters and a reason of at most 1000. It is not offered in a quick turn, and at
 access level `none` a `fleet` task is refused.
 
@@ -156,6 +157,58 @@ claim when it sets none:
 | `D − 75 s` | the work phases: routing with tools, the members, the Critic |
 | `D + 20 s` | the answer calls: the Captain's forced answer, and its synthesis |
 | `D + 50 s` | the turn's finish is posted by |
+
+## When a tool result is too long
+
+A tool result is cut to 16 KiB before a member sees it. The MCP server the council runs in-process does
+not cut in front of that — its own cap is 1 MiB, so that it only guards against a runaway answer — since a
+48 KiB cut of its own would reach the council as a wrapper it then cuts again, with counts that disagree.
+Neither cut is silent: the member gets a result that says what it is missing.
+
+- **The header.** A result a member sees only part of starts with a `RESULT PARTIAL` line:
+  `RESULT PARTIAL: shown 14798 of 48123 bytes, 12 of 40 items (ref r1). Do not infer missing items, counts
+  or absences; read_result with ref r1 and offset 14796 gives the rest, or narrow the query.` The bytes and
+  the items are counted (a JSON text the council cannot cut at whole elements of an array, such as an
+  object whose largest member is a string like `inspect_logs`' "text", reads `shown S of T bytes of JSON
+  text`, with no line counts, since the lines of indented JSON are its wrapper's; so does a JSON text the
+  server already cut that way), `of "<field>"` names the object's array that was cut, and the offset is where the
+  unseen rest starts: in an indented array, right after the last element shown, before the comma that
+  precedes the next one (the closing bracket the cut put back is not part of the original text). A tool
+  that cut its own result (a `{"truncated": true}` wrapper, an `inspect_*` answer that says so, an MQTT
+  sample) gets a first line saying so, with its own hint and, when the tool named one, the total. The hint
+  is at most 200 bytes, cut after its last whole sentence that ends past half of that, or else at a space
+  in its second half (at a character boundary when there is none) with a final `…`; a spilled `mqtt_get_sample` index puts the messages it leaves out first in its hint. An `inspect_logs` answer counts as cut upstream only when `truncated.bytes`
+  is true (the log passed the platform's 1 MiB limit): `truncated.lines` alone is the last `tail` lines the
+  call asked for, and gets no header. A failed call never does, whatever its text says. When the
+  council cuts that result as well, the cut line follows it and the first line says whose numbers the
+  wrapper's are.
+- **`read_result`** reads the rest: `{"ref": "r1", "offset": 14796}` gives up to 12288 bytes of the whole
+  result from that offset, after a line `PAGE: bytes 14796..27084 of 48123 (ref r1); nextOffset 27084`. A
+  page joins with what was shown into the tool's own text, byte for byte. The offset must be on a rune
+  boundary; an unknown reference and an offset outside the result are error results.
+- **The untrusted tags.** Every MCP tool result, and every page, is inside
+  `<untrusted source="tool:<name>" sha256="…">…</untrusted>`: the source, and the SHA-256 of the whole
+  result, so a page is recognizable as part of the result it came from. In the result itself, a `<` that
+  opens `untrusted` is escaped to `&lt;` (the opener itself), and nothing else is, so the text stays
+  readable. That covers the name in any case and in fullwidth letters; `<` and its look-alikes (fullwidth
+  `＜`, small `﹤`, `˂`, `‹`, `〈` (U+3008), `⟨` (U+27E8) and U+2329, the left-pointing angle bracket); between the opener and the name any run of white space, Unicode
+  separators, `/`, `\` and their look-alikes (fullwidth `／` and `＼`, `∕`, `⁄`, `⧸`); and hidden characters
+  both there and between the name's letters: controls (C0, DEL, C1), format characters (zero-width
+  spaces, word joiners), combining marks (variation selectors, the combining grapheme joiner) and the
+  Hangul fillers. So `</untrusted>`, `</ untrusted>`, `<\/untrusted>`, `<\0/untrusted>`, `<` + U+200B +
+  `/untrusted>`, `</u` + U+FE0F + `ntrusted>` and `＜／ｕｎｔｒｕｓｔｅｄ＞` all count. The escaping covers
+  these spellings and look-alikes; homoglyphs from other scripts (a Cyrillic `е` in the name) are not
+  caught. The actual boundary is the prompts' rule: they tell the members that what is inside the tags
+  comes from the platform and its devices. A refusal made by the council itself, and a guide from `read_skill`,
+  are not wrapped.
+- **The store.** A result is kept whole only when it was cut: at most 16 MiB per turn, in memory, gone
+  with the turn. Past the cap the member gets no reference, and its header says `the rest is not kept`.
+- **The Critic's rule.** The Critic's input counts the evidence entries that rest on a cut result
+  (`truncatedCalls`, and `"truncated": true` on each), and its instructions say that a count, a "none" or
+  an absence resting on one is a problem, blocking when the answer depends on it, unless the member paged
+  it with `read_result`.
+- **`read_skill` pages too.** A guide is read with `{"name": …, "offset": 0}`, at most 16 KiB a page, and a
+  page that is not the last ends with `[more: read_skill with offset <n>]`.
 
 ## The Coder
 
