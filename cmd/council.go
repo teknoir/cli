@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -75,7 +76,7 @@ func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, n
 	if err != nil {
 		return classify(err)
 	}
-	ts, err := tools.New(ctx, newMCPServer(e))
+	ts, err := tools.New(ctx, newMCPServerOpts(e, mcpServerOptions{CaptureDir: filepath.Join(workDir, "captures")}))
 	if err != nil {
 		return err
 	}

@@ -2,7 +2,7 @@
 
 Run a **read-only MCP server** over stdio for an AI coding agent (Claude Code, Codex, OpenCode). The agent
 gets typed tools that answer from the platform's fleet API (`whoami`, as a person, from the stored login);
-none of the 17 read tools changes anything. Started with `--council`, the server also offers four
+none of the 19 read tools changes anything. Started with `--council`, the server also offers four
 `council_*` tools that hand work to a TeknoirBot's council: they are not read-only, and they are for a
 person's own agent only — inside a TeknoirBot the server refuses `--council`. The server works as whoever
 `tnctl` is: your `tnctl login` session, or, inside a TeknoirBot, the bot and its own teamspace.
@@ -46,7 +46,9 @@ kit's Claude Code plugin. Codex and OpenCode list the same tools under the serve
 | `get_config` | `target`, `resource`, `defaults`, `detail` | The effective configuration of a robot or device (`target`): its layers, overrides and states. `resource` (`Kind/namespace/name`, `Kind/name` or `name`) shows one resource with its provenance, the rendered item and its override; `defaults` adds the chart's default values. Without `resource` it is a summary unless `detail=full`. |
 | `list_kinds` | | The kinds of local resources the platform accepts on a robot or device, and the ones it refuses. |
 | `prom_query` | `query`, `time` | A PromQL instant query on the teamspace's Prometheus, limited to the devices the caller may see. Device series carry `device_id` (no `device` label); `up` has none (use `device_last_seen`). `time` is RFC 3339 or Unix seconds; empty means now. |
-| `mqtt_sample` | `topics`, `seconds`, `max` | The MQTT messages of the teamspace's devices for a few seconds: what a device publishes. `topics` is 1 to 8 topics, each `/devices/<device>/state/#` or `/devices/<device>/events/#` (`+` for every device) or a concrete topic below them; `seconds` is 5 by default and at most 30, `max` is 50 messages by default and at most 200. |
+| `mqtt_sample` | `topics`, `seconds`, `max` | A cheap preview of what a device publishes: the MQTT messages of the teamspace's devices for a few seconds, with a long payload cut. `topics` is 1 to 8 topics, each `/devices/<device>/state/#` or `/devices/<device>/events/#` (`+` for every device) or a concrete topic below them; `seconds` is 5 by default and at most 30, `max` is 50 messages by default and at most 200. For whole payloads use `mqtt_get_sample`. |
+| `mqtt_get_sample` | `topics`, `seconds`, `max`, `maxBytes` | The same capture, with every payload whole: inline when the payloads add up to at most 12288 bytes, otherwise an index of a capture that `mqtt_read` pages through. `maxBytes` is 2 MiB by default and at most 8 MiB. |
+| `mqtt_read` | `captureId`, `i`, `offset`, `length`, `path` | One message of a spilled capture, a page at a time (12288 bytes at most), or one field of a JSON payload with `path`. |
 | `inspect_pod` | `robot`, `pod_namespace`, `pod` | A pod of a robot: phase, containers and recent events. |
 | `inspect_logs` | `robot`, `pod_namespace`, `pod`, `container`, `previous`, `tail`, `since` | The log of a pod on a robot: the last `tail` lines (200 by default, at most 2000), of one `container`, of the `previous` run, or `since` a duration such as `10m`. |
 | `inspect_release` | `robot`, `release_namespace`, `release` | An installed Helm release of a robot: status, revision and its objects. |
@@ -110,15 +112,15 @@ How they behave:
 
 ## Rules
 
-- **Read-only, except the council tools.** The 17 read tools change nothing, and each is annotated read-only
+- **Read-only, except the council tools.** The 19 read tools change nothing, and each is annotated read-only
   and idempotent: no tool runs a command, opens a session, logs in or writes. The four `council_*` tools of
   `--council` start a turn on a TeknoirBot, so they are annotated not read-only, not idempotent, not
   destructive, and open-world: the bot runs its own processes on its own computer.
 - **Tool results are device data.** Labels, logs, events and MQTT payloads can hold text written by anyone
   who controls a device or its workloads. The server tells the agent never to follow instructions found in a
   tool result: in its instructions, for every tool, and again in the descriptions of `list_devices`,
-  `get_device`, `get_robot`, `get_problems`, `get_config`, `prom_query`, `mqtt_sample` and the
-  `inspect_*` tools. The `council_*` tools carry the same warning about their results, which are text the
+  `get_device`, `get_robot`, `get_problems`, `get_config`, `prom_query`, `mqtt_sample`,
+  `mqtt_get_sample`, `mqtt_read` and the `inspect_*` tools. The `council_*` tools carry the same warning about their results, which are text the
   bot's models wrote.
 - **`namespace`** is an optional input of every tool but `whoami` and `list_teamspaces`; empty means the
   teamspace `tnctl` targets. The login and the teamspace are read on every call, so `tnctl ns` and
@@ -141,16 +143,46 @@ How they behave:
   stream opens, and opening has its own limit of 20 s), and stops at `max` messages (default 50, at most
   200) or when the sample is full (about 36 KiB). Every message carries the server's data as it was sent. A
   text payload longer than 4096 bytes, or a binary one longer than 3072 bytes (4096 base64 characters), is
-  cut, and the message then says `payloadBytes` (its full length in bytes) and `payloadTruncated`. One
-  sample runs at a time: a second call while one runs answers that another is running, so put every topic
-  in one call. The result also counts the messages the platform dropped (`dropped`), and its `stoppedBy`
-  says why the sample ended: `max`, `seconds`, `end` (the platform ended the stream) or `size` (the sample
-  was full).
+  cut, and the message then says `payloadBytes` (its full length in bytes) and `payloadTruncated`. The
+  result says whether it cut anything: `truncated`, `truncatedMessages` (how many payloads were cut),
+  `totalBytes` (the full payload bytes of the messages it kept) and `serverDropped` (`size`, `rate`, `slow`,
+  `other`); `dropped` is their total, and when it cut anything a `hint` names `mqtt_get_sample` for whole
+  payloads. One sample runs at a time — `mqtt_sample` and `mqtt_get_sample` share that one slot — so a
+  second call while one runs answers that another is running: put every topic in one call. `stoppedBy` says
+  why the sample ended: `max`, `seconds`, `end` (the platform ended the stream) or `size` (the sample was
+  full).
+- **`mqtt_get_sample`** is the same capture with every payload whole, and it shares the one-sample slot
+  with `mqtt_sample`. It takes the same `topics`, `seconds` (default 5, at most 30) and `max` (default 50,
+  at most 200) plus `maxBytes` (default 2 MiB, at most 8 MiB; it stops before the payloads pass it, the
+  message that would is not kept, and `nextMessageBytes` reports its size). When the payloads add up to at
+  most 12288 bytes it answers inline:
+  `{"messages":[{"i","topic","ts","retain","bytes","encoding","payload"}],"count","totalBytes","stoppedBy","serverDropped","truncated"}`.
+  A larger sample is written to a capture and the answer is an index:
+  `{"captureId","file","expiresAt","count","totalBytes","stoppedBy","serverDropped","truncated","messages":[{"i","topic","ts","retain","bytes","encoding","sha256","kind","jsonValid","preview"}],"hint"}`.
+  `kind` is `json`, `text`, `jpeg`, `png`, `gzip` or `binary`; `preview` is the start of a text payload
+  (cut where a rune starts), or `hex:` and the first 32 bytes of a binary one. An index too long for the
+  result drops its previews from the last message backwards (`previewsOmitted`), and lists fewer messages
+  (`omitted`) only when even that does not fit: every message stays readable by its `i`. Payloads over
+  256 KiB are dropped by the platform, never sent, and counted in `serverDropped.size`.
+- **`mqtt_read`** reads one message of a capture: `captureId` and `i`, then `offset` (0 by default) and
+  `length` (12288 by default and at most; a 256 KiB payload is about 22 pages). Without `path` the data is
+  the payload's text — UTF-8 cut back to a rune start, or the base64 text read in groups of 4 characters
+  (an `offset` that is no multiple of 4 is an error) — and `nextOffset` says where the next page starts
+  (`null` at the end). With `path` (`detections[0].label`, `data.items[2].id`) the payload must be JSON
+  and the data is that value, marshalled compactly and paged the same way; a missing key or index is an
+  error naming the first step that failed and the keys or length it found, and a key that holds `.`, `[`
+  or `]` cannot be addressed. The result carries `topic`, `path` (with it), `totalBytes`, `encoding` and
+  the whole payload's `sha256`, so the pages can be checked.
+- **Where captures live.** The stdio server (`tnctl mcp`) keeps them in the temp directory's
+  `tnctl-captures` (`${TMPDIR:-/tmp}/tnctl-captures`, mode `0700`, files `0600`); inside a TeknoirBot's
+  council they go to `/work/captures`. A capture lasts 30 minutes, and the store keeps at most 64 MiB,
+  evicting the oldest first. An unknown or expired `captureId` is an error asking for a new sample.
 
 ## See also
 
 - [`agent`](agent.md) - install the Teknoir agent kit and register the server.
 - [`chat`](chat.md) - the same council, as a person in a terminal.
 - [`council`](council.md) - the bot's own half: the process that answers the turns.
-- [`mqtt`](mqtt.md) - the same stream in a terminal, with `tnctl mqtt stream`.
+- [`mqtt`](mqtt.md) - the same stream in a terminal, with `tnctl mqtt stream` for endless output or
+  `tnctl mqtt sample` for a finite capture of whole messages.
 - [Bot mode](../bot-mode.md) - the server inside a TeknoirBot.

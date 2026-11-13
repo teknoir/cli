@@ -41,7 +41,7 @@ the bot key is missing or empty (/run/teknoirbot/key): this computer predates th
 ## What a bot may do
 
 Everything a person's `tnctl` does with the fleet API: `robots`, `robot` (show, `add`, `disable`, `enable`,
-`remove`), `config`, `devices`, `device`, `whoami`, `api`, `inspect`, `mqtt stream` and `mcp` (limited to the
+`remove`), `config`, `devices`, `device`, `whoami`, `api`, `inspect`, `mqtt stream`, `mqtt sample` and `mcp` (limited to the
 bot's teamspace). The platform decides what the bot's creator may do in the teamspace (`whoami` reports
 `access none`, `read` or `creator`).
 
@@ -113,5 +113,5 @@ in clear text, so anything else exits 6 with _TEKNOIRBOT_API must be https_.
 
 ## See also
 
-- [`whoami`](commands/whoami.md), [`api`](commands/api.md), [`inspect`](commands/inspect.md), [`mqtt stream`](commands/mqtt.md), [`mcp`](commands/mcp.md), [`chat`](commands/chat.md), [`council`](commands/council.md)
+- [`whoami`](commands/whoami.md), [`api`](commands/api.md), [`inspect`](commands/inspect.md), [`mqtt`](commands/mqtt.md), [`mcp`](commands/mcp.md), [`chat`](commands/chat.md), [`council`](commands/council.md)
 - [Configuration](configuration.md) — the user's `~/.tnctl.yaml`, which bot mode ignores.

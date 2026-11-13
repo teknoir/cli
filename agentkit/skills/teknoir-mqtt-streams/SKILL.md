@@ -73,6 +73,11 @@ tnctl mqtt stream /devices/+/state/# /devices/+/events/alerts --seconds 60 --rec
   not UTF-8 arrives as `payloadBase64`.
 - Without `--json` each message is one line, `<topic> <payload>`, and a binary payload shows as
   `<base64:N bytes>`. Newlines show as `\n`, other control characters but tab as `\u00XX`.
+- `tnctl mqtt sample <topic>...` is the finite capture for whole messages: 50 messages and 10 s by
+  default (`--count` at most 1000, `--seconds` at most 120, `--max-bytes` 16 MiB at most). A text
+  payload prints whole and a binary one as `base64:` with the whole base64 text; it ends with a
+  summary (messages, bytes, why it stopped, what the platform dropped), `--json` makes every line
+  and the summary JSON, and `--out FILE` writes the JSON lines to a file and prints the summary.
 - `--count N` and `--seconds S` stop cleanly (exit 0) once a stream opened. Dropped messages are
   reported on stderr, with why: `rate` (the platform forwards at most 200 messages per second per
   stream), `size` (a message over 256 KiB) or `slow` (the reader did not keep up). A message over
@@ -119,16 +124,41 @@ scripts/sample.sh '/devices/+/state/#'                  # 10 s, 50 messages, JSO
 scripts/sample.sh --summary --seconds 20 '/devices/+/events/#'
 ```
 
-Defaults are 10 seconds and 50 messages, at most 60 seconds and 500 messages.
+Its defaults (10 seconds and 50 messages, at most 60 seconds and 500 messages) belong to the
+script, not to `tnctl mqtt sample` or the MCP tools, which have their own.
 
 ### The `mqtt_sample` tool
 
 When the agent has the Teknoir tool server registered (the `teknoir` server of `tnctl mcp`), the
 `mqtt_sample` tool takes `topics` (1 to 8), `seconds` (default 5, at most 30) and `max` (default
-50, at most 200) and returns `{"messages":[...],"dropped":N,"stoppedBy":...}`. It is the same read
-as the command, with no shell, but a payload over 4096 bytes (a binary one over 3072) is cut
-(`payloadTruncated`, `payloadBytes`) and a sample stops when it is full (`stoppedBy: "size"`).
-Prefer the command when you need whole payloads or to process the output.
+50, at most 200) and returns `{"messages":[...],"dropped":N,"stoppedBy":...}`. It is a **cut
+preview**: a payload over 4096 bytes (a binary one over 3072) comes back cut, marked
+`payloadTruncated` with `payloadBytes` its full length, and `truncated`, `truncatedMessages`,
+`totalBytes` and `serverDropped` say what the sample lost. It stops when it is full
+(`stoppedBy: "size"`).
+
+### Whole payloads: `mqtt_get_sample` and `mqtt_read`
+
+`mqtt_get_sample` takes the same `topics`, `seconds` (default 5, at most 30) and `max` (default 50,
+at most 200) plus `maxBytes` (default 2 MiB, at most 8 MiB) and returns every payload **whole**. A
+sample of at most 12288 payload bytes comes back inline. A larger one is written to a capture that
+lasts 30 minutes, and the answer is an index: one entry per message with `kind` (`json`, `text`,
+`jpeg`, `png`, `gzip`, `binary`), `sha256`, `bytes` and a `preview`, plus a `captureId`.
+
+Read the index first and take only what the task needs: a 256 KiB payload is about 22 pages.
+
+- `mqtt_read` with `captureId`, `i` (the message), `offset` and `length` (12288 at most) returns a
+  page of the payload's text, or of its base64 text, and `nextOffset` for the next one (`null` at
+  the end). Follow `nextOffset`; an `offset` inside a character (or one that is no multiple of 4
+  for base64) is an error that says so.
+- `mqtt_read` with `path` returns one field of a JSON payload marshalled compactly, which is far
+  cheaper than paging: `path=detections[0].label`, `path=data.items[2].id`, `path=data`. A missing
+  key or index names the first step that failed and the keys or length it found there.
+- A truncated (cut) answer from any tool carries `… truncated` at its end: page more, or narrow the
+  query, rather than treating the text as the whole payload.
+
+On the command line, `tnctl mqtt sample` is the same finite capture with whole payloads, for a
+person or an agent that can run commands.
 
 ## Payload formats
 
