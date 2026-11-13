@@ -88,7 +88,7 @@ type WorkTurn struct {
 	ThreadID string    `json:"threadId"`
 	Index    int       `json:"index"`
 	Kind     string    `json:"kind"`   // ask | member
-	Member   string    `json:"member"` // "", fleet, coder
+	Member   string    `json:"member"` // "" on an ask turn, else the slug of the member the turn was sent to
 	Prompt   string    `json:"prompt"`
 	Options  Options   `json:"options"`
 	Origin   string    `json:"origin"`
@@ -99,8 +99,42 @@ type WorkTurn struct {
 	// Deadline is when the turn must be finished, in epoch milliseconds.
 	Deadline int64 `json:"deadline"`
 	// Council is the council of this turn, when the platform sent one (proto 2). nil is an older
-	// platform, or a bot that announced no capabilities.
+	// platform, a bot that announced no capabilities, or a council that could not be read (then
+	// CouncilErr says why).
 	Council *Snapshot `json:"council,omitempty"`
+	// CouncilErr is why the council could not be read; intake fails the turn bad_turn with it. A
+	// council the bot cannot read is the platform's mistake about this turn, not a work-queue error:
+	// it must not cost the bot the turn.
+	CouncilErr error `json:"-"`
+}
+
+// UnmarshalJSON decodes a turn, keeping a council it cannot read as CouncilErr instead of failing
+// the turn's decode: a mistyped council would otherwise make Next report an error, and the bot
+// would never answer the turn it was given.
+func (w *WorkTurn) UnmarshalJSON(b []byte) error {
+	// plain has no methods on it, so decoding the rest of the turn cannot recurse into this one; the
+	// Council field here shadows plain's, so the council is taken as its raw JSON.
+	type plain WorkTurn
+	outer := struct {
+		plain
+		Council json.RawMessage `json:"council"`
+	}{}
+	if err := json.Unmarshal(b, &outer); err != nil {
+		return err
+	}
+	*w = WorkTurn(outer.plain)
+	w.Council, w.CouncilErr = nil, nil
+	raw := bytes.TrimSpace(outer.Council)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	var s Snapshot
+	if err := json.Unmarshal(raw, &s); err != nil {
+		w.CouncilErr = fmt.Errorf("the council is not readable: %w", err)
+		return nil
+	}
+	w.Council = &s
+	return nil
 }
 
 // Options are the settings of a turn.

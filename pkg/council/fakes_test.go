@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -21,6 +22,13 @@ import (
 
 // ---------- the scripted model ----------
 
+// The Standard council's member slugs, as a test names them. The daemon itself names only the built-in
+// Coder (memberCoder): every other member comes from the turn's council.
+const (
+	slugFleet = "fleet"
+	slugCoder = "coder"
+)
+
 // The roles a scripted answer is matched to, from the request's system prompt.
 const (
 	roleRoute   = "captain-route"
@@ -30,19 +38,57 @@ const (
 	roleUnknown = "unknown"
 )
 
-// roleOf is the member a request is for.
+// standardFleetRounds is the Standard Fleet's budget.maxToolRounds in legacy_standard.json and
+// testdata/standard_snapshot_*.json: the tests' own copy of it, so that no production default is
+// what they count against (TestLegacyStandardBudget matches the two).
+const (
+	standardFleetRounds = 10
+	standardFleetTokens = 120_000
+)
+
+// roleOf is the member a request is for. The Standard roles keep their names, because the golden
+// files record them; every other request is named by the schema it answers and the name of the role
+// its prompt starts with, so a council of the test's own is scripted by its own slugs.
 func roleOf(req model.Request) string {
 	switch {
-	case strings.Contains(req.System, "You are Fleet"):
+	case strings.HasPrefix(req.System, "You are Fleet, "):
 		return roleFleet
-	case strings.Contains(req.System, "You are the Critic"):
+	case strings.HasPrefix(req.System, "You are the Critic of "):
 		return roleCritic
-	case strings.Contains(req.System, "The council has reported"):
-		return roleAnswer
-	case strings.Contains(req.System, "You are the Captain"):
+	case strings.HasPrefix(req.System, "You are the Captain of "):
+		if strings.Contains(req.System, "The council has reported") {
+			return roleAnswer
+		}
 		return roleRoute
+	case reflect.DeepEqual(req.Format, any(reportSchema)):
+		// A member: "You are <Name>, <persona> of the council of the TeknoirBot …".
+		return "member:" + between(req.System, "You are ", ", ")
+	case reflect.DeepEqual(req.Format, any(critiqueSchema)):
+		// A reviewer: "You are the <Name> of the council of a TeknoirBot."
+		return "reviewer:" + between(req.System, "You are the ", " of the council")
+	case strings.HasPrefix(req.System, "You are the "):
+		// A lead of another council: "You are the <Name> of the council of the TeknoirBot …".
+		if strings.Contains(req.System, "The council has reported") {
+			return "lead-answer:" + between(req.System, "You are the ", " of the council")
+		}
+		return "lead-route:" + between(req.System, "You are the ", " of the council")
 	}
 	return roleUnknown
+}
+
+// between is the text of s between the first head and the first tail after it, or "" when either is
+// missing. It is how a test reads a role's name out of its prompt.
+func between(s, head, tail string) string {
+	i := strings.Index(s, head)
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+len(head):]
+	j := strings.Index(rest, tail)
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }
 
 // scriptStep is one scripted answer.
@@ -281,6 +327,17 @@ type fakeTools struct {
 	// queues are results for one tool, one per call in order: the first is given to the first
 	// call, and once it is used up the tool answers from results as usual.
 	queues map[string][]tools.Result
+	// catalog is the tools each level may use, when the test has its own: a test that needs a tool
+	// the Standard catalog has not sets it, and testToolNames stays the shared default.
+	catalog map[string][]string
+}
+
+// namesAt is the catalog at level: the test's own when it set one, else testToolNames.
+func (f *fakeTools) namesAt(level string) []string {
+	if f.catalog != nil {
+		return f.catalog[level]
+	}
+	return testToolNames[level]
 }
 
 func newFakeTools() *fakeTools {
@@ -296,14 +353,14 @@ func (f *fakeTools) queueResults(name string, results ...tools.Result) {
 
 // Names is a sorted copy of the fake catalog at level.
 func (f *fakeTools) Names(level string) []string {
-	out := append([]string{}, testToolNames[level]...)
+	out := append([]string{}, f.namesAt(level)...)
 	slices.Sort(out)
 	return out
 }
 
 // For keeps the fake catalog's own order, filtered by allow: the golden files record that order.
 func (f *fakeTools) For(level string, allow []string) []anthropic.ToolUnionParam {
-	names := testToolNames[level]
+	names := f.namesAt(level)
 	out := make([]anthropic.ToolUnionParam, 0, len(names))
 	for _, n := range names {
 		if !slices.Contains(allow, n) {
@@ -319,7 +376,7 @@ func (f *fakeTools) For(level string, allow []string) []anthropic.ToolUnionParam
 
 func (f *fakeTools) Call(ctx context.Context, level string, allow []string, name string, input json.RawMessage) (tools.Result, error) {
 	// The same order of checks, and the same refusals, as tools.Set.Call.
-	if !slices.Contains(testToolNames[level], name) {
+	if !slices.Contains(f.namesAt(level), name) {
 		msg := fmt.Sprintf("%q is not a tool a council member at level %q may call", name, level)
 		return tools.Result{Text: msg, Digest: msg, IsError: true}, nil
 	}

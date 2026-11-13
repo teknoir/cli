@@ -55,13 +55,11 @@ var (
 	snapshotHash = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// roleSlug is the form of a role's slug.
 	roleSlug = regexp.MustCompile(`^[a-z][a-z0-9-]{1,23}$`)
-	// leadWireID is the id the lead always answers to, whatever its display name (D9).
-	leadWireID = "captain"
 )
 
 // validateSnapshot checks a hub snapshot against this daemon's own catalog. It fails closed: any
-// violation returns an error whose message is the reason; the caller (next step) fails the turn
-// "bad_turn" with "The council for this turn is not valid: <reason>.".
+// violation returns an error whose message is the reason; orchestrate fails the turn "bad_turn"
+// with "The council for this turn is not valid: <reason>.".
 //
 // names is the tools this daemon may call at a level, and skills the guides it carries; a
 // snapshot that names anything else is refused.
@@ -106,8 +104,8 @@ func validateSnapshot(s *hub.Snapshot, work *hub.WorkTurn, names func(level stri
 				return fmt.Errorf("%s: the slug is used by two members of this council", roleLabel(kindRole, m))
 			}
 			seen[m.Slug] = true
-			if m.Slug == leadWireID {
-				return fmt.Errorf("%s: a member may not take the lead's wire id %q", roleLabel(kindRole, m), leadWireID)
+			if m.Slug == memberCaptain {
+				return fmt.Errorf("%s: a member may not take the lead's wire id %q", roleLabel(kindRole, m), memberCaptain)
 			}
 		}
 		if s.Reviewer != nil && s.Reviewer.Kind != kindReviewer {
@@ -115,8 +113,8 @@ func validateSnapshot(s *hub.Snapshot, work *hub.WorkTurn, names func(level stri
 		}
 		// The reviewer is a role of the same council: its slug must not share a lane with a member,
 		// and the lead's wire id belongs to the lead alone (5.5 attributes events by slug).
-		if s.Reviewer != nil && (seen[s.Reviewer.Slug] || s.Reviewer.Slug == leadWireID) {
-			return fmt.Errorf("%s: the slug is also a member's or the lead's wire id %q", roleLabel(kindReviewer, s.Reviewer), leadWireID)
+		if s.Reviewer != nil && (seen[s.Reviewer.Slug] || s.Reviewer.Slug == memberCaptain) {
+			return fmt.Errorf("%s: the slug is also a member's or the lead's wire id %q", roleLabel(kindReviewer, s.Reviewer), memberCaptain)
 		}
 	case kindMember:
 		if s.Roster != nil {
@@ -138,8 +136,8 @@ func validateSnapshot(s *hub.Snapshot, work *hub.WorkTurn, names func(level stri
 		if m.Kind != kindRole {
 			return fmt.Errorf("%s: kind is %q, and a member's is %q", roleLabel(kindRole, m), m.Kind, kindRole)
 		}
-		if m.Slug == leadWireID {
-			return fmt.Errorf("%s: a member may not take the lead's wire id %q", roleLabel(kindRole, m), leadWireID)
+		if m.Slug == memberCaptain {
+			return fmt.Errorf("%s: a member may not take the lead's wire id %q", roleLabel(kindRole, m), memberCaptain)
 		}
 		if m.Slug != work.Member {
 			return fmt.Errorf("%s: slug is not the member this turn was sent to (%q)", roleLabel(kindRole, m), cutUTF8(work.Member, 64, "…"))
@@ -166,7 +164,7 @@ func validateSnapshot(s *hub.Snapshot, work *hub.WorkTurn, names func(level stri
 	return nil
 }
 
-// roleLabels are how a role is named in a reason: its kind and its slug.
+// roleLabel is how a role is named in a reason: its kind and its slug.
 func roleLabel(kind string, r *hub.RoleSnapshot) string {
 	return kind + " " + fmt.Sprintf("%q", cutUTF8(r.Slug, 64, "…"))
 }

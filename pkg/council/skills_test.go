@@ -511,7 +511,8 @@ func TestSkillBookKeepsToTheCaps(t *testing.T) {
 	})
 }
 
-// read_skill serves only the guides its enum lists: an extra guide of the kit dir is not read.
+// read_skill serves only the guides the role was given: an extra guide of the kit dir that the role
+// does not name is not read.
 func TestReadSkillRefusesExtraGuides(t *testing.T) {
 	h := newHarness(t, newWork(kindAsk, "", "x"))
 	h.cfg.Skills = mapKit(map[string]string{"teknoir-platform": "p", "zeta-extra": "z"})
@@ -520,19 +521,60 @@ func TestReadSkillRefusesExtraGuides(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	tr := &turn{d: d, work: newWork(kindAsk, "", "x")}
-	res := runReadSkill(tr, json.RawMessage(`{"name":"zeta-extra","offset":0}`))
+	res := runReadSkill(tr, stdRole(t, "read", "fleet"), json.RawMessage(`{"name":"zeta-extra","offset":0}`))
 	if !res.IsError {
 		t.Fatalf("read_skill read an extra guide: %q", res.Text)
 	}
 	if want := "there is no guide named zeta-extra; use one of the guides your instructions list"; res.Text != want {
 		t.Errorf("text = %q, want %q", res.Text, want)
 	}
-	res = runReadSkill(tr, json.RawMessage(`{"name":"teknoir-platform","offset":0}`))
+	res = runReadSkill(tr, stdRole(t, "read", "fleet"), json.RawMessage(`{"name":"teknoir-platform","offset":0}`))
 	if res.IsError {
 		t.Fatalf("read_skill refused a guide of the kit: %q", res.Text)
 	}
 	if res.Text != "p" {
 		t.Errorf("the page = %q, want the guide's body", res.Text)
+	}
+}
+
+// An extra guide of the kit dir is served to a role whose skills name it: its enum, its digest and
+// a read.
+func TestReadSkillServesANamedExtraGuide(t *testing.T) {
+	h := newHarness(t, newWork(kindAsk, "", "x"))
+	h.cfg.Skills = mapKit(map[string]string{"teknoir-platform": "p", "zeta-extra": "z"})
+	d, err := New(h.cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tr := &turn{d: d, work: newWork(kindAsk, "", "x")}
+	r := stdRole(t, "read", "fleet")
+	r.Skills = []string{"zeta-extra"}
+	res := runReadSkill(tr, r, json.RawMessage(`{"name":"zeta-extra","offset":0}`))
+	if res.IsError || res.Text != "z" {
+		t.Fatalf("read_skill = %+v, want the extra guide's body", res)
+	}
+	if got, want := d.book.digest(r.Skills), "zeta-extra: the guide zeta-extra"; got != want {
+		t.Errorf("digest = %q, want %q", got, want)
+	}
+	if enum := stringEnum(t, readSkillTool(r.Skills), "name"); !equal(enum, []string{"zeta-extra"}) {
+		t.Errorf("enum = %v, want [zeta-extra]", enum)
+	}
+	// The same role cannot read a kit guide it was not given.
+	if res := runReadSkill(tr, r, json.RawMessage(`{"name":"teknoir-platform","offset":0}`)); !res.IsError {
+		t.Error("read_skill served a guide the role does not name")
+	}
+	// A role that does not name the extra guide gets it in neither its enum nor its digest, and
+	// cannot read it.
+	other := stdRole(t, "read", "fleet")
+	other.Skills = []string{"teknoir-platform"}
+	if enum := stringEnum(t, readSkillTool(other.Skills), "name"); !equal(enum, []string{"teknoir-platform"}) {
+		t.Errorf("a role without the extra has the enum %v", enum)
+	}
+	if digest := d.book.digest(other.Skills); strings.Contains(digest, "zeta-extra") {
+		t.Errorf("a role without the extra has it in its digest: %q", digest)
+	}
+	if res := runReadSkill(tr, other, json.RawMessage(`{"name":"zeta-extra","offset":0}`)); !res.IsError {
+		t.Error("read_skill served the extra guide to a role that does not name it")
 	}
 }
 

@@ -144,41 +144,124 @@ func TestStandardGolden(t *testing.T) {
 		{"13", scenarioAutoOneProposalLowEffort},
 		{"14", scenarioAutoAnswerAtNone},
 	}
+	// Every scenario runs twice: once with no council, as an older hub sends it, and once with the
+	// Standard snapshot the platform sends now. The daemon must build the same council either way,
+	// so both runs are compared to the same unchanged file. The legacy run comes first: it is the
+	// one that writes the file under -update.
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
+			for _, mode := range []string{"legacy", "snapshot"} {
+				// Legacy comes first: it is the mode that writes the file under -update.
+				t.Run(mode, func(t *testing.T) {
+					h := sc.setup(t)
+					councilMode := mode == "snapshot"
+					if councilMode {
+						h.useStandardSnapshot(t)
+					}
+					h.start(t)
+					p := h.waitFinish(t)
+					h.stop(t)
+
+					// The requests are recorded in the order the fake saw them, which is only
+					// deterministic while one model call runs at a time. No scenario has two members that
+					// call the model (the Coder does not: it runs opencode), so this holds; a step that
+					// makes two model calls overlap must sort the requests instead.
+					if got := h.model.maxConcurrent(); got > 1 {
+						t.Fatalf("%d model calls were in flight at once: the recorded request order is racy", got)
+					}
+					// The coder tasks are recorded in the order the fake started them, which is only
+					// deterministic while one coder task runs at a time. No scenario has two; a step that
+					// starts two at once must sort them instead.
+					if got := h.coder.maxConcurrent(); got > 1 {
+						t.Fatalf("%d coder tasks were in flight at once: the recorded coder task order is racy", got)
+					}
+					// A scripted answer the fake never gave means the scenario did not run as written: a
+					// comparison would pass on a golden of a flow that no longer happens, and a re-record
+					// would write that flow as the baseline. Both modes check it.
+					if left := h.model.leftover(); len(left) > 0 {
+						t.Fatalf("the fake model was not asked for every scripted answer: %v left over", left)
+					}
+					checkGolden(t, sc.name, goldenDoc{
+						Requests:   recordRequests(t, h.model),
+						CoderTasks: recordCoderTasks(h.coder),
+						ToolCalls:  recordToolCalls(t, h.tools),
+						Events:     recordEvents(t, p),
+						Finish:     recordFinish(p),
+					}, !councilMode)
+				})
+			}
+		})
+	}
+}
+
+// TestStandardGoldenAccessDrop is the daemon's defence in depth (spec 4.5): a platform that claimed
+// a council at one level and a bot that answers another runs it at the lower one, filtering tools
+// rather than failing the turn. Each scenario is compared to its unchanged file, exactly as the
+// snapshot run of the goldens is.
+func TestStandardGoldenAccessDrop(t *testing.T) {
+	for _, sc := range []struct {
+		name    string
+		setup   func(t *testing.T) *testHarness
+		fixture string
+	}{
+		// A council claimed at creator, run at read: the inspect tools go.
+		{"3", scenarioCouncilRead, "creator"},
+		{"6", scenarioMemberFleetHistory, "creator"},
+		// A council claimed at read, run at none: every read tool goes.
+		{"5", scenarioCouncilNone, "read"},
+		{"6n", scenarioMemberFleetNoAccess, "read"},
+		{"12", scenarioConveneFleetAtNone, "read"},
+	} {
+		t.Run(sc.name, func(t *testing.T) {
 			h := sc.setup(t)
+			h.useSnapshot(t, sc.fixture)
 			h.start(t)
 			p := h.waitFinish(t)
 			h.stop(t)
-
-			// The requests are recorded in the order the fake saw them, which is only
-			// deterministic while one model call runs at a time. No scenario has two members that
-			// call the model (the Coder does not: it runs opencode), so this holds; a step that
-			// makes two model calls overlap must sort the requests instead.
-			if got := h.model.maxConcurrent(); got > 1 {
-				t.Fatalf("%d model calls were in flight at once: the recorded request order is racy", got)
-			}
-			// The coder tasks are recorded in the order the fake started them, which is only
-			// deterministic while one coder task runs at a time. No scenario has two; a step that
-			// starts two at once must sort them instead.
-			if got := h.coder.maxConcurrent(); got > 1 {
-				t.Fatalf("%d coder tasks were in flight at once: the recorded coder task order is racy", got)
-			}
-			// A scripted answer the fake never gave means the scenario did not run as written: a
-			// comparison would pass on a golden of a flow that no longer happens, and a re-record
-			// would write that flow as the baseline. Both modes check it.
 			if left := h.model.leftover(); len(left) > 0 {
 				t.Fatalf("the fake model was not asked for every scripted answer: %v left over", left)
 			}
+			// Compared, never written: the drop must reproduce the file, and -update in this test
+			// would hide a change instead of showing it.
 			checkGolden(t, sc.name, goldenDoc{
 				Requests:   recordRequests(t, h.model),
 				CoderTasks: recordCoderTasks(h.coder),
 				ToolCalls:  recordToolCalls(t, h.tools),
 				Events:     recordEvents(t, p),
 				Finish:     recordFinish(p),
-			})
+			}, false)
 		})
 	}
+}
+
+// useStandardSnapshot makes the queued turn the one the platform sends today: the Standard snapshot
+// at the level the harness answers whoami with. A member turn gets the snapshot a member turn gets:
+// no roster, lead, reviewer or budget, and exactly the one member it was sent to.
+func (h *testHarness) useStandardSnapshot(t *testing.T) {
+	t.Helper()
+	lvl, _, err := h.whoami(context.Background())
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
+	}
+	h.useSnapshot(t, levelOrNone(lvl))
+}
+
+// useSnapshot queues the Standard snapshot at level as the turn's council, shaped for the turn's kind.
+func (h *testHarness) useSnapshot(t *testing.T, level string) {
+	t.Helper()
+	work := h.hub.queue[0]
+	s := stdSnapshot(t, level)
+	if work.Kind == kindMember {
+		s.Roster, s.Lead, s.Reviewer, s.Budget = nil, nil, nil, nil
+		kept := make([]hub.RoleSnapshot, 0, 1)
+		for _, m := range s.Members {
+			if m.Slug == work.Member {
+				kept = append(kept, m)
+			}
+		}
+		s.Members = kept
+	}
+	work.Council = s
 }
 
 // goldenHarness is the harness of a golden scenario. MergeEvery is far beyond the test's life, so
@@ -232,7 +315,7 @@ func councilReadHolds(t *testing.T, level, fleetTool string) *testHarness {
 	h := goldenHarness(t, work)
 	h.whoamiAt(level)
 	h.model.pushUsed(roleRoute, toolStep("tool_use", conveneCall("tu_1",
-		taskOf(memberFleet, "the robot's problems", "find the facts"),
+		taskOf(slugFleet, "the robot's problems", "find the facts"),
 		taskOf(memberCoder, "a small dashboard", "the person asked for one"),
 	)))
 	h.model.pushUsed(roleFleet,
@@ -269,7 +352,7 @@ func scenarioCouncilNone(t *testing.T) *testHarness {
 
 // scenarioMemberFleetHistory is a member turn for Fleet at read, with two earlier exchanges.
 func scenarioMemberFleetHistory(t *testing.T) *testHarness {
-	work := newWork(kindMember, memberFleet, "which robots are degraded?")
+	work := newWork(kindMember, slugFleet, "which robots are degraded?")
 	work.History = []hub.History{
 		{Prompt: "what is a robot?", Final: "an edge computer", Author: &hub.Author{Email: "a@b.c", DisplayName: "Anders"}},
 		{Prompt: "and the fleet?", Final: "two robots", Author: &hub.Author{Email: "c@d.e", DisplayName: "Chris"}},
@@ -282,7 +365,7 @@ func scenarioMemberFleetHistory(t *testing.T) *testHarness {
 // scenarioMemberFleetNoAccess is a member turn for Fleet at none: Fleet has no tools at that
 // level, so the turn fails without a model call.
 func scenarioMemberFleetNoAccess(t *testing.T) *testHarness {
-	h := goldenHarness(t, newWork(kindMember, memberFleet, "which robots are degraded?"))
+	h := goldenHarness(t, newWork(kindMember, slugFleet, "which robots are degraded?"))
 	h.whoamiAt("none")
 	return h
 }
@@ -306,7 +389,7 @@ func scenarioAutoRefusedCoderTruncatedFleet(t *testing.T) *testHarness {
 	h.model.pushUsed(roleRoute,
 		toolStep("tool_use", apiCall{id: "tu_1", name: "list_robots", input: map[string]any{}}),
 		toolStep("tool_use", conveneCall("tu_2", taskOf(memberCoder, "set the edge limit to 0", "the log says so"))),
-		toolStep("tool_use", conveneCall("tu_3", taskOf(memberFleet, "the robot's problems", "find the facts"))),
+		toolStep("tool_use", conveneCall("tu_3", taskOf(slugFleet, "the robot's problems", "find the facts"))),
 	)
 	h.model.pushUsed(roleFleet,
 		toolStep("tool_use", apiCall{id: "tu_call_1", name: "list_robots", input: map[string]any{}}),
@@ -363,7 +446,7 @@ func autoOneFleetTaskEffort(t *testing.T, effort, summary, fleetReport string) *
 	work.Options.Effort = effort
 	h := goldenHarness(t, work)
 	h.model.pushUsed(roleRoute, toolStep("tool_use", conveneCall("tu_1",
-		taskOf(memberFleet, "the degraded robots", "find the facts"))))
+		taskOf(slugFleet, "the degraded robots", "find the facts"))))
 	h.model.pushUsed(roleFleet,
 		toolStep("tool_use", apiCall{id: "tu_call_1", name: "list_robots", input: map[string]any{}}),
 		textStep(fleetReport, "end_turn"))
@@ -403,7 +486,7 @@ func scenarioAutoOneProposalLowEffort(t *testing.T) *testHarness {
 func scenarioForcedAnswerAfterRounds(t *testing.T) *testHarness {
 	h := goldenHarness(t, newWork(kindAsk, "", "why is r2 degraded?"))
 	h.model.pushUsed(roleRoute, toolStep("tool_use", conveneCall("tu_1",
-		taskOf(memberFleet, "the robot's problems", "find the facts"))))
+		taskOf(slugFleet, "the robot's problems", "find the facts"))))
 
 	// One long list_robots result, cut by the tool itself: the model sees part, and the turn keeps
 	// the whole for read_result under r1.
@@ -422,7 +505,7 @@ func scenarioForcedAnswerAfterRounds(t *testing.T) *testHarness {
 			apiCall{id: "tu_call_2", name: "whoami", input: map[string]any{}}),
 	}
 	// The rest of Fleet's tool rounds: the first two rounds above are the first two of the limit.
-	for i := 3; i <= maxFleetRounds; i++ {
+	for i := 3; i <= standardFleetRounds; i++ {
 		steps = append(steps, toolStep("tool_use",
 			apiCall{id: fmt.Sprintf("tu_call_%d", i), name: "whoami", input: map[string]any{}}))
 	}
@@ -454,7 +537,7 @@ func scenarioConveneFleetAtNone(t *testing.T) *testHarness {
 	h := goldenHarness(t, newWork(kindAsk, "", "how many robots are degraded?"))
 	h.whoamiAt("none")
 	h.model.pushUsed(roleRoute,
-		toolStep("tool_use", conveneCall("tu_1", taskOf(memberFleet, "the degraded robots", "find the facts"))),
+		toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the degraded robots", "find the facts"))),
 		textStep("I cannot see the robots at this access level", "end_turn"))
 	return h
 }
@@ -541,16 +624,47 @@ func plainJSON(t *testing.T, v any) any {
 	return out
 }
 
-// recordEvents is every event the poster got, with its timings dropped and the members' parallel
-// work put in a stable order.
+// recordEvents is every event the poster got, with its timings dropped, the keys the roster added to
+// it (spec 5.5) dropped, and the members' parallel work put in a stable order. The keys are additive
+// data in the same events, so the file records each event without them whichever way the council
+// came.
 func recordEvents(t *testing.T, p *fakePoster) []goldenEvent {
 	t.Helper()
 	events := p.snapshot()
 	out := make([]goldenEvent, 0, len(events))
 	for _, e := range events {
-		out = append(out, goldenEvent{Type: e.Type, Data: dropTimings(t, e)})
+		out = append(out, goldenEvent{Type: e.Type, Data: dropAdditive(e.Type, dropTimings(t, e))})
 	}
 	return orderMemberRuns(out)
+}
+
+// dropAdditive removes the keys spec 5.5 added to the events, by event type and by the path the key
+// sits at: a key of the same name elsewhere in an event is data the council had before. These are
+// turn_start's roster, the name and why of each plan task, the name of a member event, and the
+// reviewer's member and name on the critique.
+func dropAdditive(typ string, data any) any {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return data
+	}
+	switch typ {
+	case hub.EventTurnStart:
+		delete(m, "roster")
+	case hub.EventPlan:
+		tasks, _ := m["tasks"].([]any)
+		for _, task := range tasks {
+			if t, ok := task.(map[string]any); ok {
+				delete(t, "name")
+				delete(t, "why")
+			}
+		}
+	case hub.EventMemberStart, hub.EventMemberDone:
+		delete(m, "name")
+	case hub.EventCritique:
+		delete(m, "member")
+		delete(m, "name")
+	}
+	return m
 }
 
 // dropTimings is an event's data without the keys that vary between runs: every "ms" (a timing),
@@ -622,8 +736,11 @@ func orderMemberRuns(events []goldenEvent) []goldenEvent {
 
 // ---------- the files ----------
 
-// checkGolden writes the scenario's file with -update, and otherwise compares it byte for byte.
-func checkGolden(t *testing.T, name string, doc goldenDoc) {
+// checkGolden writes the scenario's file with -update when write is set, and otherwise compares it
+// byte for byte. A scenario runs twice against one file, so only the run that records the file in
+// its own shape (the legacy one) writes it: a snapshot run with -update still compares, and a mode
+// that changed would fail the re-record instead of overwriting the other mode's baseline.
+func checkGolden(t *testing.T, name string, doc goldenDoc, write bool) {
 	t.Helper()
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -631,7 +748,7 @@ func checkGolden(t *testing.T, name string, doc goldenDoc) {
 	}
 	raw = append(raw, '\n')
 	path := filepath.Join("testdata", "standard", name+".json")
-	if updating() {
+	if updating() && write {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("make %s: %v", filepath.Dir(path), err)
 		}
@@ -718,4 +835,75 @@ func firstLineDiff(want, got string) string {
 		return fmt.Sprintf("line %d:\n  file:     %q\n  recorded: %q\n", i+1, w, g)
 	}
 	return ""
+}
+
+// TestGoldenEventAdditiveKeys: the keys spec 5.5 adds are there, with the platform's values, in both
+// ways a council can arrive. The file records the events without them (recordEvents drops them for
+// every run), so this is where they are checked.
+func TestGoldenEventAdditiveKeys(t *testing.T) {
+	for _, mode := range []string{"legacy", "snapshot"} {
+		t.Run(mode, func(t *testing.T) {
+			h := councilReadHolds(t, "read", "list_robots")
+			if mode == "snapshot" {
+				h.useStandardSnapshot(t)
+			}
+			h.start(t)
+			p := h.waitFinish(t)
+			h.stop(t)
+
+			var start map[string]any
+			for _, e := range p.ofType(hub.EventTurnStart) {
+				start = dataOf(t, e)
+				break
+			}
+			if start == nil {
+				t.Fatal("no turn_start event")
+			}
+			roster, ok := start["roster"].(map[string]any)
+			if !ok {
+				t.Fatalf("turn_start has no roster: %v", start)
+			}
+			wantHash := "legacy"
+			if mode == "snapshot" {
+				wantHash = stdSnapshot(t, "read").Hash
+			}
+			if roster["name"] != "standard" || roster["displayName"] != "Standard" || roster["hash"] != wantHash {
+				t.Errorf("the roster is %v", roster)
+			}
+
+			plans := p.ofType(hub.EventPlan)
+			if len(plans) != 1 {
+				t.Fatalf("%d plan events", len(plans))
+			}
+			tasks := dataOf(t, plans[0])["tasks"].([]any)
+			if len(tasks) != 2 {
+				t.Fatalf("%d plan tasks", len(tasks))
+			}
+			for i, want := range []struct{ slug, name, why string }{
+				{"fleet", "Fleet", "find the facts"},
+				{"coder", "Coder", "the person asked for one"},
+			} {
+				m := tasks[i].(map[string]any)
+				if m["member"] != want.slug || m["name"] != want.name || m["why"] != want.why {
+					t.Errorf("plan task %d is %v", i, m)
+				}
+			}
+
+			for _, e := range append(p.ofType(hub.EventMemberStart), p.ofType(hub.EventMemberDone)...) {
+				d := dataOf(t, e)
+				if want := map[string]string{"fleet": "Fleet", "coder": "Coder"}[fmt.Sprint(d["member"])]; want == "" || d["name"] != want {
+					t.Errorf("a member event names the wrong member: %v", d)
+				}
+			}
+
+			crits := p.ofType(hub.EventCritique)
+			if len(crits) != 1 {
+				t.Fatalf("%d critique events", len(crits))
+			}
+			d := dataOf(t, crits[0])
+			if d["member"] != "critic" || d["name"] != "Critic" {
+				t.Errorf("the critique event is %v", d)
+			}
+		})
+	}
 }

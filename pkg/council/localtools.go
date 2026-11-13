@@ -19,9 +19,11 @@ const (
 	toolReadResult = "read_result"
 )
 
-// The council's members a task may name, and the limits of a convene_council input.
+// The Standard council's Coder slug, and the limits of a convene_council input.
 const (
-	memberFleet = "fleet"
+	// memberCoder is the slug of the Coder in the Standard council (tpl:coder). Only tests name it: the
+	// legacy path reads its members from legacy_standard.json, and a council may have no Coder or more
+	// than one (find the Coder by Runtime == runtimeCoder, never by this slug).
 	memberCoder = "coder"
 
 	maxConveneTasks = 3
@@ -32,11 +34,19 @@ const (
 	tasksKey = "tasks"
 )
 
-// conveneMembers are the members a task may name.
-var conveneMembers = []string{memberFleet, memberCoder}
+// orList is names as a sentence: "a", "a or b", "a, b or c".
+func orList(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}
 
-// conveneTool is the convene_council tool.
-func conveneTool() anthropic.ToolUnionParam {
+// conveneTool is the convene_council tool, naming the members of this turn's council.
+func conveneTool(enum []string) anthropic.ToolUnionParam {
 	return anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
 		Name:        toolConvene,
 		Description: anthropic.String("Hand the question to council members. Use it instead of answering when the question needs an investigation or code."),
@@ -48,7 +58,7 @@ func conveneTool() anthropic.ToolUnionParam {
 						"type":                 "object",
 						"additionalProperties": false,
 						"properties": map[string]any{
-							"member": map[string]any{"type": "string", "enum": conveneMembers},
+							"member": map[string]any{"type": "string", "enum": enum},
 							"task":   map[string]any{"type": "string"},
 							"why":    map[string]any{"type": "string"},
 						},
@@ -65,15 +75,15 @@ func conveneTool() anthropic.ToolUnionParam {
 	}}
 }
 
-// readSkillTool is the read_skill tool. A guide is read a page at a time: offset 0 first, then the
-// offset the page's [more: ...] line gives.
-func readSkillTool() anthropic.ToolUnionParam {
+// readSkillTool is the read_skill tool, whose enum is the role's own guides. A guide is read a page
+// at a time: offset 0 first, then the offset the page's [more: ...] line gives.
+func readSkillTool(names []string) anthropic.ToolUnionParam {
 	return anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
 		Name:        toolReadSkill,
 		Description: anthropic.String("Read one of the Teknoir guides listed in your instructions: pass offset 0 first, then the offset a [more: ...] line gives."),
 		InputSchema: anthropic.ToolInputSchemaParam{
 			Properties: map[string]any{
-				"name":   map[string]any{"type": "string", "enum": skillNames},
+				"name":   map[string]any{"type": "string", "enum": names},
 				"offset": map[string]any{"type": "integer"},
 			},
 			Required: []string{"name", "offset"},
@@ -106,10 +116,11 @@ type conveneTask struct {
 	Why    string
 }
 
-// parseConvene validates a convene_council input: a JSON object {tasks: [...]}, 1 to 3 tasks, member
-// "fleet" or "coder", at most one "coder", task 1 to 4000 characters (runes) after trimming, why at
-// most 1000 characters; at level none no "fleet" task. The error is a short sentence for the model.
-func parseConvene(input json.RawMessage, level string) ([]conveneTask, error) {
+// parseConvene validates a convene_council input against this turn's council: a JSON object
+// {tasks: [...]}, 1 to 3 tasks, each naming a member of the council, at most one of them the Coder,
+// task 1 to 4000 characters (runes) after trimming, why at most 1000 characters; a data member is
+// convened only at the level it runs at. The error is a short sentence for the model.
+func parseConvene(input json.RawMessage, c *turnCouncil) ([]conveneTask, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(input, &raw); err != nil || raw == nil {
 		return nil, errors.New("give {tasks: [...]}")
@@ -150,18 +161,25 @@ func parseConvene(input json.RawMessage, level string) ([]conveneTask, error) {
 		if utf8.RuneCountInString(it.Why) > maxConveneWhy {
 			return nil, fmt.Errorf("a why is longer than %d characters", maxConveneWhy)
 		}
-		switch it.Member {
-		case memberFleet:
-			// Fail closed: "" and any level the platform may add later count as none.
-			if level != "read" && level != "creator" {
-				return nil, errors.New("at access level none only a coder task may be convened")
-			}
-		case memberCoder:
+		if it.Member == "" {
+			return nil, errors.New(`a task has no member (` + orList(c.enum()) + `)`)
+		}
+		r := c.member(it.Member)
+		if r == nil {
+			return nil, fmt.Errorf("%q is not a member (%s)", cutUTF8(it.Member, 64, "…"), orList(c.enum()))
+		}
+		switch {
+		case r.Runtime == runtimeCoder:
 			coders++
-		case "":
-			return nil, errors.New(`a task has no member (fleet or coder)`)
-		default:
-			return nil, fmt.Errorf("%q is not a member (fleet or coder)", cutUTF8(it.Member, 64, "…"))
+		case r.dataRole() && !r.convenable():
+			conv := c.convenableEnum()
+			switch len(conv) {
+			case 1:
+				return nil, errors.New("at access level none only a " + conv[0] + " task may be convened")
+			case 0:
+				return nil, errors.New("at access level none no member may be convened")
+			}
+			return nil, errors.New("at access level none only " + orList(conv) + " tasks may be convened")
 		}
 		out = append(out, conveneTask{Member: it.Member, Task: task, Why: it.Why})
 	}

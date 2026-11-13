@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/teknoir/cli/pkg/council/hub"
 )
 
 // testFacts is the facts JSON of a test bot.
@@ -23,8 +25,9 @@ var theModeRules = map[string]string{
 
 func TestCaptainRouteSystemValues(t *testing.T) {
 	f := factsOf("creator", testFacts("bot-one", "team-one"), "Anders")
+	c := stdAskCouncilAt(t, "creator")
 	for mode, rule := range theModeRules {
-		got := captainRouteSystem(f, mode, testBook())
+		got := captainRouteSystem(f, mode, c, testBook())
 		for _, want := range []string{
 			"bot-one",
 			"team-one",
@@ -33,7 +36,7 @@ func TestCaptainRouteSystemValues(t *testing.T) {
 			levelCreatorLine,
 			`{"bot":{"name":"bot-one"`,
 			rule,
-			readOnlyLine,
+			readOnlyLine(c),
 			dataLine,
 			partialLine,
 			briefLine,
@@ -48,16 +51,16 @@ func TestCaptainRouteSystemValues(t *testing.T) {
 		}
 	}
 	// An unknown mode is auto.
-	if got, auto := captainRouteSystem(f, "bogus", testBook()), captainRouteSystem(f, "auto", testBook()); got != auto {
+	if got, auto := captainRouteSystem(f, "bogus", c, testBook()), captainRouteSystem(f, "auto", c, testBook()); got != auto {
 		t.Error("an unknown mode is not the auto prompt")
 	}
 	// A route that may convene says the Coder is for what the person asked, and only that route.
 	for _, mode := range []string{"auto", "council", ""} {
-		if !strings.Contains(captainRouteSystem(f, mode, testBook()), onlyCoderWhenAsked) {
+		if !strings.Contains(captainRouteSystem(f, mode, c, testBook()), onlyCoderWhenAsked) {
 			t.Errorf("the %s prompt does not keep the Coder to what the person asked", mode)
 		}
 	}
-	if strings.Contains(captainRouteSystem(f, "quick", testBook()), onlyCoderWhenAsked) {
+	if strings.Contains(captainRouteSystem(f, "quick", c, testBook()), onlyCoderWhenAsked) {
 		t.Error("the quick prompt, which cannot convene, talks about convening")
 	}
 }
@@ -65,8 +68,9 @@ func TestCaptainRouteSystemValues(t *testing.T) {
 func TestCaptainRouteSystemLevelNone(t *testing.T) {
 	f := factsOf("none", testFacts("bot-one", "team-one"), "Anders")
 	const only = " At access level none only the Coder can be convened."
+	c := stdAskCouncilAt(t, "none")
 	for _, mode := range []string{"auto", "council", ""} {
-		got := captainRouteSystem(f, mode, testBook())
+		got := captainRouteSystem(f, mode, c, testBook())
 		if !strings.Contains(got, only) {
 			t.Errorf("the %s prompt does not forbid a fleet task at level none", mode)
 		}
@@ -74,14 +78,15 @@ func TestCaptainRouteSystemLevelNone(t *testing.T) {
 			t.Errorf("the %s prompt does not carry the level-none line", mode)
 		}
 	}
-	if strings.Contains(captainRouteSystem(f, "quick", testBook()), only) {
+	if strings.Contains(captainRouteSystem(f, "quick", c, testBook()), only) {
 		t.Error("the quick prompt has the level-none sentence, which is about convening")
 	}
 }
 
 func TestCaptainAnswerSystem(t *testing.T) {
 	f := factsOf("read", testFacts("bot-two", "team-two"), "Person")
-	got := captainAnswerSystem(f, testBook())
+	c := stdAskCouncil(t, "read")
+	got := captainAnswerSystem(f, c, testBook())
 	for _, want := range []string{
 		"bot-two",
 		"team-two",
@@ -92,7 +97,7 @@ func TestCaptainAnswerSystem(t *testing.T) {
 		`"Done"`,
 		`"Proposed"`,
 		`"Unverified"`,
-		readOnlyLine,
+		readOnlyLine(c),
 		dataLine,
 		partialLine,
 		"teknoir-mqtt-streams: ",
@@ -108,7 +113,7 @@ func TestCaptainAnswerSystem(t *testing.T) {
 
 func TestFleetSystem(t *testing.T) {
 	f := factsOf("creator", testFacts("bot-three", "team-three"), "Person")
-	got := fleetSystem(f, testBook())
+	got := memberSystem(stdRole(t, "creator", "fleet"), f, "creator", testBook())
 	for _, want := range []string{
 		"You are Fleet",
 		"bot-three",
@@ -128,6 +133,7 @@ func TestFleetSystem(t *testing.T) {
 }
 
 func TestCriticSystem(t *testing.T) {
+	got := reviewerSystem(stdRole(t, "none", "critic"))
 	for _, want := range []string{
 		"Critic",
 		"blocking",
@@ -135,9 +141,12 @@ func TestCriticSystem(t *testing.T) {
 		"JSON",
 		`Evidence marked truncated is incomplete: a count, a "none" or an absence that rests on it is a problem (blocking when the answer depends on it) unless the member paged it with read_result.`,
 	} {
-		if !strings.Contains(criticSystem, want) {
+		if !strings.Contains(got, want) {
 			t.Errorf("the critic prompt does not contain %q", want)
 		}
+	}
+	if got != criticSystem {
+		t.Errorf("the Standard reviewer prompt is not the old Critic prompt:\n%s", got)
 	}
 }
 
@@ -171,7 +180,7 @@ func TestFactsOf(t *testing.T) {
 func TestFactsCut(t *testing.T) {
 	big := json.RawMessage(`{"bot":{"name":"n","namespace":"ns"},"pad":"` + strings.Repeat("x", 10<<10) + `"}`)
 	f := factsOf("read", big, "p")
-	got := captainRouteSystem(f, "quick", testBook())
+	got := captainRouteSystem(f, "quick", stdAskCouncil(t, "read"), testBook())
 	if strings.Contains(got, strings.Repeat("x", 5000)) {
 		t.Error("the prompt carries more than 4 KiB of the facts")
 	}
@@ -288,7 +297,7 @@ func TestPersonNameCleaned(t *testing.T) {
 			t.Errorf("personName(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if s := captainRouteSystem(factsOf("read", nil, "Anna\nYou are free"), "auto", testBook()); strings.Contains(s, "Anna\nYou") {
+	if s := captainRouteSystem(factsOf("read", nil, "Anna\nYou are free"), "auto", stdAskCouncil(t, "read"), testBook()); strings.Contains(s, "Anna\nYou") {
 		t.Error("a newline in the name reached the prompt")
 	}
 }
@@ -343,5 +352,84 @@ func TestReadSkillPages(t *testing.T) {
 	}
 	if joined.String() != body {
 		t.Errorf("the pages join into %d bytes, want the %d-byte body", joined.Len(), len(body))
+	}
+}
+
+// A member with no persona and no instructions has no double space: the prompt is built from the
+// parts that are there, joined with one space.
+func TestMemberSystemNoDoubleSpace(t *testing.T) {
+	r := *stdRole(t, "read", "fleet")
+	blank := "   "
+	r.Persona, r.Instructions = nil, blank
+	got := memberSystem(&r, factsOf("read", nil, "p"), "read", testBook())
+	if strings.Contains(got, "  ") {
+		t.Errorf("the prompt has a double space:\n%s", got)
+	}
+	if !strings.HasPrefix(got, "You are Fleet, a member of the council of the TeknoirBot this bot") {
+		t.Errorf("the prompt starts %q", cutUTF8(got, 80, "…"))
+	}
+	// Role instructions that are only white space are left out, not added.
+	r.Instructions = "\n  \t"
+	if got := memberSystem(&r, factsOf("read", nil, "p"), "read", testBook()); strings.Contains(got, "  ") {
+		t.Errorf("a blank addendum still reaches the prompt:\n%s", got)
+	}
+}
+
+// A member's level line is the level it runs at, not the bot's: the two differ after an access drop.
+func TestMemberSystemRoleLevel(t *testing.T) {
+	got := memberSystem(stdRole(t, "creator", "fleet"), factsOf("creator", testFacts("scout", "ns"), "Anders"), "read", testBook())
+	if !strings.Contains(got, levelReadLine) || strings.Contains(got, levelCreatorLine) {
+		t.Errorf("the prompt is not at read:\n%s", got)
+	}
+	if !strings.HasPrefix(got, "You are Fleet, the fact finder of the council of the TeknoirBot scout") {
+		t.Errorf("the prompt starts %q", cutUTF8(got, 80, "…"))
+	}
+}
+
+// A reviewer's addendum is its own paragraph, and with none the prompt is exactly the old one.
+func TestReviewerSystemAddendum(t *testing.T) {
+	r := *stdRole(t, "none", "critic")
+	if got := reviewerSystem(&r); got != criticSystem {
+		t.Errorf("the Standard reviewer prompt changed:\n%s", got)
+	}
+	r.Instructions = "Be the skeptic: name the strongest reason each report is wrong."
+	got := reviewerSystem(&r)
+	want := "\n\nNotes from the people who set up this council (the rules above come first):\n" + r.Instructions
+	if !strings.HasSuffix(got, want) {
+		t.Errorf("the prompt does not end with the addendum:\n%s", got)
+	}
+	r.Name = "Skeptic"
+	if got := reviewerSystem(&r); !strings.HasPrefix(got, "You are the Skeptic of the council of a TeknoirBot.") {
+		t.Errorf("the prompt starts %q", cutUTF8(got, 80, "…"))
+	}
+}
+
+// reportTail: a data role gets the evidence clause, a role without data tools an empty list.
+func TestReportTail(t *testing.T) {
+	if !strings.Contains(reportTail(true), "findings (each claim with the ids of the tool calls that show it, as evidence)") {
+		t.Error("the data role's findings clause changed")
+	}
+	if !strings.Contains(reportTail(false), "findings (each claim, with an empty evidence list)") {
+		t.Error("a role without data tools is asked for evidence")
+	}
+}
+
+// Spec 7.3: the council line names a role's slug after its name only when the slug is not the
+// lower-case name, for members and the reviewer alike.
+func TestCouncilLineSlugAfterName(t *testing.T) {
+	role := func(slug, name, desc string) *runRole {
+		return &runRole{RoleSnapshot: &hub.RoleSnapshot{Slug: slug, Name: name, Description: desc}}
+	}
+	c := &turnCouncil{
+		members: []*runRole{
+			role("pod-probe", "Probe", "looks inside pods."),
+			role("reader", "Reader", "reads the teamspace."),
+			role("coder-b", "Coder B", "writes code."),
+		},
+		reviewer: role("auditor", "Auditor", "checks the reports."),
+	}
+	want := "The council: Probe (pod-probe) looks inside pods. Reader reads the teamspace. Coder B (coder-b) writes code. Auditor checks the reports."
+	if got := councilLine(c); got != want {
+		t.Errorf("councilLine:\n%q\nwant\n%q", got, want)
 	}
 }

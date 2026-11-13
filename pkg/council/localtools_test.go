@@ -39,7 +39,7 @@ func schemaOf(t *testing.T, m map[string]any) map[string]any {
 }
 
 func TestConveneToolSchema(t *testing.T) {
-	m := toolJSON(t, conveneTool())
+	m := toolJSON(t, conveneTool(stdAskCouncil(t, "read").enum()))
 	if m["name"] != toolConvene {
 		t.Errorf("name = %v", m["name"])
 	}
@@ -85,7 +85,8 @@ func TestConveneToolSchema(t *testing.T) {
 }
 
 func TestReadSkillToolSchema(t *testing.T) {
-	m := toolJSON(t, readSkillTool())
+	names := []string{"teknoir-debug", "teknoir-mqtt-streams"}
+	m := toolJSON(t, readSkillTool(names))
 	if m["name"] != toolReadSkill {
 		t.Errorf("name = %v", m["name"])
 	}
@@ -99,10 +100,10 @@ func TestReadSkillToolSchema(t *testing.T) {
 	props, _ := schema["properties"].(map[string]any)
 	name, _ := props["name"].(map[string]any)
 	enum, _ := name["enum"].([]any)
-	if len(enum) != len(skillNames) {
-		t.Errorf("name enum = %v, want %v", name["enum"], skillNames)
+	if len(enum) != len(names) {
+		t.Errorf("name enum = %v, want %v", name["enum"], names)
 	}
-	for i, want := range skillNames {
+	for i, want := range names {
 		if enum[i] != want {
 			t.Errorf("enum[%d] = %v, want %s", i, enum[i], want)
 		}
@@ -129,7 +130,7 @@ func TestWithLocal(t *testing.T) {
 			CacheControl: anthropic.CacheControlEphemeralParam{TTL: anthropic.CacheControlEphemeralTTLTTL5m},
 		}},
 	}
-	got := withLocal(forList, conveneTool(), readSkillTool())
+	got := withLocal(forList, conveneTool([]string{"fleet", "coder"}), readSkillTool(skillNames))
 	if len(got) != 4 {
 		t.Fatalf("tools = %d, want 4", len(got))
 	}
@@ -160,8 +161,8 @@ func TestRequestHasThreeBreakpoints(t *testing.T) {
 			CacheControl: anthropic.CacheControlEphemeralParam{TTL: anthropic.CacheControlEphemeralTTLTTL5m},
 		}},
 	}
-	streamOnce(t, server, captainRouteSystem(factsOf("read", testFacts("b", "ns"), "p"), "auto", testBook()),
-		withLocal(forList, conveneTool(), readSkillTool()))
+	streamOnce(t, server, captainRouteSystem(factsOf("read", testFacts("b", "ns"), "p"), "auto", stdAskCouncil(t, "read"), testBook()),
+		withLocal(forList, conveneTool([]string{"fleet", "coder"}), readSkillTool(skillNames)))
 	req := body()
 	if n := strings.Count(req, `"cache_control"`); n != 3 {
 		t.Errorf("the request has %d cache breakpoints, want 3 (system, last tool, tail): %s", n, req)
@@ -172,8 +173,10 @@ func TestRequestHasThreeBreakpoints(t *testing.T) {
 }
 
 func TestParseConvene(t *testing.T) {
+	read := stdAskCouncil(t, "read")
+	none := stdAskCouncil(t, "none")
 	valid := `{"tasks":[{"member":"fleet","task":"find the robot","why":"it is the question"}]}`
-	got, err := parseConvene(json.RawMessage(valid), "read")
+	got, err := parseConvene(json.RawMessage(valid), read)
 	if err != nil {
 		t.Fatalf("a valid input was refused: %v", err)
 	}
@@ -182,7 +185,7 @@ func TestParseConvene(t *testing.T) {
 	}
 	// Trimming, and the three-task limit.
 	three := `{"tasks":[{"member":"fleet","task":" a ","why":""},{"member":"fleet","task":"b","why":""},{"member":"coder","task":"c","why":""}]}`
-	got, err = parseConvene(json.RawMessage(three), "read")
+	got, err = parseConvene(json.RawMessage(three), read)
 	if err != nil {
 		t.Fatalf("three tasks were refused: %v", err)
 	}
@@ -190,11 +193,11 @@ func TestParseConvene(t *testing.T) {
 		t.Errorf("tasks = %+v, want the task trimmed", got)
 	}
 	// A coder task is the one a level-none bot may convene.
-	if _, err := parseConvene(json.RawMessage(`{"tasks":[{"member":"coder","task":"c","why":""}]}`), "none"); err != nil {
+	if _, err := parseConvene(json.RawMessage(`{"tasks":[{"member":"coder","task":"c","why":""}]}`), none); err != nil {
 		t.Errorf("a coder task was refused at level none: %v", err)
 	}
 	// A fleet task at level none: refused.
-	if _, err := parseConvene(json.RawMessage(valid), "none"); err == nil {
+	if _, err := parseConvene(json.RawMessage(valid), none); err == nil {
 		t.Error("a fleet task was allowed at level none")
 	}
 	for _, tc := range []struct {
@@ -218,7 +221,11 @@ func TestParseConvene(t *testing.T) {
 		{"wrong member type", `{"tasks":[{"member":1,"task":"a","why":""}]}`, "read"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseConvene(json.RawMessage(tc.input), tc.level)
+			c := read
+			if tc.level == "none" {
+				c = none
+			}
+			got, err := parseConvene(json.RawMessage(tc.input), c)
 			if err == nil {
 				t.Fatalf("accepted %s: %+v", tc.name, got)
 			}
@@ -277,14 +284,23 @@ func TestChangeAsked(t *testing.T) {
 
 func TestParseConveneFleetNeedsALevel(t *testing.T) {
 	fleet := json.RawMessage(`{"tasks":[{"member":"fleet","task":"look","why":""}]}`)
+	// Fail closed: "" and any level the platform may add later run as none.
 	for _, level := range []string{"", "none", "admin", "Read"} {
-		if _, err := parseConvene(fleet, level); err == nil {
+		if _, err := parseConvene(fleet, stdAskCouncilAt(t, level)); err == nil {
 			t.Errorf("level %q: a fleet task was accepted", level)
 		}
 	}
 	for _, level := range []string{"read", "creator"} {
-		if _, err := parseConvene(fleet, level); err != nil {
+		if _, err := parseConvene(fleet, stdAskCouncilAt(t, level)); err != nil {
 			t.Errorf("level %q: %v", level, err)
+		}
+	}
+	// A role's run level is what the check reads: "" and "Read" on it count as none.
+	for _, runLevel := range []string{"", "Read"} {
+		c := stdAskCouncil(t, "creator")
+		roleOfSlug(t, c, "fleet").runLevel = runLevel
+		if _, err := parseConvene(fleet, c); err == nil {
+			t.Errorf("a run level of %q: a fleet task was accepted", runLevel)
 		}
 	}
 }
@@ -343,7 +359,7 @@ func TestAnsweredToolDataCountsReadResult(t *testing.T) {
 		}
 		// Which is what decides the ask: a Coder task after read_result needs the person to have
 		// asked for a change, as after any other platform data.
-		turn := &turn{work: newWork(kindAsk, "", "why is r2 degraded?")}
+		turn := &turn{work: newWork(kindAsk, "", "why is r2 degraded?"), council: stdAskCouncil(t, "read")}
 		plan := []conveneTask{{Member: memberCoder, Task: "x"}}
 		if got := turn.coderNeedsAnAsk(plan, tc.want); got != tc.want {
 			t.Errorf("coderNeedsAnAsk(plan, %v) = %v", tc.want, got)

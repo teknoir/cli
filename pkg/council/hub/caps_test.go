@@ -503,3 +503,90 @@ func TestWorkTurnCouncilAbsent(t *testing.T) {
 		t.Errorf("options = %+v", turn.Options)
 	}
 }
+
+// A council the daemon cannot read costs the turn its council, never the turn: the platform's
+// mistake about this turn must not come back as a work-queue error, or the bot would never answer
+// it.
+func TestWorkTurnCouncilUnreadable(t *testing.T) {
+	// A persona that is a number: every other field of the turn is the platform's own.
+	raw := strings.Replace(specExample, `"persona": null,`, `"persona": 7,`, 1)
+	turn := &WorkTurn{}
+	if err := json.Unmarshal([]byte(`{"id":"trn_1","claimId":"clm_1","kind":"ask","member":"",`+
+		`"prompt":"why is r2 degraded?","options":{"mode":"council","thorough":true},`+
+		`"author":{"email":"a@b.c","displayName":"Anders"},"council":`+raw+`}`), turn); err != nil {
+		t.Fatalf("a mistyped council failed the whole turn: %v", err)
+	}
+	if turn.CouncilErr == nil {
+		t.Error("CouncilErr is nil, and the council could not be read")
+	}
+	if !strings.Contains(turn.CouncilErr.Error(), "the council is not readable") {
+		t.Errorf("CouncilErr = %v", turn.CouncilErr)
+	}
+	if turn.Council != nil {
+		t.Errorf("council = %+v, and it could not be read", turn.Council)
+	}
+	// Everything else decoded.
+	if turn.ID != "trn_1" || turn.ClaimID != "clm_1" || turn.Kind != "ask" ||
+		turn.Prompt != "why is r2 degraded?" || turn.Author.DisplayName != "Anders" ||
+		turn.Options.Mode != "council" || !turn.Options.Thorough {
+		t.Errorf("the rest of the turn: %+v", turn)
+	}
+}
+
+// null and an absent council are both "an older platform": no council, and no error either.
+func TestWorkTurnCouncilNull(t *testing.T) {
+	for name, raw := range map[string]string{
+		"absent": `{"id":"trn_1","kind":"ask"}`,
+		"null":   `{"id":"trn_1","kind":"ask","council":null}`,
+		"spaced": `{"id":"trn_1","kind":"ask","council":   null   }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			turn := &WorkTurn{}
+			if err := json.Unmarshal([]byte(raw), turn); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if turn.Council != nil || turn.CouncilErr != nil {
+				t.Errorf("council = %+v, CouncilErr = %v, want both nil", turn.Council, turn.CouncilErr)
+			}
+		})
+	}
+}
+
+// The spec's own example decodes through the turn, because that is how the platform sends it.
+func TestWorkTurnCouncilSpecExample(t *testing.T) {
+	turn := &WorkTurn{}
+	if err := json.Unmarshal([]byte(`{"id":"trn_1","kind":"ask","council":`+specExample+`}`), turn); err != nil {
+		t.Fatal(err)
+	}
+	if turn.CouncilErr != nil {
+		t.Fatalf("CouncilErr: %v", turn.CouncilErr)
+	}
+	want, got := decodeSnapshot(t, specExample), turn.Council
+	if !reflect.DeepEqual(want, got) {
+		t.Errorf("the turn's council is not the snapshot:\n%+v\nwant\n%+v", got, want)
+	}
+}
+
+// Next hands the turn on, mistyped council and all: the error goes with the turn, not instead of it.
+func TestNextKeepsAMistypedCouncil(t *testing.T) {
+	raw := strings.Replace(specExample, `"persona": null,`, `"persona": 7,`, 1)
+	answer := `{"turn":{"id":"trn_1","claimId":"clm_1","kind":"ask","prompt":"why is r2 degraded?","council":` + raw + `}}`
+	b := newBotAPI(t, func(w http.ResponseWriter, r *http.Request, n int, body []byte) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, answer)
+	})
+	c := newClient(t, b.server.URL, keyFile(t))
+	turn, err := c.Next(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if turn == nil {
+		t.Fatal("Next returned no turn")
+	}
+	if turn.ID != "trn_1" || turn.Kind != "ask" || turn.Prompt != "why is r2 degraded?" {
+		t.Errorf("turn = %+v", turn)
+	}
+	if turn.CouncilErr == nil || turn.Council != nil {
+		t.Errorf("council = %+v, CouncilErr = %v", turn.Council, turn.CouncilErr)
+	}
+}

@@ -21,11 +21,8 @@ import (
 	"github.com/teknoir/cli/pkg/council/tools"
 )
 
-// The council's members.
-const (
-	memberCaptain = "captain"
-	memberCritic  = "critic"
-)
+// memberCaptain is the lead's wire id (D9).
+const memberCaptain = "captain"
 
 // The states a turn is finished with, as K3 takes them.
 const (
@@ -59,9 +56,10 @@ const (
 	msgEventsRejected = "The platform refused this turn's progress."
 	msgRestarting     = "The bot restarted during this turn."
 	msgPlatformDown   = "The bot could not read who it is on the platform."
-	msgNoAccess       = "At access level none, Fleet has no tools to use."
-	msgNoAnswer       = "The Captain gave no answer."
-	msgNoBudget       = "The Captain ran out of budget before answering."
+	// msgBadCouncil is the turn's failure when the council it was sent cannot run; the reason follows.
+	msgBadCouncil = "The council for this turn is not valid: "
+	// msgNoAccess is the member turn's failure at access level none: the role's name follows.
+	msgNoAccess = "At access level none, "
 )
 
 // The limits of the daemon.
@@ -292,9 +290,9 @@ func New(cfg Config) (*Daemon, error) {
 // SkillNames is the guides the book carries, in the order the caps advertise them: the known kit
 // order first, then any other guide the book kept. The caps' skills header comes from it, and a
 // snapshot's role skills are checked against the same names (validateSnapshot takes them as its
-// skills argument). read_skill (its enum and its name check) and the prompts' digest still use only
-// the kit's own guides (skillNames) until each role carries its own skills, so an extra guide is
-// announced but not yet served.
+// skills argument). read_skill (its enum and its name check) and the prompts' digest follow each
+// role's own Skills, which name guides from this list, so an extra guide is served to a role whose
+// council names it, and to no other.
 func (d *Daemon) SkillNames() []string { return d.book.names() }
 
 // Serve takes turns from the work queue until ctx ends, then stops: it cancels every running turn,

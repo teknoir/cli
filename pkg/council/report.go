@@ -272,9 +272,9 @@ func rawReport(text string) report {
 }
 
 // stoppedReport is a member that did not report, as a low-confidence report.
-func stoppedReport(why string) report {
+func stoppedReport(name, why string) report {
 	return report{
-		Summary:       "Fleet stopped: " + why + ".",
+		Summary:       name + " stopped: " + why + ".",
 		Findings:      []finding{},
 		Proposals:     []proposal{},
 		Confidence:    confidenceLow,

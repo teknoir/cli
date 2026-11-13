@@ -210,7 +210,7 @@ func TestValidateSnapshotRules(t *testing.T) {
 		},
 		{
 			name: "a member with the lead's wire id",
-			edit: func(s *hub.Snapshot) { s.Members[0].Slug = "captain" },
+			edit: func(s *hub.Snapshot) { s.Members[0].Slug = memberCaptain },
 			want: "member", all: []string{`"captain"`, "wire id"},
 		},
 		{
@@ -226,7 +226,7 @@ func TestValidateSnapshotRules(t *testing.T) {
 		},
 		{
 			name: "a reviewer with the lead's wire id",
-			edit: func(s *hub.Snapshot) { s.Reviewer.Slug = "captain" },
+			edit: func(s *hub.Snapshot) { s.Reviewer.Slug = memberCaptain },
 			want: "reviewer", all: []string{`"captain"`, "wire id"},
 		},
 		// A member turn: nothing but its one member.
@@ -280,7 +280,7 @@ func TestValidateSnapshotRules(t *testing.T) {
 		{
 			name: "a member turn whose member has the lead's wire id",
 			work: memberTurnWork,
-			edit: func(s *hub.Snapshot) { s.Members[0].Slug = "captain" },
+			edit: func(s *hub.Snapshot) { s.Members[0].Slug = memberCaptain },
 			want: "member", all: []string{`"captain"`, "wire id"},
 		},
 		{

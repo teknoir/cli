@@ -81,7 +81,7 @@ func pageBody(t *testing.T, text string) (head, body string) {
 // names a reference, and read_result answers a page of the rest.
 func TestFleetSeesAPartialResult(t *testing.T) {
 	answer := deviceArray()
-	work := newWork(kindMember, memberFleet, "which devices are online?")
+	work := newWork(kindMember, "fleet", "which devices are online?")
 	h := newHarness(t, work)
 	h.cfg.Tools = deviceServer(t, answer)
 
@@ -140,7 +140,7 @@ func TestReadResultPagesReassemble(t *testing.T) {
 	answer := deviceArray()
 	turn := &turn{results: newResultStore(), d: &Daemon{cfg: Config{Tools: deviceServer(t, answer)}}}
 	input, _ := json.Marshal(map[string]any{})
-	res, err := turn.callTool(context.Background(), "read", toolUse{ID: "tu_1", Name: "list_devices", Input: input})
+	res, err := turn.callTool(context.Background(), memberCouncilWithTools(t, "read", "fleet", []string{"list_devices"}).members[0], toolUse{ID: "tu_1", Name: "list_devices", Input: input})
 	if err != nil {
 		t.Fatalf("callTool: %v", err)
 	}
