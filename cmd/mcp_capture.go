@@ -63,7 +63,8 @@ func newCaptureStore(dir string) *mcpCaptureStore {
 }
 
 // mcpStdioCaptureDir is where the stdio server keeps its captures: $XDG_RUNTIME_DIR/tnctl-captures
-// when that is set and absolute (per user, mode 0700, removed at logout), else tnctl/captures under
+// when that is set, absolute and a directory of the caller's own (per user, mode 0700, removed at
+// logout; one inherited from another user or since removed is passed over), else tnctl/captures under
 // the user's cache dir. The shared temp dir is the last resort only, as a name for the user: a
 // predictable name in a dir everyone can write lets another user create it first and so refuse every
 // spill of this one. Windows has no uid (Getuid returns -1) and gives every user a temp dir of their
@@ -71,7 +72,7 @@ func newCaptureStore(dir string) *mcpCaptureStore {
 var mcpStdioCaptureDir = defaultMCPStdioCaptureDir
 
 func defaultMCPStdioCaptureDir() string {
-	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" && filepath.IsAbs(x) {
+	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" && filepath.IsAbs(x) && runtimeDirUsable(x) {
 		return filepath.Join(x, "tnctl-captures")
 	}
 	if c, err := os.UserCacheDir(); err == nil && c != "" {
@@ -102,10 +103,15 @@ func (s *mcpCaptureStore) sweep() { s.sweepDir(false) }
 // alone (the council daemon's): no capture of an earlier process can be read again.
 func (s *mcpCaptureStore) sweepAll() { s.sweepDir(true) }
 
+// sweepDir is sweep and sweepAll. It first checks the dir as a write would (checkPrivateDir): a dir
+// that is a symbolic link, or another user's, is left alone, and so is one that does not exist yet.
 func (s *mcpCaptureStore) sweepDir(all bool) {
+	if checkPrivateDir(s.dir) != nil {
+		return
+	}
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		return // the dir does not exist until the first capture
+		return
 	}
 	cutoff := time.Now().Add(-mcpCaptureTTL)
 	s.mu.Lock()

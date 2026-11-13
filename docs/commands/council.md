@@ -168,13 +168,16 @@ Neither cut is silent: the member gets a result that says what it is missing.
 - **The header.** A result a member sees only part of starts with a `RESULT PARTIAL` line:
   `RESULT PARTIAL: shown 14798 of 48123 bytes, 12 of 40 items (ref r1). Do not infer missing items, counts
   or absences; read_result with ref r1 and offset 14796 gives the rest, or narrow the query.` The bytes and
-  the items are counted (a cut JSON text that is not an array reads `shown S of T bytes of JSON text`,
-  with no line counts, since the lines of indented JSON are its wrapper's), `of "<field>"` names the object's array that was cut, and the offset is where the
+  the items are counted (a JSON text the council cannot cut at whole elements of an array, such as an
+  object whose largest member is a string like `inspect_logs`' "text", reads `shown S of T bytes of JSON
+  text`, with no line counts, since the lines of indented JSON are its wrapper's; so does a JSON text the
+  server already cut that way), `of "<field>"` names the object's array that was cut, and the offset is where the
   unseen rest starts: in an indented array, right after the last element shown, before the comma that
   precedes the next one (the closing bracket the cut put back is not part of the original text). A tool
   that cut its own result (a `{"truncated": true}` wrapper, an `inspect_*` answer that says so, an MQTT
-  sample) gets a first line saying so, with its own hint (a sentence ending in a period) and, when the
-  tool named one, the total. An `inspect_logs` answer counts as cut upstream only when `truncated.bytes`
+  sample) gets a first line saying so, with its own hint and, when the tool named one, the total. The hint
+  is at most 200 bytes, cut after its last whole sentence that fits, or at a space with a final `…`, so no
+  word is cut; a spilled `mqtt_get_sample` index puts the messages it leaves out first in its hint. An `inspect_logs` answer counts as cut upstream only when `truncated.bytes`
   is true (the log passed the platform's 1 MiB limit): `truncated.lines` alone is the last `tail` lines the
   call asked for, and gets no header. A failed call never does, whatever its text says. When the
   council cuts that result as well, the cut line follows it and the first line says whose numbers the
@@ -186,13 +189,17 @@ Neither cut is silent: the member gets a result that says what it is missing.
 - **The untrusted tags.** Every MCP tool result, and every page, is inside
   `<untrusted source="tool:<name>" sha256="…">…</untrusted>`: the source, and the SHA-256 of the whole
   result, so a page is recognizable as part of the result it came from. In the result itself, a `<` that
-  opens `untrusted` — in any case, and with any run of white space, C0 controls, DEL, NEL, Unicode
-  separators or format characters (zero-width spaces, word joiners), `/` or `\` between the `<` and the
-  name, format characters between the name's letters, or the fullwidth `＜` and small `﹤` in place of `<`,
-  so that `</untrusted>`, `</ untrusted>`, `<\/untrusted>`, `<\0/untrusted>`, `<` + U+200B + `/untrusted>` and
-  `</un` + U+200B + `trusted>` all count — is escaped to `&lt;` (the opener itself), and nothing else is: a device cannot close the block or open one of
-  its own, and its text stays readable. The prompts tell the members that what is inside the tags comes
-  from the platform and its devices. A refusal made by the council itself, and a guide from `read_skill`,
+  opens `untrusted` is escaped to `&lt;` (the opener itself), and nothing else is, so the text stays
+  readable. That covers the name in any case and in fullwidth letters; `<` and its look-alikes (fullwidth
+  `＜`, small `﹤`, `˂`, `‹`, `〈`, `⟨`, `〈`); between the opener and the name any run of white space, Unicode
+  separators, `/`, `\` and their look-alikes (fullwidth `／` and `＼`, `∕`, `⁄`, `⧸`); and hidden characters
+  both there and between the name's letters: controls (C0, DEL, C1), format characters (zero-width
+  spaces, word joiners), combining marks (variation selectors, the combining grapheme joiner) and the
+  Hangul fillers. So `</untrusted>`, `</ untrusted>`, `<\/untrusted>`, `<\0/untrusted>`, `<` + U+200B +
+  `/untrusted>`, `</u` + U+FE0F + `ntrusted>` and `＜／ｕｎｔｒｕｓｔｅｄ＞` all count. The escaping covers
+  these spellings and look-alikes; homoglyphs from other scripts (a Cyrillic `е` in the name) are not
+  caught. The actual boundary is the prompts' rule: they tell the members that what is inside the tags
+  comes from the platform and its devices. A refusal made by the council itself, and a guide from `read_skill`,
   are not wrapped.
 - **The store.** A result is kept whole only when it was cut: at most 16 MiB per turn, in memory, gone
   with the turn. Past the cap the member gets no reference, and its header says `the rest is not kept`.

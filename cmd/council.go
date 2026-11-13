@@ -79,11 +79,9 @@ func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, n
 	// The council cuts results itself, at 16 KiB with a reference for the rest: this server must not
 	// cut in front of it, or a whole answer reaches the council as a wrapper cut twice, with counts
 	// that disagree. Its captures are its own, and go with the session.
-	captures := newCaptureStore(filepath.Join(workDir, "captures"))
-	// Only this daemon uses the dir: whatever an earlier process left there can never be read again.
-	captures.sweepAll()
+	captures := newCouncilCaptureStore(filepath.Join(workDir, "captures"))
 	defer captures.removeAll()
-	ts, err := tools.New(ctx, newMCPServerOpts(e, mcpServerOptions{MaxResult: mcpCouncilMaxResult, Captures: captures, PageEscapedMax: 14 << 10, IndexMax: 14 << 10}))
+	ts, err := tools.New(ctx, newMCPServerOpts(e, mcpCouncilOptions(captures)))
 	if err != nil {
 		return err
 	}
@@ -119,3 +117,20 @@ func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, n
 }
 
 func init() { rootCmd.AddCommand(newCouncilCmd(defaultEnv)) }
+
+// newCouncilCaptureStore is the council daemon's capture store over dir. Only this daemon uses the
+// dir, so whatever an earlier process left there can never be read again: it is swept whatever its
+// age.
+func newCouncilCaptureStore(dir string) *mcpCaptureStore {
+	s := newCaptureStore(dir)
+	s.sweepAll()
+	return s
+}
+
+// mcpCouncilOptions are the options of the council's MCP server. The council cuts results itself,
+// at 16 KiB with a reference for the rest, so the server does not cut in front of it (MaxResult),
+// and its mqtt_read pages, spilled indexes and inline mqtt_get_sample answers are sized to fit
+// under that cut (PageEscapedMax and IndexMax, 14 KiB each).
+func mcpCouncilOptions(captures *mcpCaptureStore) mcpServerOptions {
+	return mcpServerOptions{MaxResult: mcpCouncilMaxResult, Captures: captures, PageEscapedMax: 14 << 10, IndexMax: 14 << 10}
+}

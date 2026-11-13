@@ -135,7 +135,9 @@ How they behave:
   and is left out for a top-level one. `result` is always valid JSON: the cut array closes, so an agent
   reads what is shown instead of guessing at the rest; `hint` says to narrow the query. A result that is
   not such an array is cut at a line and ends with `… truncated: shown S of T bytes, k of n lines; narrow
-  the query`; when not one element of an array fits under the cap, that line reads `0 of n items` rather
+  the query` — or, for a JSON text that cannot be cut at whole elements of an array (an object whose
+  largest member is a string, like `inspect_logs`' `text`), `… truncated: shown S of T bytes of JSON text;
+  narrow the query`, with no line counts, since the lines of indented JSON are its wrapper's; when not one element of an array fits under the cap, that line reads `0 of n items` rather
   than counting the lines of the head. A `"truncated": true` object is the one thing to look for:
   `shownItems` of `totalItems` is what the result carries, and the rest is not in it. The cut is measured
   with what is sent — the result and its wrapper together are never over the cap. The council runs this
@@ -165,8 +167,8 @@ How they behave:
   with `mqtt_sample`. It takes the same `topics`, `seconds` (default 5, at most 30) and `max` (default 50,
   at most 200) plus `maxBytes` (default 2 MiB, at most 8 MiB; it stops before the payloads pass it, the
   message that would is not kept, and `nextMessageBytes` reports its size). When the payloads' text (the
-  base64 text for a binary payload) adds up to at most 12288 bytes and the answer fits under 48 KiB, it
-  answers inline:
+  base64 text for a binary payload) adds up to at most 12288 bytes and the answer fits under 48 KiB (16 KiB
+  in a TeknoirBot's council), it answers inline:
   `{"messages":[{"i","topic","ts","retain","bytes","encoding","payload"}],"count","totalBytes","stoppedBy","serverDropped","truncated"}`.
   A larger sample is written to a capture and the answer is an index:
   `{"captureId","file","expiresAt","count","totalBytes","stoppedBy","serverDropped","truncated","messages":[{"i","topic","ts","retain","bytes","encoding","sha256","kind","jsonValid","preview"}],"hint"}`.
@@ -174,7 +176,7 @@ How they behave:
   (cut where a rune starts), or `hex:` and the first 32 bytes of a binary one. An index too long for the
   result drops its previews from the last message backwards (`previewsOmitted`: how many of the listed
   messages now show none), and lists fewer messages (`omitted`: how many the list leaves out) only when
-  even that does not fit, and then `truncated` is true; the `hint` names both, and every message stays
+  even that does not fit, and then `truncated` is true; the `hint` names both, first, and every message stays
   readable by its `i`. A base64
   payload the standard decoder refuses (unpadded, say) is tried unpadded; one neither reads is counted by
   its text's length and carries no `sha256`. Payloads over 256 KiB are dropped by the platform, never
@@ -187,12 +189,16 @@ How they behave:
   and the data is that value, marshalled compactly and paged the same way; a missing key or index is an
   error naming the first step that failed and the keys or length it found, and a key that holds `.`, `[`
   or `]` cannot be addressed. The result carries `topic`, `path` (with it), `totalBytes`, `encoding` and
-  the whole payload's `sha256`, so the pages can be checked. A topic over 1024 bytes is cut back to a rune
-  start and its whole length given as `topicBytes`. In a TeknoirBot's council, where every result is cut at
-  16 KiB, a page is held to 14336 bytes of escaped text (a page of quotes or control characters is shorter
-  than `length`: follow `nextOffset`) and an index to 14336 bytes, so that neither is cut a second time.
+  the whole payload's `sha256`, so the pages can be checked. A topic that takes over 1024 bytes once
+  JSON-escaped (a quote counts two, a control character six) is cut back before the character that would
+  pass that, here and in an index, and its whole length given as `topicBytes`; a `path` over 512 escaped
+  bytes is refused. In a TeknoirBot's council, where every result is cut at 16 KiB, a page is held to 14336
+  bytes of escaped text (a page of quotes or control characters is shorter than `length`: follow
+  `nextOffset`) and an index, like an inline answer, to 14336 bytes; with the topic and the path inside
+  those limits and counted in that 16 KiB, so that neither is cut a second time.
 - **Where captures live.** The stdio server (`tnctl mcp`) keeps them in `$XDG_RUNTIME_DIR/tnctl-captures`
-  when that is set and absolute (per user, on tmpfs, removed at logout), otherwise in `tnctl/captures`
+  when that is set, absolute and an existing directory of the user's own (per user, on tmpfs, removed at
+  logout; one inherited from another user, or since removed, is passed over), otherwise in `tnctl/captures`
   under the user's cache directory (`~/.cache/tnctl/captures` on Linux), and only when neither exists in
   the temp dir as `tnctl-captures-<uid>` (Windows has no uid and a per-user temp dir, and uses
   `tnctl-captures`). The directory is mode `0700` and the files `0600`; a directory that is a symlink, not a

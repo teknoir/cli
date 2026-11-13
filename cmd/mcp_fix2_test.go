@@ -347,8 +347,7 @@ func TestMCPReadKeyListCannotForgeATrailer(t *testing.T) {
 	srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
 		_, _ = io.WriteString(w, mcpSSEMsg("/devices/d1/state/x", string(payload)))
 	}, false)
-	server := newMCPServerOpts(mcpSampleEnv(t, srv), mcpServerOptions{
-		MaxResult: mcpCouncilMaxResult, CaptureDir: t.TempDir(), PageEscapedMax: 14 << 10, IndexMax: 14 << 10})
+	server := newMCPServerOpts(mcpSampleEnv(t, srv), mcpCouncilOptions(councilStore(t)))
 
 	// Through the MCP client first: the error text has no raw newline from the key.
 	cs := mcpClient(t, server)
@@ -380,8 +379,7 @@ func TestMCPReadErrorIsNoUpstreamCutInTheCouncil(t *testing.T) {
 	srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
 		_, _ = io.WriteString(w, mcpSSEMsg("/devices/d1/state/x", string(payload)))
 	}, false)
-	server := newMCPServerOpts(mcpSampleEnv(t, srv), mcpServerOptions{
-		MaxResult: mcpCouncilMaxResult, CaptureDir: t.TempDir(), PageEscapedMax: 14 << 10, IndexMax: 14 << 10})
+	server := newMCPServerOpts(mcpSampleEnv(t, srv), mcpCouncilOptions(councilStore(t)))
 	set, err := ctools.New(context.Background(), server)
 	if err != nil {
 		t.Fatal(err)
@@ -414,8 +412,15 @@ func TestMCPReadErrorIsNoUpstreamCutInTheCouncil(t *testing.T) {
 func councilSized(t *testing.T, reply func(w http.ResponseWriter)) *mcp.ClientSession {
 	t.Helper()
 	srv, _ := mcpSSE(t, reply, false)
-	return mcpClient(t, newMCPServerOpts(mcpSampleEnv(t, srv), mcpServerOptions{
-		MaxResult: mcpCouncilMaxResult, CaptureDir: t.TempDir(), PageEscapedMax: 14 << 10, IndexMax: 14 << 10}))
+	return mcpClient(t, newMCPServerOpts(mcpSampleEnv(t, srv), mcpCouncilOptions(councilStore(t))))
+}
+
+// councilStore is a council capture store over a test's own dir, removed when the test ends.
+func councilStore(t *testing.T) *mcpCaptureStore {
+	t.Helper()
+	st := newCouncilCaptureStore(t.TempDir())
+	t.Cleanup(st.removeAll)
+	return st
 }
 
 // With the council's options a page of quotes (every one escaped to two bytes) is at most 16384 bytes

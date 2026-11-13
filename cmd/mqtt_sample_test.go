@@ -413,8 +413,8 @@ func TestMqttSampleOutOpensSafely(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, err := runCLI(t, e, "mqtt", "sample", "/devices/+/state/#", "--out", link)
-	if err == nil || (!strings.Contains(err.Error(), "exists and is not empty") && !strings.Contains(err.Error(), "symbolic link")) {
-		t.Fatalf("%v, want a refusal of the link", err)
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") || exitCodeOf(err) != codeUsage {
+		t.Fatalf("%v (exit %d), want a usage refusal of the symbolic link", err, exitCodeOf(err))
 	}
 	if b, _ := os.ReadFile(target); string(b) != "keep me\n" {
 		t.Errorf("the refused link's target changed: %q", b)

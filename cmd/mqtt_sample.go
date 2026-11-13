@@ -169,10 +169,11 @@ type mqttSampleWriter struct {
 }
 
 // newMqttSampleWriter opens --out, refusing a file that already holds something: the capture is
-// appended to nothing. It never truncates and never follows a link. A new file is made with O_EXCL,
-// which refuses any symbolic link, dangling or not; an existing one is opened with O_NOFOLLOW (where
-// the system has it), and refused unless what was opened is a regular file of size 0 with one name,
-// so that a link planted at the path cannot make tnctl write into something of someone else's.
+// appended to nothing. It never truncates, and on unix it never follows a link and never waits on a
+// FIFO. A new file is made with O_EXCL, which refuses any symbolic link, dangling or not; an existing
+// one is opened with O_NOFOLLOW and O_NONBLOCK (on unix), and refused unless what was opened is a
+// regular file of size 0 (and, on unix, with one name), so that a link planted at the path cannot
+// make tnctl write into something of someone else's. Windows makes neither link check.
 func newMqttSampleWriter(out, errw io.Writer, f mqttSampleFlags) (*mqttSampleWriter, error) {
 	w := &mqttSampleWriter{out: out, errw: errw, json: f.json}
 	if f.out == "" {
@@ -182,7 +183,10 @@ func newMqttSampleWriter(out, errw io.Writer, f mqttSampleFlags) (*mqttSampleWri
 	if errors.Is(err, fs.ErrExist) {
 		file, err = os.OpenFile(f.out, os.O_WRONLY|mqttNoFollow, 0o600)
 		if err != nil {
-			return nil, newErr(codeError, "%s exists and cannot be used (a symbolic link is refused): %v", f.out, err)
+			if mqttLinkRefused(err) {
+				return nil, usageErr("%s is a symbolic link: give a new file", f.out)
+			}
+			return nil, usageErr("%s exists and cannot be used: %v", f.out, err)
 		}
 	} else if err != nil {
 		return nil, newErr(codeError, "%v", err)

@@ -952,15 +952,16 @@ func TestMCPTruncatesASingleLongLineAtARuneBoundary(t *testing.T) {
 		t.Fatalf("no truncation note: ...%q", text[len(text)-80:])
 	}
 	kept := i
-	var shown, total, shownItems, totalItems int
-	if _, err := fmt.Sscanf(text[i:], prefix+"%d of %d bytes, %d of %d", &shown, &total, &shownItems, &totalItems); err != nil {
+	var shown, total int
+	if _, err := fmt.Sscanf(text[i:], prefix+"%d of %d bytes", &shown, &total); err != nil {
 		t.Fatalf("note %q: %v", text[i:], err)
 	}
 	if shown != kept || total != len(full) {
 		t.Errorf("note says %d of %d bytes, the cut kept %d of %d", shown, total, kept, len(full))
 	}
-	if !strings.HasSuffix(text, " lines; narrow the query") || totalItems != 3 || shownItems != 1 {
-		t.Errorf("note says %d of %d lines: %q", shownItems, totalItems, text[len(text)-60:])
+	// The answer is JSON: its lines are the wrapper's, so the note counts bytes of JSON text only.
+	if !strings.HasSuffix(text, " bytes of JSON text; narrow the query") || strings.Contains(text[i:], " lines") {
+		t.Errorf("note = %q", text[i:])
 	}
 	if kept < limit-1 || kept > limit || kept < limit-utf8.UTFMax {
 		t.Errorf("kept %d of %d bytes, want just under the %d cap", kept, len(full), limit)
@@ -1033,8 +1034,7 @@ func TestMCPTruncationNewlineThreshold(t *testing.T) {
 		if got := strings.LastIndex(full[:limit], "\n"); got != c.nl {
 			t.Fatalf("fixture: last newline before the cap at %d, want %d", got, c.nl)
 		}
-		want := full[:c.kept] + fmt.Sprintf("\n… truncated: shown %d of %d bytes, %d of %d lines; narrow the query",
-			c.kept, len(full), strings.Count(full[:c.kept], "\n"), strings.Count(full, "\n")+1)
+		want := full[:c.kept] + fmt.Sprintf("\n… truncated: shown %d of %d bytes of JSON text; narrow the query", c.kept, len(full))
 		if text != want {
 			t.Errorf("newline at %d: kept %d bytes, want %d", c.nl, strings.Index(text, "\n… truncated"), c.kept)
 		}

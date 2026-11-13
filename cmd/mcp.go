@@ -149,7 +149,9 @@ var mcpCutHook func()
 // mcpCutMax is text cut to max. A result that is an array, or an object whose largest member is
 // one, is cut at whole items into one JSON object that says how much is shown and carries the cut
 // JSON in "result", so an agent reads valid JSON and knows what it is missing. Anything else is cut
-// at a line and ends with a sentence saying so. The cut itself starts 1 KiB short of the cap, which
+// at a line and ends with a sentence saying so: in bytes of JSON text when the text is JSON (an
+// object whose largest member is a string, such as inspect_logs' "text"), in bytes and lines
+// otherwise. The cut itself starts 1 KiB short of the cap, which
 // leaves room for the wrapper; when the wrapper's own keys pass the cap anyway, the cut is made
 // smaller by what it overflowed and the wrapper is rebuilt.
 func mcpCutMax(text string, max int) string {
@@ -178,6 +180,10 @@ func mcpCutMax(text string, max int) string {
 		if mcpCutHook != nil {
 			mcpCutHook()
 		}
+	}
+	if cut.Unit == "lines" && json.Valid([]byte(text)) {
+		// The lines of an indented JSON text are its wrapper's: say bytes of JSON text instead.
+		return cut.Shown + resultcut.JSONCutTrailer(cut)
 	}
 	return cut.Shown + resultcut.LineCutTrailer(cut)
 }
@@ -441,8 +447,9 @@ const mcpSampleCutHint = "Payloads were cut or the sample filled up. mqtt_get_sa
 // ---------- the server ----------
 
 // mcpServerOptions is what the caller of a server decides beyond its cliEnv: the council tools, the
-// cap of one result (0: mcpMaxResult), where the captures of mqtt_get_sample go (empty: the temp
-// dir's own), and the store itself (nil: the server makes one).
+// cap of one result (0: mcpMaxResult), where the captures of mqtt_get_sample go (empty:
+// mcpStdioCaptureDir, the user's runtime or cache dir), and the store itself (nil: the server makes
+// one).
 type mcpServerOptions struct {
 	Council    bool
 	CaptureDir string
@@ -451,8 +458,9 @@ type mcpServerOptions struct {
 	// session ends; a nil one makes the server its own.
 	Captures *mcpCaptureStore
 	// PageEscapedMax is how many bytes of escaped text one mqtt_read page may take (0: the default,
-	// mcpPageEscapedMax), and IndexMax how long a spilled index may be (0: mcpIndexMax). The council
-	// cuts what it reads at 16 KiB, so it asks for pages and indexes that fit.
+	// mcpPageEscapedMax), and IndexMax how long a spilled index, and an inline mqtt_get_sample
+	// answer, may be (0: mcpIndexMax). The council cuts what it reads at 16 KiB, so it asks for
+	// answers that fit (mcpCouncilOptions).
 	PageEscapedMax int
 	IndexMax       int
 }
@@ -727,7 +735,7 @@ func newMCPServerOpts(e *cliEnv, opts mcpServerOptions) *mcp.Server {
 		mcpSampleTool(e, sampleSlot, result))
 
 	sizes := mcpSizes{pageEscaped: opts.PageEscapedMax, indexMax: opts.IndexMax}.norm()
-	addTool(s, "mqtt_get_sample", mcpGetSampleDescription, mcpGetSampleTool(e, sampleSlot, captures, sizes))
+	addTool(s, "mqtt_get_sample", mcpGetSampleDescriptionFor(sizes), mcpGetSampleTool(e, sampleSlot, captures, sizes))
 
 	addTool(s, "mqtt_read", mcpReadDescriptionFor(sizes.pageEscaped), mcpReadTool(captures, sizes))
 
@@ -1013,8 +1021,8 @@ func runMCP(ctx context.Context, e *cliEnv, t mcp.Transport) error {
 // signal and io.EOF are the ordinary ends of a session, not errors; anything else is reported. The
 // stdio transport never cancels a call, so a receiving middleware ends every call in flight when ctx
 // ends (a signal); otherwise Run would wait for their requests, up to api.RequestTimeout each. The
-// session's captures are its own: they are files of a temporary dir, and nothing reads them once the
-// session has ended.
+// session's captures are its own: they are files of this user's capture dir (mcpStdioCaptureDir),
+// and nothing reads them once the session has ended.
 func runMCPWith(ctx context.Context, e *cliEnv, t mcp.Transport, council bool) error {
 	store := newCaptureStore(mcpStdioCaptureDir())
 	defer store.removeAll()

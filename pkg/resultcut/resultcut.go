@@ -33,7 +33,8 @@ type Result struct {
 	// ShownItems and TotalItems count the array's elements, or the text's lines.
 	ShownItems int
 	TotalItems int
-	// Unit is "items" for a JSON array cut and "lines" for a line cut.
+	// Unit is "items" for a JSON array cut and "lines" for a line cut. ParseLineCutTrailer also
+	// gives "json" for a JSON text cut at a line (JSONCutTrailer), which counts no items.
 	Unit string
 	// Field is the object key whose array was cut; empty for a top-level array or a line cut.
 	Field string
@@ -338,28 +339,52 @@ func LineCutTrailer(r Result) string {
 		r.ShownBytes, r.TotalBytes, r.ShownItems, r.TotalItems, r.Unit)
 }
 
-// lineCutTrailerRe is LineCutTrailer's line, whole.
-var lineCutTrailerRe = regexp.MustCompile(`^… truncated: shown (\d+) of (\d+) bytes, (\d+) of (\d+) (lines|items); narrow the query$`)
+// JSONCutTrailer is the line a JSON text cut at a line ends with: how much of the text the model
+// sees, in bytes only. The lines of an indented JSON text are its wrapper's, not the content's, so
+// it counts none.
+func JSONCutTrailer(r Result) string {
+	return fmt.Sprintf("\n… truncated: shown %d of %d bytes of JSON text; narrow the query", r.ShownBytes, r.TotalBytes)
+}
 
-// ParseLineCutTrailer reads a final line of text as LineCutTrailer wrote it: the bytes, the items
-// and the unit it names. A text whose last line is not that line is not a cut.
+// Trailer is the trailer of r: JSONCutTrailer when its unit is "json", LineCutTrailer otherwise.
+func Trailer(r Result) string {
+	if r.Unit == "json" {
+		return JSONCutTrailer(r)
+	}
+	return LineCutTrailer(r)
+}
+
+// lineCutTrailerRe is the line LineCutTrailer or JSONCutTrailer writes, whole.
+var lineCutTrailerRe = regexp.MustCompile(`^… truncated: shown (\d+) of (\d+) bytes(?:, (\d+) of (\d+) (lines|items)| of JSON text); narrow the query$`)
+
+// ParseLineCutTrailer reads a final line of text as LineCutTrailer or JSONCutTrailer wrote it: the
+// bytes, the items and the unit it names ("json", with no items, for JSONCutTrailer's). A text
+// whose last line is not that line is not a cut.
 func ParseLineCutTrailer(text string) (Result, bool) {
 	line := text[strings.LastIndexByte(text, '\n')+1:]
 	m := lineCutTrailerRe.FindStringSubmatch(line)
 	if m == nil {
 		return Result{}, false
 	}
+	groups := 4
+	if m[5] == "" {
+		groups = 2 // the JSON form names bytes only
+	}
 	// The groups are digits; a number too long for an int is not one a cut wrote.
 	n := make([]int, 4)
-	for i := range n {
+	for i := 0; i < groups; i++ {
 		v, err := strconv.Atoi(m[i+1])
 		if err != nil {
 			return Result{}, false
 		}
 		n[i] = v
 	}
+	unit := m[5]
+	if unit == "" {
+		unit = "json"
+	}
 	return Result{
 		Truncated:  true,
-		ShownBytes: n[0], TotalBytes: n[1], ShownItems: n[2], TotalItems: n[3], Unit: m[5],
+		ShownBytes: n[0], TotalBytes: n[1], ShownItems: n[2], TotalItems: n[3], Unit: unit,
 	}, true
 }

@@ -57,6 +57,18 @@ const mcpGetSampleDescription = "Listen to the MQTT messages of the teamspace's 
 // mcpReadDescription is what mqtt_read tells the agent.
 const mcpReadDescription = "Read one message of a capture mqtt_get_sample spilled: the payload's text, or its base64 text, from offset for at most length bytes (12288 at most, about 22 reads of a 256 KiB payload), with nextOffset for the next page; or, with path, one field of a JSON payload such as detections[0].label, marshalled compactly and paged the same way. A capture lasts 30 minutes; after that, take a new sample. " + mcpUntrustedNote
 
+// mcpGetSampleDescriptionFor is mqtt_get_sample's description for a server of these sizes: a reader
+// that cuts what it gets (the council) holds the inline answer to its index cap, and the description
+// names that bound instead of 48 KiB.
+func mcpGetSampleDescriptionFor(sz mcpSizes) string {
+	sz = sz.norm()
+	if sz.indexMax >= mcpIndexMax {
+		return mcpGetSampleDescription
+	}
+	return strings.Replace(mcpGetSampleDescription, "fits under 48 KiB comes back inline",
+		fmt.Sprintf("fits under %d KiB comes back inline", (sz.indexMax+2048)>>10), 1)
+}
+
 // mcpReadDescriptionFor is mqtt_read's description for a server whose pages are held to pageEscaped
 // bytes of escaped text: when that is smaller than the default, it says so, so that the agent expects
 // a page of quotes or control characters to be shorter than length.
@@ -199,8 +211,15 @@ func mcpGetSampleTool(e *cliEnv, slot *mcpSampleSlot, captures *mcpCaptureStore,
 		// Emitted as it is measured: mcpMarshal keeps "<", ">" and "&" one byte each, so a result
 		// that fits when it is checked still fits when it is sent. json.Marshal would send them
 		// escaped, up to six bytes each, past mcpMaxResult and into mcpResult's cut.
-		if res := c.inline(); c.encoded() <= mcpInlineMax && mcpFitsResult(res) {
-			raw, err := mcpMarshal(res)
+		inline := c.inline()
+		fits := mcpFitsResult
+		if sz := sz.norm(); sz.indexMax < mcpIndexMax {
+			// A reader that cuts what it gets: the inline answer is held to its index cap too, or
+			// the reader would cut it where a spilled index would have fit.
+			fits = func(v any) bool { return mcpIndexFitsMax(v, sz.indexMax) }
+		}
+		if c.encoded() <= mcpInlineMax && fits(inline) {
+			raw, err := mcpMarshal(inline)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -415,16 +434,18 @@ func (c *mcpCapturedSample) previewsOmitted(res *mcpGetSampleIndex) int {
 func mcpSpillHint(res *mcpGetSampleIndex) string { return mcpSpillHintFor(res, mcpPageEscapedMax) }
 
 // mcpSpillHintFor is mcpSpillHint for a server whose pages are held to pageEscaped bytes.
+// What the index leaves out comes first: a reader that shows only the head of the hint (the council's
+// header keeps 200 bytes) still learns which messages are missing and how to read them.
 func mcpSpillHintFor(res *mcpGetSampleIndex, pageEscaped int) string {
-	hint := mcpGetSampleHintFor(pageEscaped)
+	var parts []string
 	if res.Omitted > 0 {
-		hint += fmt.Sprintf(" The index lists messages 0 to %d of %d; the other %d (i %d to %d) are whole in the capture too: read them with mqtt_read by i.",
-			len(res.Messages)-1, res.Count, res.Omitted, len(res.Messages), res.Count-1)
+		parts = append(parts, fmt.Sprintf("The index lists messages 0 to %d of %d; the other %d (i %d to %d) are whole in the capture too: read them with mqtt_read by i.",
+			len(res.Messages)-1, res.Count, res.Omitted, len(res.Messages), res.Count-1))
 	}
 	if res.PreviewsOmitted > 0 {
-		hint += " Previews were dropped to fit; use mqtt_read with path or a short length."
+		parts = append(parts, "Previews were dropped to fit; use mqtt_read with path or a short length.")
 	}
-	return hint
+	return strings.Join(append(parts, mcpGetSampleHintFor(pageEscaped)), " ")
 }
 
 // mcpIndexFits reports whether a spilled sample's answer fits: under mcpIndexMax as compact JSON,
@@ -516,6 +537,11 @@ func mcpReadTool(captures *mcpCaptureStore, sz mcpSizes) func(context.Context, *
 		if in.Offset < 0 {
 			return nil, nil, usageErr("offset must be 0 or more")
 		}
+		// The page echoes the path: held to mcpPathMax escaped bytes, it stays inside the room the
+		// page budget leaves for its fields.
+		if n := mcpEscapedLen(in.Path); n > mcpPathMax {
+			return nil, nil, usageErr("path is %d bytes once JSON-escaped; the most is %d: give a shorter path", n, mcpPathMax)
+		}
 		c, ok := captures.get(in.CaptureID)
 		if !ok {
 			return nil, nil, mcpCaptureGone(in.CaptureID)
@@ -537,7 +563,8 @@ func mcpReadTool(captures *mcpCaptureStore, sz mcpSizes) func(context.Context, *
 			return nil, nil, err
 		}
 		page.CaptureID, page.I = in.CaptureID, in.I
-		page.Topic, page.TopicBytes = mcpTopicPage(m.Topic) // the capture keeps the whole topic
+		// The capture keeps the whole topic; a page carries at most mcpTopicMax escaped bytes of it.
+		page.Topic, page.TopicBytes = mcpTopicPage(m.Topic)
 		page.Encoding, page.SHA256 = m.Encoding, m.SHA256
 		// mcpMarshal, not json.Marshal: the page was measured the way it is sent.
 		raw, err := mcpMarshal(page)
@@ -575,22 +602,52 @@ type mcpPageResult struct {
 // under mcpMaxResult.
 const mcpPageEscapedMax = 36 << 10
 
-// mcpTopicMax is the longest topic a result carries. A topic is a device's or an app's own string,
-// and the MQTT topic limit is far above any name a device has; a result that carried one whole
-// would be cut.
+// mcpTopicMax is the most a topic takes in a result, counted once JSON has escaped it (see
+// mcpEscapedCost): a topic of quotes doubles and one of control characters grows sixfold, and a page
+// budget that left room for a raw topic would then be passed. A topic is a device's or an app's own
+// string, and the MQTT topic limit is far above any name a device has; a result that carried one
+// whole would be cut.
 const mcpTopicMax = 1024
 
-// mcpTopicPage cuts topic to mcpTopicMax bytes at a rune start, and reports its whole length when it
-// did cut it.
+// mcpPathMax is the most an mqtt_read path may take once JSON has escaped it: the page echoes it.
+const mcpPathMax = 512
+
+// mcpTopicPage cuts topic to at most mcpTopicMax escaped bytes, before the rune that would pass
+// them, and reports its whole length when it did cut it.
 func mcpTopicPage(topic string) (string, int) {
-	if len(topic) <= mcpTopicMax {
-		return topic, 0
+	cost := 0
+	for i := 0; i < len(topic); {
+		r, size := utf8.DecodeRuneInString(topic[i:])
+		if cost += mcpEscapedCost(r, size); cost > mcpTopicMax {
+			return topic[:i], len(topic)
+		}
+		i += size
 	}
-	cut := mcpTopicMax
-	for cut > 0 && !utf8.RuneStart(topic[cut]) {
-		cut--
+	return topic, 0
+}
+
+// mcpEscapedCost is how many bytes rune r, size bytes long in the text, takes once JSON (mcpMarshal)
+// has escaped it: two for a quote, a backslash, \n, \r and \t, six for another control character,
+// U+2028, U+2029 and an invalid byte, and its own size otherwise.
+func mcpEscapedCost(r rune, size int) int {
+	switch {
+	case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t':
+		return 2
+	case r < 0x20 || r == '\u2028' || r == '\u2029' || (r == utf8.RuneError && size == 1):
+		return 6
 	}
-	return topic[:cut], len(topic)
+	return size
+}
+
+// mcpEscapedLen is the escaped size of s, without its quotes.
+func mcpEscapedLen(s string) int {
+	n := 0
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		n += mcpEscapedCost(r, size)
+		i += size
+	}
+	return n
 }
 
 // mcpPage cuts the page the call asks for out of the message's text: the payload's own text (UTF-8,
@@ -648,13 +705,7 @@ func mcpPageSized(m sampleMsg, in mcpReadIn, escapedMax int) (*mcpPageResult, er
 		cost := 0
 		for end < len(text) {
 			r, size := utf8.DecodeRuneInString(text[end:])
-			c := size
-			switch {
-			case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t':
-				c = 2
-			case r < 0x20 || r == '\u2028' || r == '\u2029' || (r == utf8.RuneError && size == 1):
-				c = 6
-			}
+			c := mcpEscapedCost(r, size)
 			// A page always holds at least one rune, whatever its size: an empty page whose
 			// nextOffset is its own offset is a page the caller can never get past.
 			if end > in.Offset && (end+size-in.Offset > length || cost+c > escapedMax) {

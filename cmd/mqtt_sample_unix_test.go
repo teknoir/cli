@@ -6,7 +6,10 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // --out never follows a link: a dangling symlink is refused and its target is not created; a symlink
@@ -70,5 +73,57 @@ func TestMqttSampleOutRefusesLinks(t *testing.T) {
 	// A plain new file and a plain empty one still work.
 	if err := open(filepath.Join(dir, "new.jsonl")); err != nil {
 		t.Errorf("a new file: %v", err)
+	}
+}
+
+// --out on an existing directory is a usage error that does not talk of a symbolic link.
+func TestMqttSampleOutRefusesADirectory(t *testing.T) {
+	dir := t.TempDir()
+	var o, e bytes.Buffer
+	w, err := newMqttSampleWriter(&o, &e, mqttSampleFlags{out: dir})
+	if err == nil {
+		_ = w.f.Close()
+		t.Fatal("a directory was accepted")
+	}
+	if exitCodeOf(err) != codeUsage || strings.Contains(err.Error(), "symbolic link") {
+		t.Errorf("%v (exit %d), want a usage error that names no link", err, exitCodeOf(err))
+	}
+}
+
+// --out on a FIFO is refused at once, with or without a reader: the open never waits on it.
+func TestMqttSampleOutRefusesAFIFO(t *testing.T) {
+	for _, reader := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "fifo")
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Skipf("mkfifo: %v", err)
+		}
+		if reader {
+			r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = r.Close() }()
+		}
+		done := make(chan error, 1)
+		go func() {
+			var o, e bytes.Buffer
+			w, err := newMqttSampleWriter(&o, &e, mqttSampleFlags{out: path})
+			if err == nil && w.f != nil {
+				_ = w.f.Close()
+			}
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil || exitCodeOf(err) != codeUsage {
+				t.Errorf("reader %v: %v (exit %d), want a usage refusal", reader, err, exitCodeOf(err))
+			}
+		case <-time.After(2 * time.Second):
+			// Unblock the open so that the goroutine ends.
+			if r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+				defer func() { _ = r.Close() }()
+			}
+			t.Fatalf("reader %v: the open of a FIFO still waits after 2s", reader)
+		}
 	}
 }

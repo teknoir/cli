@@ -297,7 +297,7 @@ const (
 func upstreamCut(text string) (hint string, total int, ok bool) {
 	if r, cut := resultcut.ParseLineCutTrailer(text); cut {
 		// The line is its own header: what the tool left out is already counted there.
-		return strings.TrimPrefix(resultcut.LineCutTrailer(r), "\n"), 0, true
+		return strings.TrimPrefix(resultcut.Trailer(r), "\n"), 0, true
 	}
 	var v map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(text), &v); err != nil || v == nil {
@@ -375,22 +375,61 @@ const (
 	maxFieldHeader = 64
 )
 
-// sanitizeHint makes a tool's hint safe to put in the header: control characters (a newline would
-// start a line of the council's own) and format characters (which can reverse text, or hide a tag's
-// letters) become spaces, the untrusted block's tags are escaped as they are inside the block, and
-// the result is at most maxHintHeader bytes, cut at a rune start.
+// sanitizeHint makes a tool's hint safe to put in the header: the untrusted block's tags are escaped
+// as they are inside the block, every hidden character (see isHidden: controls, among them a newline
+// that would start a line of the council's own, format characters, which can reverse text,
+// combining marks and the Hangul fillers) becomes a space, and the result is at most
+// maxHintHeader bytes of valid UTF-8. A longer hint is cut after its last whole sentence that fits;
+// one with no sentence end in reach is cut at a space and ends in "…", so no word is ever cut.
 func sanitizeHint(hint string) string {
-	clean := strings.Map(func(r rune) rune {
-		if r < 0x20 || unicode.Is(unicode.Cf, r) {
+	// The tags first: a hidden character inside the name would otherwise become a space that hides
+	// the tag from untrustedTag.
+	clean := untrustedTag.ReplaceAllStringFunc(hint, escapeOpener)
+	clean = strings.Map(func(r rune) rune {
+		if isHidden(r) {
 			return ' '
 		}
 		return r
-	}, hint)
-	clean = untrustedTag.ReplaceAllStringFunc(clean, func(m string) string {
-		_, n := utf8.DecodeRuneInString(m)
-		return "&lt;" + m[n:]
-	})
-	return cutUTF8(clean, maxHintHeader)
+	}, clean)
+	return cutHint(clean, maxHintHeader)
+}
+
+// cutHint is s cut to at most max bytes: after the last ". " that fits (keeping the period) or,
+// without one, at the last space past half of max, with trailing spaces and punctuation trimmed and
+// "…" appended.
+func cutHint(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	// A sentence end that fits: its period is at most at byte max-1, followed by a space.
+	if i := strings.LastIndex(s[:max+1], ". "); i >= 0 {
+		return s[:i+1]
+	}
+	const ell = "…"
+	head := cutUTF8(s, max-len(ell))
+	if i := strings.LastIndexByte(head, ' '); i > max/2 {
+		head = head[:i]
+	}
+	head = strings.TrimRightFunc(head, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsPunct(r) })
+	return head + ell
+}
+
+// isHidden reports whether r is one of the characters that do not show, or that change how the text
+// around them shows: controls (C0, DEL and C1), format characters, combining marks (among them the
+// variation selectors and the combining grapheme joiner) and the Hangul fillers.
+func isHidden(r rune) bool {
+	switch r {
+	case 0x115F, 0x1160, 0x3164, 0xFFA0:
+		return true
+	}
+	return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Mn, unicode.Me)
+}
+
+// escapeOpener swaps the opener rune of an untrustedTag match (an ASCII "<" or one of its
+// look-alikes, which can be several bytes) for "&lt;", leaving the rest as it was.
+func escapeOpener(m string) string {
+	_, n := utf8.DecodeRuneInString(m)
+	return "&lt;" + m[n:]
 }
 
 // cutUTF8 is s cut to at most max bytes, at a rune start.
@@ -462,7 +501,7 @@ func renderHeader(r Result, ref string) string {
 		}
 		line += "."
 		if h := strings.TrimSpace(r.Hint); h != "" {
-			if !strings.HasSuffix(h, ".") && !strings.HasSuffix(h, "!") && !strings.HasSuffix(h, "?") {
+			if !strings.HasSuffix(h, ".") && !strings.HasSuffix(h, "!") && !strings.HasSuffix(h, "?") && !strings.HasSuffix(h, "…") {
 				h += "."
 			}
 			line += " " + h
@@ -473,7 +512,7 @@ func renderHeader(r Result, ref string) string {
 	if r.Cut.Truncated {
 		c := r.Cut
 		counts := fmt.Sprintf("shown %d of %d bytes, %d of %d %s", c.ShownBytes, c.TotalBytes, c.ShownItems, c.TotalItems, c.Unit)
-		if c.Unit == "lines" && json.Valid([]byte(r.Full)) {
+		if c.Unit == "lines" && jsonText(r.Full) {
 			// The lines of an indented JSON text are its wrapper's, not the content's: no counts.
 			counts = fmt.Sprintf("shown %d of %d bytes of JSON text", c.ShownBytes, c.TotalBytes)
 		}
@@ -496,6 +535,16 @@ func renderHeader(r Result, ref string) string {
 	return strings.Join(lines, "\n")
 }
 
+// jsonText reports whether full is a JSON text: valid JSON, or one the server already cut at a line
+// and marked with resultcut.JSONCutTrailer.
+func jsonText(full string) bool {
+	if json.Valid([]byte(full)) {
+		return true
+	}
+	r, ok := resultcut.ParseLineCutTrailer(full)
+	return ok && r.Unit == "json"
+}
+
 // fieldOf names the object key whose array was cut, cut to maxFieldHeader bytes: the header it goes
 // into is outside the untrusted block.
 func fieldOf(c resultcut.Result) string {
@@ -505,20 +554,37 @@ func fieldOf(c resultcut.Result) string {
 	return fmt.Sprintf(" of %q", cutUTF8(c.Field, maxFieldHeader))
 }
 
-// untrustedTag matches the block's own tags, in any case, and the ways a device can space, case or
-// split one to slip past: after the "<" (or its fullwidth and small look-alikes) any C0 control,
-// DEL, NEL, Unicode separator or format character, "/" or backslash, and format characters between
-// the letters of the name. Only the opener is escaped, so the text stays readable.
+// untrustedTag matches the block's own tags, in any case, and the ways a device can space, case,
+// split or disguise one to slip past:
+//
+//   - the opener "<" or a look-alike: fullwidth U+FF1C, small U+FE64, modifier U+02C2, the angle
+//     quotation mark U+2039 and the angle brackets U+3008, U+27E8 and U+2329;
+//   - between the opener and the name, any run of white space, Unicode separators, "/", backslash,
+//     their look-alikes (fullwidth solidus U+FF0F and reverse solidus U+FF3C, division slash
+//     U+2215, fraction slash U+2044, big solidus U+29F8) and hidden characters;
+//   - the name in ASCII or fullwidth letters, with hidden characters between its letters.
+//
+// Hidden characters are those of isHidden: controls (C0, DEL, C1), format characters, combining
+// marks (variation selectors, the combining grapheme joiner) and the Hangul fillers. Homoglyphs from
+// other scripts (a Cyrillic "е" in the name) are not caught: the prompts' rule that what is inside
+// the tags comes from devices is the actual boundary, and this escaping is a second line. Only the
+// opener is escaped, so the text stays readable.
 var untrustedTag = func() *regexp.Regexp {
-	const gap = "[\\s\\x00-\\x20\\x7f\\x{85}\\p{Z}\\p{Cf}/\\\\]*"
-	const name = "u\\p{Cf}*n\\p{Cf}*t\\p{Cf}*r\\p{Cf}*u\\p{Cf}*s\\p{Cf}*t\\p{Cf}*e\\p{Cf}*d"
-	return regexp.MustCompile("(?i)(?:<|\\x{FF1C}|\\x{FE64})" + gap + name)
+	const hide = `\p{Cc}\p{Cf}\p{Mn}\p{Me}\x{115F}\x{1160}\x{3164}\x{FFA0}`
+	const gap = `[\s\p{Z}/\\\x{FF0F}\x{FF3C}\x{2215}\x{2044}\x{29F8}` + hide + `]*`
+	const in = `[` + hide + `]*`
+	const name = `[u\x{FF55}]` + in + `[n\x{FF4E}]` + in + `[t\x{FF54}]` + in + `[r\x{FF52}]` + in +
+		`[u\x{FF55}]` + in + `[s\x{FF53}]` + in + `[t\x{FF54}]` + in + `[e\x{FF45}]` + in + `[d\x{FF44}]`
+	const opener = `(?:<|\x{FF1C}|\x{FE64}|\x{02C2}|\x{2039}|\x{3008}|\x{27E8}|\x{2329})`
+	return regexp.MustCompile(`(?i)` + opener + gap + name)
 }()
 
 // Untrusted is text inside the block that says where it came from: source, and the sha256 of the
 // whole text the shown part belongs to. An <untrusted or </untrusted inside the text is escaped, in
-// any case and with look-alike openers, separators, controls and format characters around the name
-// (see untrustedTag), so that a payload cannot close the block and pass for the platform's own words.
+// any case, with look-alike openers and slashes, fullwidth letters, and separators and hidden
+// characters (controls, format characters, combining marks, Hangul fillers) around and inside the
+// name (see untrustedTag). Homoglyphs from other scripts are not caught: the prompts' rule that what
+// is inside the tags comes from devices is the actual boundary.
 func Untrusted(source string, whole []byte, shown string) string {
 	sum := sha256.Sum256(whole)
 	var b strings.Builder
@@ -527,10 +593,7 @@ func Untrusted(source string, whole []byte, shown string) string {
 	b.WriteString(`" sha256="`)
 	b.WriteString(hex.EncodeToString(sum[:]))
 	b.WriteString(`">` + "\n")
-	b.WriteString(untrustedTag.ReplaceAllStringFunc(shown, func(m string) string {
-		_, n := utf8.DecodeRuneInString(m)
-		return "&lt;" + m[n:]
-	}))
+	b.WriteString(untrustedTag.ReplaceAllStringFunc(shown, escapeOpener))
 	b.WriteString("\n</untrusted>")
 	return b.String()
 }

@@ -420,3 +420,35 @@ func first(s string, n int) string {
 	}
 	return s[:n]
 }
+
+// The JSON form of the trailer counts bytes only and reads back as Unit "json"; Trailer picks the
+// form by unit, and the line form still reads back as before.
+func TestJSONCutTrailerRoundTrip(t *testing.T) {
+	r := Result{Truncated: true, ShownBytes: 15360, TotalBytes: 1047631, Unit: "json"}
+	tr := Trailer(r)
+	if tr != JSONCutTrailer(r) || tr != "\n… truncated: shown 15360 of 1047631 bytes of JSON text; narrow the query" {
+		t.Fatalf("trailer = %q", tr)
+	}
+	got, ok := ParseLineCutTrailer(`{"text": "a` + tr)
+	if !ok || got != r {
+		t.Errorf("parsed %+v %v, want %+v", got, ok, r)
+	}
+	if Trailer(got) != tr {
+		t.Errorf("the parsed result writes %q", Trailer(got))
+	}
+	lines := Result{Truncated: true, ShownBytes: 10, TotalBytes: 20, ShownItems: 1, TotalItems: 3, Unit: "lines"}
+	if Trailer(lines) != LineCutTrailer(lines) {
+		t.Errorf("lines trailer = %q", Trailer(lines))
+	}
+	if got, ok := ParseLineCutTrailer("x" + LineCutTrailer(lines)); !ok || got != lines {
+		t.Errorf("lines parsed %+v %v", got, ok)
+	}
+	for _, bad := range []string{
+		"x\n… truncated: shown 1 of 2 bytes of JSON text, 1 of 2 lines; narrow the query",
+		"x\n… truncated: shown 1 of 2 bytes of JSON; narrow the query",
+	} {
+		if _, ok := ParseLineCutTrailer(bad); ok {
+			t.Errorf("%q parsed as a trailer", bad)
+		}
+	}
+}

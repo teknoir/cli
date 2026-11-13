@@ -136,7 +136,7 @@ With `--json`, one compact JSON object per message, `i` counting from 0:
 
 `encoding` is `utf8` or `base64`; with `base64` the payload is the base64 text exactly as the platform
 sent it. `--out FILE` writes those lines to FILE instead of stdout: the file is created with mode
-`0600`, an existing file is refused unless it is an empty regular file with one name (a symbolic link, dangling or not, and a hard link are refused), and stdout then carries only the summary.
+`0600`, an existing file is refused unless it is an empty regular file (on Linux and macOS a symbolic link, dangling or not, a hard link and a FIFO are also refused; Windows does not make these checks), and stdout then carries only the summary.
 
 ### The summary
 

@@ -7,5 +7,8 @@ import "os"
 // mqttNoFollow is 0 where there is no O_NOFOLLOW.
 const mqttNoFollow = 0
 
+// mqttLinkRefused is false where the open does not refuse a link.
+func mqttLinkRefused(error) bool { return false }
+
 // mqttSingleLink is a no-op where a link count is not available.
 func mqttSingleLink(os.FileInfo, string) error { return nil }
