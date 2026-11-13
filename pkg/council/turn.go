@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -520,8 +521,8 @@ func (t *turn) route(level string, facts json.RawMessage, mode string) routeResu
 	req := model.Request{
 		Model:  model.ModelSonnet,
 		Effort: effortOf(t.work.Options.Effort, "high"),
-		System: captainRouteSystem(factsOf(level, facts, personOf(t.work)), mode),
-		Tools:  withLocal(t.d.cfg.Tools.For(level), routeLocalTools(mode)...),
+		System: captainRouteSystem(factsOf(level, facts, personOf(t.work)), mode, t.d.book),
+		Tools:  withLocal(t.d.cfg.Tools.For(level, t.d.cfg.Tools.Names(level)), routeLocalTools(mode)...),
 		// MaxTokens is the Captain's answer length.
 		MaxTokens: 8000,
 	}
@@ -1048,7 +1049,7 @@ func (t *turn) callTool(ctx context.Context, level string, b toolUse) (tools.Res
 	if f, ok := localTools[b.Name]; ok {
 		return t.callLocalTool(b, f), nil
 	}
-	return t.d.cfg.Tools.Call(ctx, level, b.Name, b.Input)
+	return t.d.cfg.Tools.Call(ctx, level, t.d.cfg.Tools.Names(level), b.Name, b.Input)
 }
 
 // localTool is one of the council's own tools, which no MCP server provides.
@@ -1074,14 +1075,19 @@ func (t *turn) callLocalTool(b toolUse, f localTool) (res tools.Result) {
 	return f(t, b.Input)
 }
 
-// runReadSkill is the read_skill tool: one page of a guide.
+// runReadSkill is the read_skill tool: one page of a guide. It reads only the guides its enum lists
+// (the kit order), whatever else the kit dir carries.
 func runReadSkill(t *turn, input json.RawMessage) tools.Result {
 	var in struct {
 		Name   string `json:"name"`
 		Offset int    `json:"offset"`
 	}
 	_ = json.Unmarshal(input, &in)
-	text, digest, err := readSkill(in.Name, in.Offset)
+	if !slices.Contains(skillNames, in.Name) {
+		msg := "there is no guide named " + cutUTF8(in.Name, 64, "…") + "; use one of the guides your instructions list"
+		return tools.Result{Text: msg, Digest: msg, IsError: true}
+	}
+	text, digest, err := t.d.book.read(in.Name, in.Offset)
 	if err != nil {
 		msg := err.Error()
 		return tools.Result{Text: msg, Digest: msg, IsError: true}
@@ -1273,8 +1279,8 @@ func (t *turn) fleetTask(workCtx context.Context, level string, factsF promptFac
 	}
 
 	req := model.Request{
-		Model: model.ModelHaiku, Effort: effort, System: fleetSystem(factsF),
-		Messages: t.fleetMessages(task), Tools: withLocal(t.d.cfg.Tools.For(level), readSkillTool(), readResultTool()),
+		Model: model.ModelHaiku, Effort: effort, System: fleetSystem(factsF, t.d.book),
+		Messages: t.fleetMessages(task), Tools: withLocal(t.d.cfg.Tools.For(level, t.d.cfg.Tools.Names(level)), readSkillTool(), readResultTool()),
 		MaxTokens: 8000, Format: reportSchema,
 	}
 
@@ -1626,8 +1632,8 @@ func (t *turn) synthesize(level string, facts json.RawMessage, reports []memberR
 	req := model.Request{
 		Model:  model.ModelSonnet,
 		Effort: effortOf(t.work.Options.Effort, "high"),
-		System: captainAnswerSystem(factsOf(level, facts, personOf(t.work))),
-		Tools:  withLocal(t.d.cfg.Tools.For(level), readSkillTool(), readResultTool()),
+		System: captainAnswerSystem(factsOf(level, facts, personOf(t.work)), t.d.book),
+		Tools:  withLocal(t.d.cfg.Tools.For(level, t.d.cfg.Tools.Names(level)), readSkillTool(), readResultTool()),
 		// MaxTokens is the answer's length.
 		MaxTokens: 16000,
 	}

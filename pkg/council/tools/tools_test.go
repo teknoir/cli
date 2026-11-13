@@ -114,7 +114,7 @@ func TestFor(t *testing.T) {
 	var c calls
 	set := newSet(t, testServer(t, &c))
 
-	all := set.For(LevelCreator)
+	all := set.For(LevelCreator, set.Names(LevelCreator))
 	if len(all) != 4 {
 		t.Fatalf("For(creator) has %d tools, want 4", len(all))
 	}
@@ -165,11 +165,11 @@ func TestFor(t *testing.T) {
 		t.Errorf("get_config description = %q", cfg.Description.Value)
 	}
 
-	if got := set.For(LevelNone); len(got) != 1 || got[0].OfTool.Name != "whoami" {
+	if got := set.For(LevelNone, set.Names(LevelNone)); len(got) != 1 || got[0].OfTool.Name != "whoami" {
 		t.Errorf("For(none) = %v, want only whoami", got)
 	}
 	// The one tool of the lowest level is also the last, so it carries the breakpoint.
-	if got := set.For(LevelNone); !hasCacheControl(t, got[0].OfTool) {
+	if got := set.For(LevelNone, set.Names(LevelNone)); !hasCacheControl(t, got[0].OfTool) {
 		t.Error("For(none) has no cache breakpoint on its only tool")
 	}
 }
@@ -196,7 +196,7 @@ func hasCacheControl(t *testing.T, tool *anthropic.ToolParam) bool {
 func TestCallAllowed(t *testing.T) {
 	var c calls
 	set := newSet(t, testServer(t, &c))
-	res, err := set.Call(context.Background(), LevelRead, "list_robots", json.RawMessage(`{}`))
+	res, err := set.Call(context.Background(), LevelRead, set.Names(LevelRead), "list_robots", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestCallAllowed(t *testing.T) {
 func TestCallRefusedAtLevel(t *testing.T) {
 	var c calls
 	set := newSet(t, testServer(t, &c))
-	res, err := set.Call(context.Background(), LevelRead, "inspect_logs", json.RawMessage(`{"name":"x"}`))
+	res, err := set.Call(context.Background(), LevelRead, set.Names(LevelRead), "inspect_logs", json.RawMessage(`{"name":"x"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestCallRefusedAtLevel(t *testing.T) {
 		t.Errorf("the refused tool ran %d times, want 0", n)
 	}
 
-	res, err = set.Call(context.Background(), LevelCreator, "no_such_tool", json.RawMessage(`{}`))
+	res, err = set.Call(context.Background(), LevelCreator, set.Names(LevelCreator), "no_such_tool", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestCallRefusedAtLevel(t *testing.T) {
 		t.Errorf("result = %+v, want an error naming the unknown tool", res)
 	}
 
-	res, err = set.Call(context.Background(), LevelNone, "list_robots", json.RawMessage(`{}`))
+	res, err = set.Call(context.Background(), LevelNone, set.Names(LevelNone), "list_robots", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestCallNonObjectInput(t *testing.T) {
 	var c calls
 	set := newSet(t, testServer(t, &c))
 	for _, in := range []string{`"text"`, `[1,2]`, `not json`, `null`, ``} {
-		res, err := set.Call(context.Background(), LevelRead, "list_robots", json.RawMessage(in))
+		res, err := set.Call(context.Background(), LevelRead, set.Names(LevelRead), "list_robots", json.RawMessage(in))
 		if err != nil {
 			t.Fatalf("Call(%q): %v", in, err)
 		}
@@ -269,7 +269,7 @@ func TestCallCutsLongResult(t *testing.T) {
 	textTool(s, &c, "whoami", "who", map[string]any{"type": "object"}, big)
 	set := newSet(t, s)
 
-	res, err := set.Call(context.Background(), LevelNone, "whoami", json.RawMessage(`{}`))
+	res, err := set.Call(context.Background(), LevelNone, set.Names(LevelNone), "whoami", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestCallCutKeepsUTF8(t *testing.T) {
 	textTool(s, &c, "whoami", "who", map[string]any{"type": "object"}, big)
 	set := newSet(t, s)
 
-	res, err := set.Call(context.Background(), LevelNone, "whoami", json.RawMessage(`{}`))
+	res, err := set.Call(context.Background(), LevelNone, set.Names(LevelNone), "whoami", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestCallMCPErrorResult(t *testing.T) {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "the teamspace is gone"}}}, nil
 		})
 	set := newSet(t, s)
-	res, err := set.Call(context.Background(), LevelNone, "whoami", json.RawMessage(`{}`))
+	res, err := set.Call(context.Background(), LevelNone, set.Names(LevelNone), "whoami", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestCallTransportErrorIsResult(t *testing.T) {
 			return nil, fmt.Errorf("the fleet API is unreachable")
 		})
 	set := newSet(t, s)
-	res, err := set.Call(context.Background(), LevelNone, "whoami", json.RawMessage(`{}`))
+	res, err := set.Call(context.Background(), LevelNone, set.Names(LevelNone), "whoami", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call returned an error, want an IsError result: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestCallCancelledContext(t *testing.T) {
 	set := newSet(t, s)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := set.Call(ctx, LevelNone, "whoami", json.RawMessage(`{}`)); err == nil {
+	if _, err := set.Call(ctx, LevelNone, set.Names(LevelNone), "whoami", json.RawMessage(`{}`)); err == nil {
 		t.Error("Call with an ended context returned no error")
 	}
 }
@@ -383,7 +383,7 @@ func TestCallConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := set.Call(context.Background(), LevelNone, "whoami", json.RawMessage(`{}`))
+			res, err := set.Call(context.Background(), LevelNone, set.Names(LevelNone), "whoami", json.RawMessage(`{}`))
 			if err != nil {
 				errs <- err
 				return
@@ -453,7 +453,7 @@ func TestInputSchemaNeverEmpty(t *testing.T) {
 	s := mcp.NewServer(&mcp.Implementation{Name: "tnctl", Version: "test"}, nil)
 	textTool(s, &c, "whoami", "who", map[string]any{"type": "object"}, "x")
 	set := newSet(t, s)
-	tool := set.For(LevelNone)[0].OfTool
+	tool := set.For(LevelNone, set.Names(LevelNone))[0].OfTool
 	raw, err := json.Marshal(tool)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -590,7 +590,7 @@ func TestRenderUpstreamCut(t *testing.T) {
 	textTool(s, &c, "whoami", "who", map[string]any{"type": "object"},
 		`{"truncated":true,"hint":"use a shorter window"}`)
 	set := newSet(t, s)
-	res, err := set.Call(context.Background(), LevelNone, "whoami", json.RawMessage(`{}`))
+	res, err := set.Call(context.Background(), LevelNone, set.Names(LevelNone), "whoami", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -732,7 +732,7 @@ func cutOf(t *testing.T, text string) Result {
 	s := mcp.NewServer(&mcp.Implementation{Name: "tnctl", Version: "test"}, nil)
 	textTool(s, &c, "whoami", "who", map[string]any{"type": "object"}, text)
 	set := newSet(t, s)
-	res, err := set.Call(context.Background(), LevelNone, "whoami", json.RawMessage(`{}`))
+	res, err := set.Call(context.Background(), LevelNone, set.Names(LevelNone), "whoami", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -930,7 +930,7 @@ func TestErrorResultNeverUpstream(t *testing.T) {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil
 		})
 	set := newSet(t, s)
-	res, err := set.Call(context.Background(), LevelNone, "whoami", json.RawMessage(`{}`))
+	res, err := set.Call(context.Background(), LevelNone, set.Names(LevelNone), "whoami", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,5 +1051,113 @@ func TestSanitizeHintHidesHidden(t *testing.T) {
 	in := "a\u0085b\u007fc\u009bd\u034fe\ufe0ff\U000e0100g\u3164h\u115fi\uffa0j\u202ek\u20ddl\nm"
 	if got, want := sanitizeHint(in), "a b c d e f g h i j k l m"; got != want {
 		t.Errorf("sanitizeHint(%q) = %q, want %q", in, got, want)
+	}
+}
+
+// ---------- the member's own tool list ----------
+
+// toolNamesOf is the names of a tool param list, in order.
+func toolNamesOf(list []anthropic.ToolUnionParam) []string {
+	out := make([]string, 0, len(list))
+	for _, u := range list {
+		if u.OfTool != nil {
+			out = append(out, u.OfTool.Name)
+		}
+	}
+	return out
+}
+
+// For offers the tools the level allows that the member's own list names, sorted by name, and the
+// last of them carries the cache breakpoint.
+func TestForWithAllow(t *testing.T) {
+	var c calls
+	set := newSet(t, testServer(t, &c))
+
+	got := set.For(LevelRead, []string{"whoami", "get_config"})
+	if names := toolNamesOf(got); !equal(names, []string{"get_config", "whoami"}) {
+		t.Errorf("For(read, [whoami get_config]) = %v, want get_config, whoami", names)
+	}
+	for i, u := range got {
+		ephemeral := hasCacheControl(t, u.OfTool)
+		if i == len(got)-1 && !ephemeral {
+			t.Errorf("the last tool (%s) has no cache_control", u.OfTool.Name)
+		}
+		if i < len(got)-1 && ephemeral {
+			t.Errorf("%s has cache_control; only the last one may", u.OfTool.Name)
+		}
+	}
+	// A tool of the level that the member may not use is not offered, and neither is one the
+	// level refuses.
+	if names := toolNamesOf(set.For(LevelRead, []string{"whoami", "inspect_logs"})); !equal(names, []string{"whoami"}) {
+		t.Errorf("For(read, [whoami inspect_logs]) = %v, want only whoami", names)
+	}
+	// A tool no level allows is not offered.
+	if names := toolNamesOf(set.For(LevelCreator, []string{"no_such_tool"})); len(names) != 0 {
+		t.Errorf("For(creator, [no_such_tool]) = %v, want none", names)
+	}
+}
+
+// An empty allow list offers nothing, and nothing carries a breakpoint.
+func TestForEmptyAllow(t *testing.T) {
+	var c calls
+	set := newSet(t, testServer(t, &c))
+	for _, allow := range [][]string{nil, {}} {
+		got := set.For(LevelCreator, allow)
+		if len(got) != 0 {
+			t.Errorf("For(creator, %v) = %v, want no tools", allow, toolNamesOf(got))
+		}
+	}
+}
+
+// Call refuses a tool the level allows but the member's list does not, with the member's own
+// refusal; a tool the level refuses keeps the level's refusal.
+func TestCallRefusedByAllow(t *testing.T) {
+	var c calls
+	set := newSet(t, testServer(t, &c))
+
+	res, err := set.Call(context.Background(), LevelRead, []string{"whoami"}, "list_robots", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	const want = `"list_robots" is not a tool this council member may call`
+	if !res.IsError || res.Text != want {
+		t.Errorf("result = %+v, want %q", res, want)
+	}
+	if n := c.get("list_robots"); n != 0 {
+		t.Errorf("the refused tool ran %d times, want 0", n)
+	}
+
+	// The level's refusal is the old text, whatever the member's list says.
+	for _, allow := range [][]string{nil, {"inspect_logs"}, set.Names(LevelRead)} {
+		res, err = set.Call(context.Background(), LevelRead, allow, "inspect_logs", json.RawMessage(`{"name":"x"}`))
+		if err != nil {
+			t.Fatalf("Call: %v", err)
+		}
+		const levelWant = `"inspect_logs" is not a tool a council member at level "read" may call`
+		if !res.IsError || res.Text != levelWant {
+			t.Errorf("with allow %v: result = %+v, want %q", allow, res, levelWant)
+		}
+	}
+	// And an inspect tool at read is refused by the level even when the member's list names it.
+	if n := c.get("inspect_logs"); n != 0 {
+		t.Errorf("the refused tool ran %d times, want 0", n)
+	}
+
+	// An unknown tool is the level's refusal too.
+	res, err = set.Call(context.Background(), LevelCreator, set.Names(LevelCreator), "no_such_tool", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if want := `"no_such_tool" is not a tool a council member at level "creator" may call`; !res.IsError || res.Text != want {
+		t.Errorf("result = %+v, want %q", res, want)
+	}
+
+	// A tool both the level and the list allow runs.
+	res, err = set.Call(context.Background(), LevelRead, []string{"whoami", "list_robots"}, "whoami", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("result = %+v, want the tool's own answer", res)
 	}
 }

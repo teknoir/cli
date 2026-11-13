@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/teknoir/cli/pkg/council"
 )
 
 // councilArgs runs "tnctl council ..." with the council command under a test root.
@@ -64,5 +66,17 @@ func TestCouncilCmdHidden(t *testing.T) {
 	}
 	if serve.Flags().Lookup("max-turns") == nil || serve.Flags().Lookup("work-dir") == nil {
 		t.Error("serve lacks --max-turns or --work-dir")
+	}
+	// The kit dir is a flag of the image's own, not of a person's: it is hidden, and defaults to
+	// where the image installs the guide set.
+	kit := serve.Flags().Lookup("kit-dir")
+	if kit == nil {
+		t.Fatal("serve lacks --kit-dir")
+	}
+	if kit.Hidden != true {
+		t.Error("--kit-dir is not hidden")
+	}
+	if kit.DefValue != council.DefaultKitDir {
+		t.Errorf("--kit-dir defaults to %q, want %q", kit.DefValue, council.DefaultKitDir)
 	}
 }

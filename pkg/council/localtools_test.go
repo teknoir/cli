@@ -160,7 +160,7 @@ func TestRequestHasThreeBreakpoints(t *testing.T) {
 			CacheControl: anthropic.CacheControlEphemeralParam{TTL: anthropic.CacheControlEphemeralTTLTTL5m},
 		}},
 	}
-	streamOnce(t, server, captainRouteSystem(factsOf("read", testFacts("b", "ns"), "p"), "auto"),
+	streamOnce(t, server, captainRouteSystem(factsOf("read", testFacts("b", "ns"), "p"), "auto", testBook()),
 		withLocal(forList, conveneTool(), readSkillTool()))
 	req := body()
 	if n := strings.Count(req, `"cache_control"`); n != 3 {
@@ -392,7 +392,7 @@ func TestNoCutMarker(t *testing.T) {
 // readSkillPageInTest is the first page of a guide.
 func readSkillPageInTest(t *testing.T) string {
 	t.Helper()
-	text, _, err := readSkill("teknoir-platform", 0)
+	text, _, err := testBook().read("teknoir-platform", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

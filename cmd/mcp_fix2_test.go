@@ -385,7 +385,7 @@ func TestMCPReadErrorIsNoUpstreamCutInTheCouncil(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = set.Close() })
-	r, err := set.Call(context.Background(), ctools.LevelRead, "mqtt_get_sample", json.RawMessage(`{"topics":["/devices/+/state/#"]}`))
+	r, err := set.Call(context.Background(), ctools.LevelRead, set.Names(ctools.LevelRead), "mqtt_get_sample", json.RawMessage(`{"topics":["/devices/+/state/#"]}`))
 	if err != nil || r.IsError {
 		t.Fatalf("mqtt_get_sample: %v %q", err, r.Text)
 	}
@@ -396,7 +396,7 @@ func TestMCPReadErrorIsNoUpstreamCutInTheCouncil(t *testing.T) {
 		t.Fatalf("the index: %v %q", err, r.Text)
 	}
 	in, _ := json.Marshal(map[string]any{"captureId": idx.CaptureID, "i": 0, "path": "temperature"})
-	r, err = set.Call(context.Background(), ctools.LevelRead, "mqtt_read", in)
+	r, err = set.Call(context.Background(), ctools.LevelRead, set.Names(ctools.LevelRead), "mqtt_read", in)
 	if err != nil {
 		t.Fatal(err)
 	}

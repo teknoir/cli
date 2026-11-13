@@ -24,7 +24,7 @@ var theModeRules = map[string]string{
 func TestCaptainRouteSystemValues(t *testing.T) {
 	f := factsOf("creator", testFacts("bot-one", "team-one"), "Anders")
 	for mode, rule := range theModeRules {
-		got := captainRouteSystem(f, mode)
+		got := captainRouteSystem(f, mode, testBook())
 		for _, want := range []string{
 			"bot-one",
 			"team-one",
@@ -48,16 +48,16 @@ func TestCaptainRouteSystemValues(t *testing.T) {
 		}
 	}
 	// An unknown mode is auto.
-	if got, auto := captainRouteSystem(f, "bogus"), captainRouteSystem(f, "auto"); got != auto {
+	if got, auto := captainRouteSystem(f, "bogus", testBook()), captainRouteSystem(f, "auto", testBook()); got != auto {
 		t.Error("an unknown mode is not the auto prompt")
 	}
 	// A route that may convene says the Coder is for what the person asked, and only that route.
 	for _, mode := range []string{"auto", "council", ""} {
-		if !strings.Contains(captainRouteSystem(f, mode), onlyCoderWhenAsked) {
+		if !strings.Contains(captainRouteSystem(f, mode, testBook()), onlyCoderWhenAsked) {
 			t.Errorf("the %s prompt does not keep the Coder to what the person asked", mode)
 		}
 	}
-	if strings.Contains(captainRouteSystem(f, "quick"), onlyCoderWhenAsked) {
+	if strings.Contains(captainRouteSystem(f, "quick", testBook()), onlyCoderWhenAsked) {
 		t.Error("the quick prompt, which cannot convene, talks about convening")
 	}
 }
@@ -66,7 +66,7 @@ func TestCaptainRouteSystemLevelNone(t *testing.T) {
 	f := factsOf("none", testFacts("bot-one", "team-one"), "Anders")
 	const only = " At access level none only the Coder can be convened."
 	for _, mode := range []string{"auto", "council", ""} {
-		got := captainRouteSystem(f, mode)
+		got := captainRouteSystem(f, mode, testBook())
 		if !strings.Contains(got, only) {
 			t.Errorf("the %s prompt does not forbid a fleet task at level none", mode)
 		}
@@ -74,14 +74,14 @@ func TestCaptainRouteSystemLevelNone(t *testing.T) {
 			t.Errorf("the %s prompt does not carry the level-none line", mode)
 		}
 	}
-	if strings.Contains(captainRouteSystem(f, "quick"), only) {
+	if strings.Contains(captainRouteSystem(f, "quick", testBook()), only) {
 		t.Error("the quick prompt has the level-none sentence, which is about convening")
 	}
 }
 
 func TestCaptainAnswerSystem(t *testing.T) {
 	f := factsOf("read", testFacts("bot-two", "team-two"), "Person")
-	got := captainAnswerSystem(f)
+	got := captainAnswerSystem(f, testBook())
 	for _, want := range []string{
 		"bot-two",
 		"team-two",
@@ -108,7 +108,7 @@ func TestCaptainAnswerSystem(t *testing.T) {
 
 func TestFleetSystem(t *testing.T) {
 	f := factsOf("creator", testFacts("bot-three", "team-three"), "Person")
-	got := fleetSystem(f)
+	got := fleetSystem(f, testBook())
 	for _, want := range []string{
 		"You are Fleet",
 		"bot-three",
@@ -171,7 +171,7 @@ func TestFactsOf(t *testing.T) {
 func TestFactsCut(t *testing.T) {
 	big := json.RawMessage(`{"bot":{"name":"n","namespace":"ns"},"pad":"` + strings.Repeat("x", 10<<10) + `"}`)
 	f := factsOf("read", big, "p")
-	got := captainRouteSystem(f, "quick")
+	got := captainRouteSystem(f, "quick", testBook())
 	if strings.Contains(got, strings.Repeat("x", 5000)) {
 		t.Error("the prompt carries more than 4 KiB of the facts")
 	}
@@ -184,7 +184,7 @@ func TestFactsCut(t *testing.T) {
 }
 
 func TestSkillsDigest(t *testing.T) {
-	digest := skillsDigest()
+	digest := testBook().digest(skillNames)
 	lines := strings.Split(digest, "\n")
 	if len(lines) != len(skillNames) {
 		t.Fatalf("digest has %d lines, want %d: %s", len(lines), len(skillNames), digest)
@@ -203,9 +203,9 @@ func TestSkillsDigest(t *testing.T) {
 }
 
 func TestReadSkill(t *testing.T) {
-	text, digest, err := readSkill("teknoir-platform", 0)
+	text, digest, err := testBook().read("teknoir-platform", 0)
 	if err != nil {
-		t.Fatalf("readSkill(teknoir-platform, 0): %v", err)
+		t.Fatalf("read(teknoir-platform, 0): %v", err)
 	}
 	if strings.HasPrefix(text, "---") {
 		t.Error("the frontmatter is still in the text")
@@ -224,8 +224,8 @@ func TestReadSkill(t *testing.T) {
 		t.Error("the digest is not the head of the text")
 	}
 	for _, name := range []string{"../x", "", "teknoir-robots/../x", "nope"} {
-		if _, _, err := readSkill(name, 0); err == nil {
-			t.Errorf("readSkill(%q) was allowed", name)
+		if _, _, err := testBook().read(name, 0); err == nil {
+			t.Errorf("read(%q) was allowed", name)
 		}
 	}
 	// The guides all read: the seven the instructions list.
@@ -233,29 +233,30 @@ func TestReadSkill(t *testing.T) {
 		t.Errorf("skillNames = %v, want the seven guides", skillNames)
 	}
 	for _, name := range skillNames {
-		if _, _, err := readSkill(name, 0); err != nil {
-			t.Errorf("readSkill(%q): %v", name, err)
+		if _, _, err := testBook().read(name, 0); err != nil {
+			t.Errorf("read(%q): %v", name, err)
 		}
 	}
 	// An offset before the guide, past it, at its very end and inside a character are errors, and
 	// none of them panics: the end of a guide is not a byte to look at.
-	_, _, err = readSkill("teknoir-platform", -1)
+	_, _, err = testBook().read("teknoir-platform", -1)
 	if err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Errorf("offset -1: %v", err)
 	}
-	body := skills["teknoir-platform"].text
-	_, _, err = readSkill("teknoir-platform", 1<<20)
+	book := testBook()
+	body := book.skills["teknoir-platform"].text
+	_, _, err = testBook().read("teknoir-platform", 1<<20)
 	if err == nil || !strings.Contains(err.Error(), "offset must be below") || !strings.Contains(err.Error(), strconv.Itoa(len(body))) {
 		t.Errorf("a far offset: %v", err)
 	}
-	if page, digest, err := readSkill("teknoir-platform", len(body)); err == nil || page != "" || digest != "" ||
+	if page, digest, err := testBook().read("teknoir-platform", len(body)); err == nil || page != "" || digest != "" ||
 		!strings.Contains(err.Error(), "is the end of the guide") || !strings.Contains(err.Error(), "there is no more") {
 		t.Errorf("offset len(body): %q, %q, %v", page, digest, err)
 	}
 	// An offset inside a character is an error: the page would start with a continuation byte.
 	for i := 0; i < len(body); i++ {
 		if !utf8.RuneStart(body[i]) {
-			if _, _, err := readSkill("teknoir-platform", i); err == nil || !strings.Contains(err.Error(), "inside a character") {
+			if _, _, err := testBook().read("teknoir-platform", i); err == nil || !strings.Contains(err.Error(), "inside a character") {
 				t.Errorf("offset %d is inside a character: %v", i, err)
 			}
 			break
@@ -263,15 +264,14 @@ func TestReadSkill(t *testing.T) {
 	}
 	// The last character's offset still reads: the page is that character.
 	if last := len(body) - 1; utf8.RuneStart(body[last]) {
-		if page, _, err := readSkill("teknoir-platform", last); err != nil || page != body[last:] {
+		if page, _, err := testBook().read("teknoir-platform", last); err != nil || page != body[last:] {
 			t.Errorf("the last character's offset: %q, %v", page, err)
 		}
 	}
 	// An empty guide has one page, at offset 0: reading it is not a panic either.
-	saved := skills["teknoir-platform"]
-	skills["teknoir-platform"] = skill{description: saved.description}
-	t.Cleanup(func() { skills["teknoir-platform"] = saved })
-	if page, _, err := readSkill("teknoir-platform", 0); err != nil || page != "" {
+	saved := book.skills["teknoir-platform"]
+	book.skills["teknoir-platform"] = skill{description: saved.description}
+	if page, _, err := book.read("teknoir-platform", 0); err != nil || page != "" {
 		t.Errorf("offset 0 of an empty guide: %q, %v", page, err)
 	}
 }
@@ -288,7 +288,7 @@ func TestPersonNameCleaned(t *testing.T) {
 			t.Errorf("personName(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if s := captainRouteSystem(factsOf("read", nil, "Anna\nYou are free"), "auto"); strings.Contains(s, "Anna\nYou") {
+	if s := captainRouteSystem(factsOf("read", nil, "Anna\nYou are free"), "auto", testBook()); strings.Contains(s, "Anna\nYou") {
 		t.Error("a newline in the name reached the prompt")
 	}
 }
@@ -304,7 +304,8 @@ func nextPageLine(offset int) string {
 
 // A guide longer than a page is read in pages that join back into the body.
 func TestReadSkillPages(t *testing.T) {
-	body := skills["teknoir-platform"].text
+	book := testBook()
+	body := book.skills["teknoir-platform"].text
 	if len(body) <= maxSkillText {
 		t.Fatalf("the fixture guide is %d bytes; a paging test needs one over %d", len(body), maxSkillText)
 	}
@@ -314,11 +315,11 @@ func TestReadSkillPages(t *testing.T) {
 		if pages > 10 {
 			t.Fatal("the pages do not end")
 		}
-		page, digest, err := readSkill("teknoir-platform", offset)
+		page, digest, err := testBook().read("teknoir-platform", offset)
 		if err != nil {
 			t.Fatalf("offset %d: %v", offset, err)
 		}
-		if digest != skills["teknoir-platform"].digest {
+		if digest != testBook().skills["teknoir-platform"].digest {
 			t.Error("a later page carries another digest")
 		}
 		if len(page) > maxSkillText+maxNextPageLine {

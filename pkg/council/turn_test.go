@@ -1925,12 +1925,12 @@ type blockingTools struct {
 	name string
 }
 
-func (b blockingTools) Call(ctx context.Context, level, name string, input json.RawMessage) (tools.Result, error) {
+func (b blockingTools) Call(ctx context.Context, level string, allow []string, name string, input json.RawMessage) (tools.Result, error) {
 	if name == b.name {
 		<-ctx.Done()
 		return tools.Result{}, context.Cause(ctx)
 	}
-	return b.fakeTools.Call(ctx, level, name, input)
+	return b.fakeTools.Call(ctx, level, allow, name, input)
 }
 
 // A route tool call cut by D - WorkReserve: the calls that did not run get their results, and the

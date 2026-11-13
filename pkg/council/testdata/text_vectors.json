@@ -1,0 +1,793 @@
+{
+  "accept": [
+    {
+      "name": "woman technologist",
+      "text": "Fleet \ud83d\udc69\u200d\ud83d\udcbb",
+      "field": "displayName"
+    },
+    {
+      "name": "red heart",
+      "text": "\u2764\ufe0f",
+      "field": "displayName"
+    },
+    {
+      "name": "thumbs up",
+      "text": "\ud83d\udc4d",
+      "field": "displayName"
+    },
+    {
+      "name": "keycap one",
+      "text": "1\ufe0f\u20e3",
+      "field": "displayName"
+    },
+    {
+      "name": "rainbow flag",
+      "text": "\ud83c\udff3\ufe0f\u200d\ud83c\udf08",
+      "field": "displayName"
+    },
+    {
+      "name": "person technologist skin tone",
+      "text": "\ud83e\uddd1\ud83c\udffd\u200d\ud83d\udcbb",
+      "field": "displayName"
+    },
+    {
+      "name": "flag of Sweden",
+      "text": "\ud83c\uddf8\ud83c\uddea",
+      "field": "displayName"
+    },
+    {
+      "name": "Persian ZWNJ",
+      "text": "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+      "field": "displayName"
+    },
+    {
+      "name": "Devanagari ZWJ",
+      "text": "\u0915\u094d\u200d\u0937",
+      "field": "displayName"
+    },
+    {
+      "name": "plain word",
+      "text": "Watcher",
+      "field": "displayName"
+    },
+    {
+      "name": "Persian ZWNJ after a fatha",
+      "text": "\u0646\u064e\u200c\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+      "field": "displayName"
+    },
+    {
+      "name": "Arabic ZWJ after a shadda",
+      "text": "\u0628\u0651\u200d\u0628",
+      "field": "displayName"
+    },
+    {
+      "name": "Devanagari ZWNJ after a virama",
+      "text": "\u0915\u094d\u200c\u0937",
+      "field": "displayName"
+    },
+    {
+      "name": "Bengali ra with ZWJ before a virama",
+      "text": "\u09b0\u200d\u09cd\u09af",
+      "field": "displayName"
+    },
+    {
+      "name": "Sinhala ZWJ after a virama",
+      "text": "\u0dc1\u0dca\u200d\u0dbb\u0dd3",
+      "field": "displayName"
+    },
+    {
+      "name": "Kannada ZWJ after a virama",
+      "text": "\u0cb0\u0ccd\u200d\u0c95",
+      "field": "displayName"
+    },
+    {
+      "name": "keycap number sign",
+      "text": "#\ufe0f\u20e3",
+      "field": "displayName"
+    },
+    {
+      "name": "keycap asterisk",
+      "text": "*\ufe0f\u20e3",
+      "field": "displayName"
+    },
+    {
+      "name": "red heart as text",
+      "text": "\u2764\ufe0e",
+      "field": "displayName"
+    },
+    {
+      "name": "copyright as emoji",
+      "text": "\u00a9\ufe0f",
+      "field": "displayName"
+    },
+    {
+      "name": "trade mark as emoji",
+      "text": "\u2122\ufe0f",
+      "field": "displayName"
+    },
+    {
+      "name": "woman detective",
+      "text": "\ud83d\udd75\ufe0f\u200d\u2640\ufe0f",
+      "field": "displayName"
+    },
+    {
+      "name": "no-break space",
+      "text": "Fleet\u00a0x",
+      "field": "displayName"
+    },
+    {
+      "name": "narrow no-break spaces",
+      "text": "prix\u202f: 10\u202f000",
+      "field": "displayName"
+    },
+    {
+      "name": "instructions with a tab and a line break",
+      "text": "Report.\n\tThen stop.",
+      "field": "instructions"
+    },
+    {
+      "name": "instructions with an ideographic space",
+      "text": "Report the status\u3000now",
+      "field": "instructions"
+    },
+    {
+      "name": "instructions with an emoji sequence",
+      "text": "Report \ud83d\udc69\u200d\ud83d\udcbb.",
+      "field": "instructions"
+    }
+  ],
+  "refuseBoth": [
+    {
+      "name": "U+0001 (displayName)",
+      "text": "Fle\u0001et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+0001 (instructions)",
+      "text": "Fle\u0001et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+0007 (displayName)",
+      "text": "Fle\u0007et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+0007 (instructions)",
+      "text": "Fle\u0007et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+001B (displayName)",
+      "text": "Fle\u001bet",
+      "field": "displayName"
+    },
+    {
+      "name": "U+001B (instructions)",
+      "text": "Fle\u001bet",
+      "field": "instructions"
+    },
+    {
+      "name": "U+007F (displayName)",
+      "text": "Fle\u007fet",
+      "field": "displayName"
+    },
+    {
+      "name": "U+007F (instructions)",
+      "text": "Fle\u007fet",
+      "field": "instructions"
+    },
+    {
+      "name": "U+0080 (displayName)",
+      "text": "Fle\u0080et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+0080 (instructions)",
+      "text": "Fle\u0080et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+0085 (displayName)",
+      "text": "Fle\u0085et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+0085 (instructions)",
+      "text": "Fle\u0085et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+009B (displayName)",
+      "text": "Fle\u009bet",
+      "field": "displayName"
+    },
+    {
+      "name": "U+009B (instructions)",
+      "text": "Fle\u009bet",
+      "field": "instructions"
+    },
+    {
+      "name": "line separator (displayName)",
+      "text": "Fle\u2028et",
+      "field": "displayName"
+    },
+    {
+      "name": "line separator (instructions)",
+      "text": "Fle\u2028et",
+      "field": "instructions"
+    },
+    {
+      "name": "paragraph separator (displayName)",
+      "text": "Fle\u2029et",
+      "field": "displayName"
+    },
+    {
+      "name": "paragraph separator (instructions)",
+      "text": "Fle\u2029et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+202A (displayName)",
+      "text": "Fle\u202aet",
+      "field": "displayName"
+    },
+    {
+      "name": "U+202A (instructions)",
+      "text": "Fle\u202aet",
+      "field": "instructions"
+    },
+    {
+      "name": "U+202B (displayName)",
+      "text": "Fle\u202bet",
+      "field": "displayName"
+    },
+    {
+      "name": "U+202B (instructions)",
+      "text": "Fle\u202bet",
+      "field": "instructions"
+    },
+    {
+      "name": "U+202C (displayName)",
+      "text": "Fle\u202cet",
+      "field": "displayName"
+    },
+    {
+      "name": "U+202C (instructions)",
+      "text": "Fle\u202cet",
+      "field": "instructions"
+    },
+    {
+      "name": "U+202D (displayName)",
+      "text": "Fle\u202det",
+      "field": "displayName"
+    },
+    {
+      "name": "U+202D (instructions)",
+      "text": "Fle\u202det",
+      "field": "instructions"
+    },
+    {
+      "name": "U+202E (displayName)",
+      "text": "Fle\u202eet",
+      "field": "displayName"
+    },
+    {
+      "name": "U+202E (instructions)",
+      "text": "Fle\u202eet",
+      "field": "instructions"
+    },
+    {
+      "name": "U+2066 (displayName)",
+      "text": "Fle\u2066et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+2066 (instructions)",
+      "text": "Fle\u2066et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+2067 (displayName)",
+      "text": "Fle\u2067et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+2067 (instructions)",
+      "text": "Fle\u2067et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+2068 (displayName)",
+      "text": "Fle\u2068et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+2068 (instructions)",
+      "text": "Fle\u2068et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+2069 (displayName)",
+      "text": "Fle\u2069et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+2069 (instructions)",
+      "text": "Fle\u2069et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+E0000 (displayName)",
+      "text": "Fle\udb40\udc00et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+E0000 (instructions)",
+      "text": "Fle\udb40\udc00et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+E0041 (displayName)",
+      "text": "Fle\udb40\udc41et",
+      "field": "displayName"
+    },
+    {
+      "name": "U+E0041 (instructions)",
+      "text": "Fle\udb40\udc41et",
+      "field": "instructions"
+    },
+    {
+      "name": "U+E007F (displayName)",
+      "text": "Fle\udb40\udc7fet",
+      "field": "displayName"
+    },
+    {
+      "name": "U+E007F (instructions)",
+      "text": "Fle\udb40\udc7fet",
+      "field": "instructions"
+    },
+    {
+      "name": "zero width space (displayName)",
+      "text": "Fle\u200bet",
+      "field": "displayName"
+    },
+    {
+      "name": "zero width space (instructions)",
+      "text": "Fle\u200bet",
+      "field": "instructions"
+    },
+    {
+      "name": "byte order mark (displayName)",
+      "text": "Fle\ufeffet",
+      "field": "displayName"
+    },
+    {
+      "name": "byte order mark (instructions)",
+      "text": "Fle\ufeffet",
+      "field": "instructions"
+    },
+    {
+      "name": "word joiner (displayName)",
+      "text": "Fle\u2060et",
+      "field": "displayName"
+    },
+    {
+      "name": "word joiner (instructions)",
+      "text": "Fle\u2060et",
+      "field": "instructions"
+    },
+    {
+      "name": "NUL (displayName)",
+      "text": "Fle\u0000et",
+      "field": "displayName"
+    },
+    {
+      "name": "carriage return (displayName)",
+      "text": "Fle\ret",
+      "field": "displayName"
+    },
+    {
+      "name": "line feed (displayName)",
+      "text": "Fle\net",
+      "field": "displayName"
+    },
+    {
+      "name": "tab (displayName)",
+      "text": "Fle\tet",
+      "field": "displayName"
+    },
+    {
+      "name": "instructions with a tag payload",
+      "text": "Report.\udb40\udc49\udb40\udc67",
+      "field": "instructions"
+    }
+  ],
+  "refuseHubOnly": [
+    {
+      "name": "lone ZWJ (displayName)",
+      "text": "\u200d",
+      "field": "displayName"
+    },
+    {
+      "name": "lone ZWJ (instructions)",
+      "text": "\u200d",
+      "field": "instructions"
+    },
+    {
+      "name": "ZWJ between Latin letters (displayName)",
+      "text": "Fle\u200det",
+      "field": "displayName"
+    },
+    {
+      "name": "ZWJ between Latin letters (instructions)",
+      "text": "Fle\u200det",
+      "field": "instructions"
+    },
+    {
+      "name": "ZWNJ between Latin letters (displayName)",
+      "text": "Fle\u200cet",
+      "field": "displayName"
+    },
+    {
+      "name": "ZWNJ between Latin letters (instructions)",
+      "text": "Fle\u200cet",
+      "field": "instructions"
+    },
+    {
+      "name": "trailing ZWJ (displayName)",
+      "text": "Fleet\u200d",
+      "field": "displayName"
+    },
+    {
+      "name": "trailing ZWJ (instructions)",
+      "text": "Fleet\u200d",
+      "field": "instructions"
+    },
+    {
+      "name": "ZWJ after an emoji only (displayName)",
+      "text": "\ud83d\udc68\u200d",
+      "field": "displayName"
+    },
+    {
+      "name": "ZWJ after an emoji only (instructions)",
+      "text": "\ud83d\udc68\u200d",
+      "field": "instructions"
+    },
+    {
+      "name": "two ZWJ in a row (displayName)",
+      "text": "\ud83d\udc68\u200d\u200d\ud83d\udc69",
+      "field": "displayName"
+    },
+    {
+      "name": "two ZWJ in a row (instructions)",
+      "text": "\ud83d\udc68\u200d\u200d\ud83d\udc69",
+      "field": "instructions"
+    },
+    {
+      "name": "variation selector 16 after a letter (displayName)",
+      "text": "a\ufe0f",
+      "field": "displayName"
+    },
+    {
+      "name": "variation selector 16 after a letter (instructions)",
+      "text": "a\ufe0f",
+      "field": "instructions"
+    },
+    {
+      "name": "braille blank (displayName)",
+      "text": "\u2800",
+      "field": "displayName"
+    },
+    {
+      "name": "braille blank (instructions)",
+      "text": "\u2800",
+      "field": "instructions"
+    },
+    {
+      "name": "musical null notehead (displayName)",
+      "text": "\ud834\udd59",
+      "field": "displayName"
+    },
+    {
+      "name": "musical null notehead (instructions)",
+      "text": "\ud834\udd59",
+      "field": "instructions"
+    },
+    {
+      "name": "braille blank inside a word (displayName)",
+      "text": "Fle\u2800et",
+      "field": "displayName"
+    },
+    {
+      "name": "braille blank inside a word (instructions)",
+      "text": "Fle\u2800et",
+      "field": "instructions"
+    },
+    {
+      "name": "Khitan filler (displayName)",
+      "text": "Fle\ud81b\udfe4et",
+      "field": "displayName"
+    },
+    {
+      "name": "Khitan filler (instructions)",
+      "text": "Fle\ud81b\udfe4et",
+      "field": "instructions"
+    },
+    {
+      "name": "variation selector 1 (displayName)",
+      "text": "Fle\ufe00et",
+      "field": "displayName"
+    },
+    {
+      "name": "variation selector 1 (instructions)",
+      "text": "Fle\ufe00et",
+      "field": "instructions"
+    },
+    {
+      "name": "Khmer vowel inherent (displayName)",
+      "text": "Fle\u17b4et",
+      "field": "displayName"
+    },
+    {
+      "name": "Khmer vowel inherent (instructions)",
+      "text": "Fle\u17b4et",
+      "field": "instructions"
+    },
+    {
+      "name": "Mongolian free variation selector (displayName)",
+      "text": "Fle\u180bet",
+      "field": "displayName"
+    },
+    {
+      "name": "Mongolian free variation selector (instructions)",
+      "text": "Fle\u180bet",
+      "field": "instructions"
+    },
+    {
+      "name": "unassigned U+2065 (displayName)",
+      "text": "Fle\u2065et",
+      "field": "displayName"
+    },
+    {
+      "name": "unassigned U+2065 (instructions)",
+      "text": "Fle\u2065et",
+      "field": "instructions"
+    },
+    {
+      "name": "specials block U+FFF0 (displayName)",
+      "text": "Fle\ufff0et",
+      "field": "displayName"
+    },
+    {
+      "name": "specials block U+FFF0 (instructions)",
+      "text": "Fle\ufff0et",
+      "field": "instructions"
+    },
+    {
+      "name": "unassigned tag range U+E0080 (displayName)",
+      "text": "Fle\udb40\udc80et",
+      "field": "displayName"
+    },
+    {
+      "name": "unassigned tag range U+E0080 (instructions)",
+      "text": "Fle\udb40\udc80et",
+      "field": "instructions"
+    },
+    {
+      "name": "unassigned U+0378 (displayName)",
+      "text": "Fle\u0378et",
+      "field": "displayName"
+    },
+    {
+      "name": "unassigned U+0378 (instructions)",
+      "text": "Fle\u0378et",
+      "field": "instructions"
+    },
+    {
+      "name": "private use U+E000 (displayName)",
+      "text": "Fle\ue000et",
+      "field": "displayName"
+    },
+    {
+      "name": "private use U+E000 (instructions)",
+      "text": "Fle\ue000et",
+      "field": "instructions"
+    },
+    {
+      "name": "variation selector 17 (displayName)",
+      "text": "Fle\udb40\udd00et",
+      "field": "displayName"
+    },
+    {
+      "name": "variation selector 17 (instructions)",
+      "text": "Fle\udb40\udd00et",
+      "field": "instructions"
+    },
+    {
+      "name": "combining grapheme joiner (displayName)",
+      "text": "Fle\u034fet",
+      "field": "displayName"
+    },
+    {
+      "name": "combining grapheme joiner (instructions)",
+      "text": "Fle\u034fet",
+      "field": "instructions"
+    },
+    {
+      "name": "Hangul filler (displayName)",
+      "text": "Fle\u3164et",
+      "field": "displayName"
+    },
+    {
+      "name": "Hangul filler (instructions)",
+      "text": "Fle\u3164et",
+      "field": "instructions"
+    },
+    {
+      "name": "mark stack of 39 (displayName)",
+      "text": "F\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b",
+      "field": "displayName"
+    },
+    {
+      "name": "mark stack of 39 (instructions)",
+      "text": "F\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b\u0346\u0357\u035b",
+      "field": "instructions"
+    },
+    {
+      "name": "mark without a base (displayName)",
+      "text": "\u0338Fleet",
+      "field": "displayName"
+    },
+    {
+      "name": "mark without a base (instructions)",
+      "text": "\u0338Fleet",
+      "field": "instructions"
+    },
+    {
+      "name": "ZWJ between Cyrillic letters (displayName)",
+      "text": "\u0424\u200d\u0444",
+      "field": "displayName"
+    },
+    {
+      "name": "ZWJ between Cyrillic letters (instructions)",
+      "text": "\u0424\u200d\u0444",
+      "field": "instructions"
+    },
+    {
+      "name": "ZWNJ between Han characters (displayName)",
+      "text": "\u6f22\u200c\u5b57",
+      "field": "displayName"
+    },
+    {
+      "name": "ZWNJ between Han characters (instructions)",
+      "text": "\u6f22\u200c\u5b57",
+      "field": "instructions"
+    },
+    {
+      "name": "ZWJ between Greek letters (displayName)",
+      "text": "\u0391\u200d\u03b8",
+      "field": "displayName"
+    },
+    {
+      "name": "ZWJ between Greek letters (instructions)",
+      "text": "\u0391\u200d\u03b8",
+      "field": "instructions"
+    },
+    {
+      "name": "ZWNJ between Hangul syllables (displayName)",
+      "text": "\ud55c\u200c\uae00",
+      "field": "displayName"
+    },
+    {
+      "name": "ZWNJ between Hangul syllables (instructions)",
+      "text": "\ud55c\u200c\uae00",
+      "field": "instructions"
+    },
+    {
+      "name": "joiners between Devanagari letters without a virama (displayName)",
+      "text": "\u0915\u200c\u0916\u200d\u0917",
+      "field": "displayName"
+    },
+    {
+      "name": "joiners between Devanagari letters without a virama (instructions)",
+      "text": "\u0915\u200c\u0916\u200d\u0917",
+      "field": "instructions"
+    },
+    {
+      "name": "ZWJ between Arabic and Latin (displayName)",
+      "text": "\u0628\u200dx",
+      "field": "displayName"
+    },
+    {
+      "name": "ZWJ between Arabic and Latin (instructions)",
+      "text": "\u0628\u200dx",
+      "field": "instructions"
+    },
+    {
+      "name": "ZWJ after a Latin letter with a mark (displayName)",
+      "text": "e\u0301\u200dx",
+      "field": "displayName"
+    },
+    {
+      "name": "ZWJ after a Latin letter with a mark (instructions)",
+      "text": "e\u0301\u200dx",
+      "field": "instructions"
+    },
+    {
+      "name": "variation selector 16 after a digit (displayName)",
+      "text": "1\ufe0f",
+      "field": "displayName"
+    },
+    {
+      "name": "variation selector 16 after a digit (instructions)",
+      "text": "1\ufe0f",
+      "field": "instructions"
+    },
+    {
+      "name": "variation selector 15 after a digit (displayName)",
+      "text": "1\ufe0e",
+      "field": "displayName"
+    },
+    {
+      "name": "variation selector 15 after a digit (instructions)",
+      "text": "1\ufe0e",
+      "field": "instructions"
+    },
+    {
+      "name": "variation selector 15 after a number sign (displayName)",
+      "text": "#\ufe0e",
+      "field": "displayName"
+    },
+    {
+      "name": "variation selector 15 after a number sign (instructions)",
+      "text": "#\ufe0e",
+      "field": "instructions"
+    },
+    {
+      "name": "variation selector 16 after a regional indicator (displayName)",
+      "text": "\ud83c\uddf8\ufe0f",
+      "field": "displayName"
+    },
+    {
+      "name": "variation selector 16 after a regional indicator (instructions)",
+      "text": "\ud83c\uddf8\ufe0f",
+      "field": "instructions"
+    },
+    {
+      "name": "variation selector 16 after a skin tone (displayName)",
+      "text": "\ud83c\udffd\ufe0f",
+      "field": "displayName"
+    },
+    {
+      "name": "variation selector 16 after a skin tone (instructions)",
+      "text": "\ud83c\udffd\ufe0f",
+      "field": "instructions"
+    },
+    {
+      "name": "selectors on digits (displayName)",
+      "text": "Alert at 1\ufe0f0\ufe0e0\ufe0f%",
+      "field": "displayName"
+    },
+    {
+      "name": "selectors on digits (instructions)",
+      "text": "Alert at 1\ufe0f0\ufe0e0\ufe0f%",
+      "field": "instructions"
+    },
+    {
+      "name": "mark stack of 7 split by ZWJ after viramas (displayName)",
+      "text": "\u0915\u0941\u0942\u094d\u200d\u0943\u0944\u094d\u200d\u0945",
+      "field": "displayName"
+    },
+    {
+      "name": "mark stack of 7 split by ZWJ after viramas (instructions)",
+      "text": "\u0915\u0941\u0942\u094d\u200d\u0943\u0944\u094d\u200d\u0945",
+      "field": "instructions"
+    },
+    {
+      "name": "instructions with a Cyrillic joiner payload",
+      "text": "\u041e\u200c\u0442\u200d\u0447\u200c\u0451\u200c\u0442\u200d\u043f\u200c\u043e\u200c\u0444\u200d\u043b\u200c\u043e\u200d\u0442\u200d\u0443\u200c\u041e\u200c\u0442\u200d\u0447\u200d\u0451\u200d\u0442\u200c\u043f\u200d\u043e\u200d\u0444\u200c\u043b\u200d\u043e\u200d\u0442\u200d\u0443\u200c\u041e\u200c\u0442\u200d\u0447\u200d\u0451\u200c\u0442\u200d\u043f\u200d\u043e\u200d\u0444\u200d\u043b\u200c\u043e\u200d\u0442\u200d\u0443\u200d\u041e\u200c\u0442\u200c\u0447\u200d\u0451\u200c\u0442\u200c\u043f\u200d\u043e\u200d\u0444\u200c\u043b\u200c\u043e\u200d\u0442\u200c\u0443\u200d\u041e\u200c\u0442\u200c\u0447\u200d\u0451\u200c\u0442\u200c\u043f\u200c\u043e\u200c\u0444\u200c\u043b\u200c\u043e\u200d\u0442\u200d\u0443\u200d\u041e\u200c\u0442\u200d\u0447\u200c\u0451\u200c\u0442\u200c\u043f\u200d\u043e\u200d\u0444\u200c\u043b\u200d\u043e\u200c\u0442\u200c\u0443\u200c\u041e\u200c\u0442\u200d\u0447\u200d\u0451\u200c\u0442\u200c\u043f\u200d\u043e\u200c\u0444\u200d\u043b\u200c\u043e\u200c\u0442\u200d\u0443\u200c\u041e\u200c\u0442\u200c\u0447\u200c\u0451\u200c\u0442\u200c\u043f\u200d\u043e\u200d\u0444\u200d\u043b\u200c\u043e\u200d\u0442\u200c\u0443\u200d\u041e\u200c\u0442\u200d\u0447\u200d\u0451\u200d\u0442\u200c\u043f\u200c\u043e\u200d\u0444\u200d\u043b\u200c\u043e\u200d\u0442\u200d\u0443\u200c\u041e\u200c\u0442\u200d\u0447\u200c\u0451\u200d\u0442\u200c\u043f\u200d\u043e\u200d\u0444\u200d\u043b\u200c\u043e\u200c\u0442\u200d\u0443\u200c\u041e\u200c\u0442\u200c\u0447\u200d\u0451\u200c\u0442\u200d\u043f\u200d\u043e\u200d\u0444\u200c\u043b",
+      "field": "instructions"
+    }
+  ]
+}

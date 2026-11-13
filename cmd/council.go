@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/teknoir/cli/agentkit"
 	"github.com/teknoir/cli/pkg/council"
 	"github.com/teknoir/cli/pkg/council/coder"
 	"github.com/teknoir/cli/pkg/council/hub"
@@ -37,6 +38,7 @@ answers them. It runs the bot's own key, on the bot's own computer; it is not a 
 func newCouncilServeCmd(e *cliEnv) *cobra.Command {
 	var maxTurns int
 	var workDir string
+	var kitDir string
 	cmd := &cobra.Command{
 		Use:          "serve",
 		Short:        "Take chat turns from the platform and answer them",
@@ -55,16 +57,18 @@ func newCouncilServeCmd(e *cliEnv) *cobra.Command {
 			}
 			ctx, stop := signalContext(cmd.Context())
 			defer stop()
-			return serveCouncil(ctx, e, cmd, apiBase, ns, keyFile, maxTurns, workDir)
+			return serveCouncil(ctx, e, cmd, apiBase, ns, keyFile, maxTurns, workDir, kitDir)
 		},
 	}
 	cmd.Flags().IntVar(&maxTurns, "max-turns", 2, "how many turns to run at once: 1 or 2")
 	cmd.Flags().StringVar(&workDir, "work-dir", councilWorkDir, "the directory the Coder works in")
+	cmd.Flags().StringVar(&kitDir, "kit-dir", council.DefaultKitDir, "the directory the agent kit's guides are installed in")
+	_ = cmd.Flags().MarkHidden("kit-dir")
 	return cmd
 }
 
 // serveCouncil builds the council's clients and serves until ctx ends.
-func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, ns, keyFile string, maxTurns int, workDir string) error {
+func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, ns, keyFile string, maxTurns int, workDir, kitDir string) error {
 	logf := func(format string, args ...any) {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "council: "+format+"\n", args...)
 	}
@@ -104,16 +108,28 @@ func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, n
 		Tools:    ts,
 		Coder:    runner,
 		Whoami:   whoami,
+		Skills:   council.KitFS(kitDir),
 		MaxTurns: maxTurns,
 		Logf:     logf,
 	})
 	if err != nil {
 		return err
 	}
+	// The platform checks a turn's council against what this computer can do before it queues the
+	// turn. A bot that cannot announce its capabilities runs the Standard council, as it does today.
+	if err := h.SetCaps(councilCaps(ts, d)); err != nil {
+		logf("caps not sent: %v", err)
+	}
 	if err := d.Serve(ctx); err != nil {
 		return classify(err)
 	}
 	return nil
+}
+
+// councilCaps is what this computer announces on every K1: the tools its MCP server offers, the
+// guides its own book carries and the kit it installed.
+func councilCaps(ts *tools.Set, d *council.Daemon) hub.Caps {
+	return hub.Caps{Proto: 2, Kit: agentkit.Version, Tools: ts.Names(tools.LevelCreator), Skills: d.SkillNames()}
 }
 
 func init() { rootCmd.AddCommand(newCouncilCmd(defaultEnv)) }

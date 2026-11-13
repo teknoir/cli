@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"github.com/teknoir/cli/agentkit"
 	"github.com/teknoir/cli/pkg/council/coder"
 	"github.com/teknoir/cli/pkg/council/hub"
 	"github.com/teknoir/cli/pkg/council/model"
@@ -292,10 +294,21 @@ func (f *fakeTools) queueResults(name string, results ...tools.Result) {
 	f.queues[name] = append(f.queues[name], results...)
 }
 
-func (f *fakeTools) For(level string) []anthropic.ToolUnionParam {
+// Names is a sorted copy of the fake catalog at level.
+func (f *fakeTools) Names(level string) []string {
+	out := append([]string{}, testToolNames[level]...)
+	slices.Sort(out)
+	return out
+}
+
+// For keeps the fake catalog's own order, filtered by allow: the golden files record that order.
+func (f *fakeTools) For(level string, allow []string) []anthropic.ToolUnionParam {
 	names := testToolNames[level]
 	out := make([]anthropic.ToolUnionParam, 0, len(names))
 	for _, n := range names {
+		if !slices.Contains(allow, n) {
+			continue
+		}
 		out = append(out, anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{Name: n}})
 	}
 	if n := len(out); n > 0 {
@@ -304,7 +317,16 @@ func (f *fakeTools) For(level string) []anthropic.ToolUnionParam {
 	return out
 }
 
-func (f *fakeTools) Call(ctx context.Context, level, name string, input json.RawMessage) (tools.Result, error) {
+func (f *fakeTools) Call(ctx context.Context, level string, allow []string, name string, input json.RawMessage) (tools.Result, error) {
+	// The same order of checks, and the same refusals, as tools.Set.Call.
+	if !slices.Contains(testToolNames[level], name) {
+		msg := fmt.Sprintf("%q is not a tool a council member at level %q may call", name, level)
+		return tools.Result{Text: msg, Digest: msg, IsError: true}, nil
+	}
+	if !slices.Contains(allow, name) {
+		msg := fmt.Sprintf("%q is not a tool this council member may call", name)
+		return tools.Result{Text: msg, Digest: msg, IsError: true}, nil
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, toolCallRec{Level: level, Name: name, Input: string(input)})
 	var res tools.Result
@@ -669,6 +691,10 @@ func newWork(kind, member, prompt string) *hub.WorkTurn {
 	}
 }
 
+// testBook is the guides of the council's tests: the kit embedded in tnctl, so what a prompt says
+// about guides does not depend on the machine the test runs on.
+func testBook() *skillBook { return newSkillBook(agentkit.FS) }
+
 // newHarness is a harness with one turn queued and small durations.
 func newHarness(t *testing.T, work *hub.WorkTurn) *testHarness {
 	t.Helper()
@@ -688,6 +714,7 @@ func newHarness(t *testing.T, work *hub.WorkTurn) *testHarness {
 		Logf:   h.logs.logf,
 		Sleep:  func(context.Context, time.Duration) error { return nil },
 		Now:    time.Now,
+		Skills: agentkit.FS,
 
 		MergeEvery:  2 * time.Millisecond,
 		MergeBytes:  1 << 20,

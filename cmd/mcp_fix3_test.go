@@ -36,7 +36,7 @@ func councilSet(t *testing.T, reply func(w http.ResponseWriter)) *ctools.Set {
 func councilCall(t *testing.T, set *ctools.Set, name string, in map[string]any) ctools.Result {
 	t.Helper()
 	raw, _ := json.Marshal(in)
-	r, err := set.Call(context.Background(), ctools.LevelRead, name, raw)
+	r, err := set.Call(context.Background(), ctools.LevelRead, set.Names(ctools.LevelRead), name, raw)
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
@@ -206,7 +206,7 @@ func TestCouncilInspectLogsAtTheLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = set.Close() })
-	r, err := set.Call(context.Background(), ctools.LevelCreator, "inspect_logs", json.RawMessage(`{}`))
+	r, err := set.Call(context.Background(), ctools.LevelCreator, set.Names(ctools.LevelCreator), "inspect_logs", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
