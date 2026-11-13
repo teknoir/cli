@@ -40,11 +40,69 @@ type mqttFlags struct {
 func newMqttCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
 		SilenceUsage: true,
-		Use:          "mqtt <stream> ...",
+		Use:          "mqtt <stream|sample> ...",
 		Short:        "Follow the MQTT messages of the teamspace's devices",
 	}
-	c.AddCommand(newMqttStreamCmd(e))
+	c.AddCommand(newMqttStreamCmd(e), newMqttSampleCmd(e))
 	return c
+}
+
+// streamDropped counts the messages the platform dropped, by the reason it gave: a dropped event of
+// the stream, or a tool result's serverDropped. An unknown or empty reason counts as other.
+type streamDropped struct {
+	Size  int `json:"size"`
+	Rate  int `json:"rate"`
+	Slow  int `json:"slow"`
+	Other int `json:"other"`
+}
+
+// add counts n messages the platform dropped for reason.
+func (d *streamDropped) add(reason string, n int) {
+	switch reason {
+	case "size":
+		d.Size += n
+	case "rate":
+		d.Rate += n
+	case "slow":
+		d.Slow += n
+	default:
+		d.Other += n
+	}
+}
+
+// total is every dropped message, whatever the reason.
+func (d streamDropped) total() int { return d.Size + d.Rate + d.Slow + d.Other }
+
+// sampleMsg is one message of a sample as a JSON line: the CLI's --json output, and a line of a
+// capture (which also carries the sha256 of the payload's bytes).
+type sampleMsg struct {
+	I        int    `json:"i"`
+	Topic    string `json:"topic"`
+	TS       string `json:"ts"`
+	Retain   bool   `json:"retain"`
+	Bytes    int    `json:"bytes"`
+	Encoding string `json:"encoding"`
+	SHA256   string `json:"sha256,omitempty"`
+	Payload  string `json:"payload"`
+}
+
+// sampleMsgOf is m's line for i: the payload as the stream sent it (text, or base64 for a binary
+// one) and its decoded bytes (the text, or what the base64 holds), which the byte count and the
+// hash are taken from.
+func sampleMsgOf(i int, m *api.StreamMessage) (sampleMsg, []byte) {
+	line := sampleMsg{I: i, Topic: m.Topic, TS: m.TS, Retain: m.Retain, Encoding: "utf8", Payload: m.Payload}
+	decoded := []byte(m.Payload)
+	if m.Payload == "" && m.PayloadBase64 != "" {
+		line.Encoding, line.Payload = "base64", m.PayloadBase64
+		b, err := base64.StdEncoding.DecodeString(m.PayloadBase64)
+		if err != nil {
+			// Not base64 tnctl can decode: count what such text would hold.
+			b = make([]byte, base64.StdEncoding.DecodedLen(len(m.PayloadBase64)))
+		}
+		decoded = b
+	}
+	line.Bytes = len(decoded)
+	return line, decoded
 }
 
 func newMqttStreamCmd(e *cliEnv) *cobra.Command {

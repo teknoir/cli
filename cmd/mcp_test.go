@@ -42,10 +42,16 @@ var mcpToolNames = []string{
 	"list_kinds",
 	"prom_query",
 	"mqtt_sample",
+	"mqtt_get_sample",
+	"mqtt_read",
 	"inspect_pod",
 	"inspect_logs",
 	"inspect_release",
 }
+
+// mcpCutMarker is what mcpResult leaves where it cut a result: a result that carries it was too
+// long for the agent, not one that says its own payloads were cut.
+const mcpCutMarker = "… truncated,"
 
 // mcpClient connects a client to s over an in-memory pipe (the server connects first, or the pipe
 // hangs).
@@ -266,6 +272,8 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 		"get_config": {"target"}, "list_kinds": {},
 		"prom_query":      {"query"},
 		"mqtt_sample":     {"topics"},
+		"mqtt_get_sample": {"topics"},
+		"mqtt_read":       {"captureId", "i"},
 		"inspect_pod":     {"pod", "pod_namespace", "robot"},
 		"inspect_logs":    {"pod", "pod_namespace", "robot"},
 		"inspect_release": {"release", "release_namespace", "robot"},
@@ -303,22 +311,34 @@ func TestMCPToolListIsReadOnlyAndComplete(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"inspect_logs", "inspect_pod", "inspect_release", "get_problems", "prom_query", "mqtt_sample", "list_devices", "get_device", "get_robot", "get_config"} {
+	for _, name := range []string{"inspect_logs", "inspect_pod", "inspect_release", "get_problems", "prom_query", "mqtt_sample", "mqtt_get_sample", "mqtt_read", "list_devices", "get_device", "get_robot", "get_config"} {
 		for _, tool := range tools.Tools {
 			if tool.Name == name && !strings.HasSuffix(tool.Description, mcpUntrustedNote) {
 				t.Errorf("%s: description does not end with the untrusted note: %q", name, tool.Description)
 			}
 		}
 	}
-	// The description is what an agent reads: every stop of the sample, the payload cut and the one
-	// sample at a time must be in it.
+	// The description is what an agent reads: every stop of the sample, the payload cut, the one
+	// sample at a time, and which tool returns whole payloads must be in it.
 	for _, tool := range tools.Tools {
-		if tool.Name != "mqtt_sample" {
-			continue
-		}
-		for _, want := range []string{"when the sample is full", "stoppedBy", "payloadTruncated", "One sample runs at a time"} {
-			if !strings.Contains(tool.Description, want) {
-				t.Errorf("the mqtt_sample description lacks %q: %q", want, tool.Description)
+		switch tool.Name {
+		case "mqtt_sample":
+			for _, want := range []string{"when the sample is full", "stoppedBy", "payloadTruncated", "One sample runs at a time", "mqtt_get_sample", "256 KiB"} {
+				if !strings.Contains(tool.Description, want) {
+					t.Errorf("the mqtt_sample description lacks %q: %q", want, tool.Description)
+				}
+			}
+		case "mqtt_get_sample":
+			for _, want := range []string{"whole", "12288", "mqtt_read", "30 minutes", "256 KiB", "serverDropped.size", "cheaper preview"} {
+				if !strings.Contains(tool.Description, want) {
+					t.Errorf("the mqtt_get_sample description lacks %q: %q", want, tool.Description)
+				}
+			}
+		case "mqtt_read":
+			for _, want := range []string{"12288", "nextOffset", "path", "30 minutes"} {
+				if !strings.Contains(tool.Description, want) {
+					t.Errorf("the mqtt_read description lacks %q: %q", want, tool.Description)
+				}
 			}
 		}
 	}
@@ -361,7 +381,7 @@ func TestMCPServerStartsWithoutAFleet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 17 {
+	if len(tools.Tools) != 19 {
 		t.Fatalf("%d tools", len(tools.Tools))
 	}
 	if fleetCalls != 0 || domainCalls != 0 {
@@ -919,7 +939,7 @@ func TestMCPTruncatesASingleLongLineAtARuneBoundary(t *testing.T) {
 func TestMCPSmallResultHasNoTruncationLine(t *testing.T) {
 	c := mcpCase{tool: "get_overview", answer: `{"devices":1}`, reqs: []mcpWant{{method: "GET", path: "/overview"}}}
 	_, cs := mcpHarness(t, c)
-	if text := mcpText(t, mcpCall(t, cs, c.tool, nil)); strings.Contains(text, "truncated") {
+	if text := mcpText(t, mcpCall(t, cs, c.tool, nil)); strings.Contains(text, mcpCutMarker) {
 		t.Errorf("a small answer was cut: %q", text)
 	}
 }
@@ -1266,13 +1286,16 @@ func TestMCPWritesNothingToStdout(t *testing.T) {
 		mcpRegister(p, c)
 	}
 	p.on("GET", mcpAcmePath("/overview"), 500, `{"error":{"message":"boom"}}`)
-	p.on("GET", "/mqtt/stream", 200, "event: message\ndata: {\"topic\":\"/devices/d1/state/x\",\"payload\":\"hi\",\"retain\":false,\"ts\":\"2026-11-08T10:00:00Z\"}\n\n")
+	// Large enough that mqtt_get_sample spills it, so mqtt_read has a capture to read.
+	p.on("GET", "/mqtt/stream", 200, "event: message\ndata: {\"topic\":\"/devices/d1/state/x\",\"payload\":\""+
+		strings.Repeat("m", 20<<10)+"\",\"retain\":false,\"ts\":\"2026-11-08T10:00:00Z\"}\n\n")
 	e, _ := testEnv(t, p, nil)
 
 	ptermBuf := capturePterm(t)
 	stop := captureOSStdout(t)
 
 	cs := mcpClient(t, newMCPServer(e))
+	captureID := ""
 	for _, name := range mcpToolNames {
 		var args map[string]any
 		for _, c := range mcpCases() {
@@ -1280,11 +1303,24 @@ func TestMCPWritesNothingToStdout(t *testing.T) {
 				args = c.args
 			}
 		}
-		if args == nil && name == "mqtt_sample" {
+		if args == nil && (name == "mqtt_sample" || name == "mqtt_get_sample") {
 			args = map[string]any{"topics": []string{"/devices/+/state/#"}}
 		}
-		if res := mcpCall(t, cs, name, args); res == nil || res.IsError {
+		if name == "mqtt_read" {
+			args = map[string]any{"captureId": captureID, "i": 0}
+		}
+		res := mcpCall(t, cs, name, args)
+		if res == nil || res.IsError {
 			t.Errorf("%s did not succeed: %+v", name, res)
+			continue
+		}
+		if name == "mqtt_get_sample" {
+			// The spilling sample's id, so mqtt_read has something to read.
+			var idx struct {
+				CaptureID string `json:"captureId"`
+			}
+			_ = json.Unmarshal([]byte(mcpText(t, res)), &idx)
+			captureID = idx.CaptureID
 		}
 	}
 	if res := mcpCall(t, cs, "get_overview", map[string]any{"namespace": "acme"}); !res.IsError {
@@ -1713,7 +1749,7 @@ func TestMCPMqttSampleSizeCountsEscapes(t *testing.T) {
 			text := mcpText(t, res)
 			var got mcpSampleOut
 			err := json.Unmarshal([]byte(text), &got)
-			if res.IsError || err != nil || got.StoppedBy != "size" || strings.Contains(text, "truncated") {
+			if res.IsError || err != nil || got.StoppedBy != "size" || strings.Contains(text, mcpCutMarker) {
 				tail := text[max(0, len(text)-80):]
 				t.Errorf("%d bytes (JSON error %v), %d messages, stopped by %q, ends %q; want size and no truncated line",
 					len(text), err, len(got.Messages), got.StoppedBy, tail)
@@ -1741,7 +1777,7 @@ func TestMCPMqttSampleStopsAtTheSizeCap(t *testing.T) {
 		if err := json.Unmarshal([]byte(text), &v); err != nil {
 			t.Errorf("the result is not valid JSON: %v", err)
 		}
-		if strings.Contains(text, "truncated") {
+		if strings.Contains(text, mcpCutMarker) {
 			t.Errorf("the result was truncated by mcpResult: %d bytes", len(text))
 		}
 		mcpWaitEnded(t, ended)
@@ -1760,7 +1796,7 @@ func TestMCPMqttSampleStopsAtTheSizeCap(t *testing.T) {
 		if got.StoppedBy != "max" && got.StoppedBy != "size" {
 			t.Errorf("stopped by %q, want max or size", got.StoppedBy)
 		}
-		if strings.Contains(text, "truncated") {
+		if strings.Contains(text, mcpCutMarker) {
 			t.Errorf("the result was truncated by mcpResult: %d bytes", len(text))
 		}
 	})
@@ -2235,7 +2271,7 @@ func TestMCPGetRobotDetail(t *testing.T) {
 	if len(text) >= 12<<10 {
 		t.Errorf("the summary is %d bytes, want under 12 KiB", len(text))
 	}
-	if strings.Contains(text, "truncated") {
+	if strings.Contains(text, mcpCutMarker) {
 		t.Errorf("the summary was cut: %q", text[len(text)-80:])
 	}
 	if !strings.Contains(text, "K3S_URL=https://<server-address>:6443") || strings.Contains(text, `\u003c`) || strings.Contains(text, `\u0026`) {

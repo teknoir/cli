@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -378,30 +379,56 @@ type mcpSampleIn struct {
 	Max       int      `json:"max,omitempty" jsonschema:"stop after this many messages; default 50, max 200"`
 }
 
-// mcpSampleResult is what mqtt_sample returns: the messages as the stream sent them, the count of the
-// messages the platform dropped, and why the sample stopped.
+// mcpSampleResult is what mqtt_sample returns: the messages as the stream sent them, how much of
+// them was cut, the messages the platform dropped and why, and why the sample stopped.
 type mcpSampleResult struct {
-	Messages  []json.RawMessage `json:"messages"`
-	Dropped   int               `json:"dropped"`
-	StoppedBy string            `json:"stoppedBy"`
+	Messages          []json.RawMessage `json:"messages"`
+	Dropped           int               `json:"dropped"`
+	Truncated         bool              `json:"truncated"`
+	TruncatedMessages int               `json:"truncatedMessages"`
+	TotalBytes        int               `json:"totalBytes"`
+	ServerDropped     streamDropped     `json:"serverDropped"`
+	StoppedBy         string            `json:"stoppedBy"`
+	Hint              string            `json:"hint,omitempty"`
 }
+
+// mcpSampleCutHint is what a cut sample says: mqtt_get_sample returns the payloads whole.
+const mcpSampleCutHint = "Payloads were cut or the sample filled up. mqtt_get_sample returns whole payloads."
 
 // ---------- the server ----------
 
-// newMCPServer builds the read-only server.
-func newMCPServer(e *cliEnv) *mcp.Server { return newMCPServerWith(e, false) }
+// mcpServerOptions is what the caller of a server decides beyond its cliEnv: the council tools, and
+// where the captures of mqtt_get_sample go (empty: the temp dir's tnctl-captures).
+type mcpServerOptions struct {
+	Council    bool
+	CaptureDir string
+}
 
-// newMCPServerWith builds the server: the 17 read tools, and with council the four council tools too.
+// newMCPServer builds the read-only server.
+func newMCPServer(e *cliEnv) *mcp.Server { return newMCPServerOpts(e, mcpServerOptions{}) }
+
+// newMCPServerWith builds the server with or without the council tools.
+func newMCPServerWith(e *cliEnv, council bool) *mcp.Server {
+	return newMCPServerOpts(e, mcpServerOptions{Council: council})
+}
+
+// newMCPServerOpts builds the server: the 19 read tools, and with council the four council tools too.
 // It calls neither e.fleet nor e.domainFleet: every handler resolves its client on each call, so the
 // server starts without a login and a login made while the agent runs counts on the next call.
-func newMCPServerWith(e *cliEnv, council bool) *mcp.Server {
+func newMCPServerOpts(e *cliEnv, opts mcpServerOptions) *mcp.Server {
+	council := opts.Council
 	instructions := mcpInstructions
 	if council {
 		instructions = mcpCouncilInstructions
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "tnctl", Version: Version}, &mcp.ServerOptions{Instructions: instructions})
-	// sampleSlot holds the one mqtt_sample a server runs at a time.
-	sampleSlot := make(chan struct{}, 1)
+	// sampleSlot holds the one sample (mqtt_sample or mqtt_get_sample) a server runs at a time.
+	sampleSlot := newMCPSampleSlot()
+	captureDir := opts.CaptureDir
+	if captureDir == "" {
+		captureDir = mcpStdioCaptureDir()
+	}
+	captures := newCaptureStore(captureDir)
 
 	addTool(s, "whoami", "Who this tnctl works as: the person of the stored login with the domain and teamspace it targets, or, inside a TeknoirBot, the bot, its creator and its access. Call it first to learn the default teamspace.",
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, any, error) {
@@ -634,8 +661,12 @@ func newMCPServerWith(e *cliEnv, council bool) *mcp.Server {
 			return mcpResult(mcpPromQueryHint(raw)), nil, nil
 		})
 
-	addTool(s, "mqtt_sample", "Listen to the MQTT messages of the teamspace's devices for a few seconds and return what arrived: use it to see what a device publishes. It stops at max messages, after seconds, when the stream ends, or when the sample is full; stoppedBy says which. A text payload over 4096 bytes, or a binary one over 4096 base64 characters, is cut and marked payloadTruncated, with payloadBytes its full length. One sample runs at a time: put every topic (up to 8) in one call instead of calling it in parallel. "+mcpUntrustedNote,
+	addTool(s, "mqtt_sample", "Listen to the MQTT messages of the teamspace's devices for a few seconds and return what arrived: use it to see what a device publishes. It is the cheap preview: a text payload over 4096 bytes, or a binary one over 4096 base64 characters, is cut and marked payloadTruncated, with payloadBytes its full length, and truncated says whether any was cut. For whole payloads use mqtt_get_sample. It stops at max messages, after seconds, when the stream ends, or when the sample is full; stoppedBy says which. serverDropped counts what the platform dropped, by reason (size, rate, slow, other); messages over 256 KiB are dropped by the platform. One sample runs at a time: put every topic (up to 8) in one call instead of calling it in parallel. "+mcpUntrustedNote,
 		mcpSampleTool(e, sampleSlot))
+
+	addTool(s, "mqtt_get_sample", mcpGetSampleDescription, mcpGetSampleTool(e, sampleSlot, captures))
+
+	addTool(s, "mqtt_read", mcpReadDescription, mcpReadTool(captures))
 
 	addTool(s, "inspect_pod", "Show a pod of a robot: phase, containers and recent events. "+mcpInspectNote+" "+mcpUntrustedNote,
 		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpInspectPodInput) (*mcp.CallToolResult, any, error) {
@@ -728,9 +759,40 @@ func newMCPServerWith(e *cliEnv, council bool) *mcp.Server {
 
 // ---------- mqtt_sample ----------
 
+// mcpSampleSlot is the server's one-sample lock: mqtt_sample and mqtt_get_sample share it, so one
+// stream is open at a time from this server (the platform allows four open streams per caller,
+// shared with the person's own tnctl mqtt stream and relays). It remembers which tool holds it, so a
+// refused call names the one that is running.
+type mcpSampleSlot struct {
+	ch   chan struct{}
+	mu   sync.Mutex
+	tool string
+}
+
+func newMCPSampleSlot() *mcpSampleSlot { return &mcpSampleSlot{ch: make(chan struct{}, 1)} }
+
+// acquire takes the slot for tool. When another sample holds it, running names that tool. The mutex
+// covers both the slot and the name, so a refused call never reads the name before it is set.
+func (s *mcpSampleSlot) acquire(tool string) (release func(), running string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case s.ch <- struct{}{}:
+		s.tool = tool
+		return func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.tool = ""
+			<-s.ch
+		}, "", true
+	default:
+		return nil, s.tool, false
+	}
+}
+
 // mcpSampleTool is the mqtt_sample handler. slot is the server's one-sample lock: the platform allows
 // four open streams per caller, shared with the person's own tnctl mqtt stream and relays.
-func mcpSampleTool(e *cliEnv, slot chan struct{}) func(context.Context, *mcp.CallToolRequest, mcpSampleIn) (*mcp.CallToolResult, any, error) {
+func mcpSampleTool(e *cliEnv, slot *mcpSampleSlot) func(context.Context, *mcp.CallToolRequest, mcpSampleIn) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in mcpSampleIn) (*mcp.CallToolResult, any, error) {
 		if err := api.ValidateStreamTopics(in.Topics); err != nil {
 			return nil, nil, err
@@ -749,90 +811,46 @@ func mcpSampleTool(e *cliEnv, slot chan struct{}) func(context.Context, *mcp.Cal
 		if max < 0 || max > 200 {
 			return nil, nil, usageErr("max must be from 1 to 200")
 		}
-		select {
-		case slot <- struct{}{}:
-			defer func() { <-slot }()
-		default:
-			return nil, nil, usageErr("another mqtt_sample is running; put all topics (up to 8) in one call, or try again when it ends")
+		release, running, ok := slot.acquire("mqtt_sample")
+		if !ok {
+			return nil, nil, usageErr("another %s is running; put all topics (up to 8) in one call, or try again when it ends", running)
 		}
+		defer release()
 		fl, err := mcpFleet(e, in.Namespace)
 		if err != nil {
 			return nil, nil, err
 		}
-		// Opening the stream has a bound of its own: the platform reads the broker login, connects and
-		// subscribes before it answers, and none of that is listening time. A bound that fires is an
-		// error, never an empty success, which would read as "the device published nothing".
-		octx, ocancel := context.WithCancelCause(ctx)
-		defer ocancel(nil)
-		open := time.AfterFunc(mcpSampleOpenMax, func() { ocancel(errSampleOpen) })
-		sub, err := fl.MqttStream(octx, in.Topics)
-		inTime := open.Stop()
-		if err != nil || !inTime {
-			if err == nil {
-				_ = sub.Close() // the bound fired as the stream opened: its cancel ends the stream
-			}
-			switch {
-			case ctx.Err() != nil:
-				return nil, nil, ctx.Err()
-			case !inTime || errors.Is(context.Cause(octx), errSampleOpen):
-				return nil, nil, newErr(codeError, "the platform did not open the MQTT stream within %s; its broker may be unreachable", mcpSampleOpenMax)
-			}
-			return nil, nil, classify(err)
-		}
-		defer func() { _ = sub.Close() }()
-		// The listening time starts now, with the stream open. Its cancel ends a blocked Next() (it
-		// carries the request), even when only ": keepalive" lines arrive. There is no other timer and
-		// no reconnect.
-		listen := time.AfterFunc(time.Duration(seconds)*mcpSampleUnit, func() { ocancel(errSampleTime) })
-		defer listen.Stop()
-		res := mcpSampleResult{Messages: []json.RawMessage{}, StoppedBy: "end"}
+		res := mcpSampleResult{Messages: []json.RawMessage{}}
 		size := 0
-	loop:
-		for {
-			ev, rerr := sub.Next()
-			if rerr != nil {
-				switch {
-				case ctx.Err() != nil:
-					return nil, nil, ctx.Err()
-				case errors.Is(context.Cause(octx), errSampleTime):
-					res.StoppedBy = "seconds" // classify would call it a timeout
-				case errors.Is(rerr, io.EOF):
-					res.StoppedBy = "end"
-				default:
-					return nil, nil, classify(rerr)
-				}
-				break loop
+		out, err := mqttCollect(ctx, fl, mqttCollectOpts{
+			topics: in.Topics, seconds: seconds, unit: mcpSampleUnit, openMax: mcpSampleOpenMax, openCode: codeError,
+		}, func(m *api.StreamMessage, data string) (string, int, error) {
+			// Marshalled as the result will be: json.Marshal escapes <, > and & and U+2028/U+2029,
+			// which the platform's JSON.stringify sends as they are (up to 6 bytes for one).
+			msg := marshalRaw(mcpSampleMessage(m, data))
+			if size+len(msg)+1 > mcpSampleMaxBytes {
+				return "size", 0, nil
 			}
-			switch ev.Name {
-			case api.StreamEventMessage:
-				m, perr := api.ParseStreamMessage(ev.Data)
-				if perr != nil {
-					return nil, nil, perr
-				}
-				// Marshalled as the result will be: json.Marshal escapes <, > and & and U+2028/U+2029,
-				// which the platform's JSON.stringify sends as they are (up to 6 bytes for one).
-				msg := marshalRaw(mcpSampleMessage(m, ev.Data))
-				if size+len(msg)+1 > mcpSampleMaxBytes {
-					res.StoppedBy = "size"
-					break loop
-				}
-				res.Messages = append(res.Messages, msg)
-				size += len(msg) + 1
-				if len(res.Messages) >= max {
-					res.StoppedBy = "max"
-					break loop
-				}
-			case api.StreamEventDropped:
-				if d, derr := api.ParseStreamDropped(ev.Data); derr == nil {
-					res.Dropped += d.Count // whatever the reason, rate, size, slow or a new one
-				}
-			case api.StreamEventError:
-				se, perr := api.ParseStreamError(ev.Data)
-				if perr != nil {
-					return nil, nil, perr
-				}
-				return nil, nil, streamEndedError(se)
+			res.Messages = append(res.Messages, msg)
+			size += len(msg) + 1
+			res.TotalBytes += mcpPayloadBytes(m)
+			if mcpSampleCut(m) {
+				res.TruncatedMessages++
 			}
+			if len(res.Messages) >= max {
+				return "max", 0, nil
+			}
+			return "", 0, nil
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		res.StoppedBy = out.stoppedBy
+		res.ServerDropped = out.dropped
+		res.Dropped = out.dropped.total() // the total, for the agents that read it before serverDropped
+		res.Truncated = res.TruncatedMessages > 0 || out.stoppedBy == "size"
+		if res.Truncated {
+			res.Hint = mcpSampleCutHint
 		}
 		return mcpResult(marshalRaw(res)), nil, nil
 	}
@@ -842,29 +860,40 @@ func mcpSampleTool(e *cliEnv, slot chan struct{}) func(context.Context, *mcp.Cal
 // payload fits (it has payload or payloadBase64, never both, and may carry fields tnctl does not
 // know), otherwise the same object with the long field cut and the payload counted.
 func mcpSampleMessage(m *api.StreamMessage, data string) json.RawMessage {
-	if len(m.Payload) <= mcpSamplePayloadMax && len(m.PayloadBase64) <= mcpSamplePayloadMax {
+	if !mcpSampleCut(m) {
 		return json.RawMessage(data)
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(data), &fields); err != nil || fields == nil {
 		return json.RawMessage(data)
 	}
-	full := 0
 	if len(m.Payload) > mcpSamplePayloadMax {
-		full = len(m.Payload)
 		fields["payload"] = marshalRaw(mcpSampleText(m.Payload))
 	}
 	if len(m.PayloadBase64) > mcpSamplePayloadMax {
 		fields["payloadBase64"] = marshalRaw(m.PayloadBase64[:mcpSamplePayloadMax]) // a multiple of 4
-		if b, derr := base64.StdEncoding.DecodeString(m.PayloadBase64); derr == nil {
-			full = len(b)
-		} else {
-			full = base64.StdEncoding.DecodedLen(len(m.PayloadBase64))
-		}
 	}
-	fields["payloadBytes"] = marshalRaw(full)
+	fields["payloadBytes"] = marshalRaw(mcpPayloadBytes(m))
 	fields["payloadTruncated"] = marshalRaw(true)
 	return marshalRaw(fields)
+}
+
+// mcpSampleCut reports whether mqtt_sample cuts m's payload: a text payload over mcpSamplePayloadMax
+// bytes, or a binary one over mcpSamplePayloadMax base64 characters.
+func mcpSampleCut(m *api.StreamMessage) bool {
+	return len(m.Payload) > mcpSamplePayloadMax || len(m.PayloadBase64) > mcpSamplePayloadMax
+}
+
+// mcpPayloadBytes is a message's payload size: a text payload's UTF-8 length, or what a binary one
+// decodes to.
+func mcpPayloadBytes(m *api.StreamMessage) int {
+	if m.Payload != "" || m.PayloadBase64 == "" {
+		return len(m.Payload)
+	}
+	if b, err := base64.StdEncoding.DecodeString(m.PayloadBase64); err == nil {
+		return len(b)
+	}
+	return base64.StdEncoding.DecodedLen(len(m.PayloadBase64))
 }
 
 // mcpSampleText cuts s to at most mcpSamplePayloadMax bytes, where a rune starts.

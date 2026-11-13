@@ -200,11 +200,14 @@ read-only and all scoped to your identity:
 
 `whoami`, `list_teamspaces`, `list_devices`, `get_device`, `list_robots`, `get_robot`,
 `list_robot_types`, `list_fleets`, `get_overview`, `get_problems`, `get_config`, `list_kinds`,
-`prom_query`, `inspect_pod`, `inspect_logs`, `inspect_release`, `mqtt_sample`.
+`prom_query`, `inspect_pod`, `inspect_logs`, `inspect_release`, `mqtt_sample`,
+`mqtt_get_sample`, `mqtt_read`.
 
 The three `inspect_*` tools never turn a Shell on; when it is off they fail with the platform's
 own message saying so (the result names no error code).
-`mqtt_sample` collects a few messages and stops.
+`mqtt_sample` collects a few messages and stops, with a long payload cut;
+`mqtt_get_sample` returns them whole (spilling a large sample to a capture that `mqtt_read` pages
+through, or reads one JSON field of with `path`).
 
 These tools write nothing. Started as `tnctl mcp --council` (a person's own agent only), the server
 also has the `council_*` tools, which hand work to a TeknoirBot's council (skill `teknoir-council`).
