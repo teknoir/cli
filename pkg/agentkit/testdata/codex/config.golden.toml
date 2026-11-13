@@ -1,0 +1,16 @@
+# Codex configuration
+model = "gpt-5-codex"  # the default model
+approval_policy = "on-request"
+
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_TOKEN = "not-a-real-token" }
+
+[profiles.fast]
+model = "gpt-5-codex-mini"
+
+[mcp_servers.teknoir]
+command = "tnctl"
+args = ["mcp"]
+env_vars = ["TEKNOIRBOT_API", "TNCTL_BOT_KEY_FILE", "TEKNOIRBOT_NAMESPACE", "TEKNOIR_DOMAIN", "TNCTL_NAMESPACE", "TNCTL_DOMAIN", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_DIR"]

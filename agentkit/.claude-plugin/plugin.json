@@ -1,0 +1,10 @@
+{
+  "name": "teknoir",
+  "version": "0.2.0",
+  "description": "Operate Teknoir devices, robots and fleets: skills plus the read-only tnctl MCP server.",
+  "author": {
+    "name": "Teknoir"
+  },
+  "homepage": "https://github.com/teknoir/cli",
+  "license": "Apache-2.0"
+}

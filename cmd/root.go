@@ -28,6 +28,9 @@ Teknoir's cloud platform and edge devices. It handles authentication,
 device management, and namespace-scoped operations.`,
 	// Errors are printed by Execute, which also picks the exit code.
 	SilenceErrors: true,
+	// botPreRun refuses, in bot mode, the commands a TeknoirBot may not run. No subcommand sets
+	// its own PersistentPreRun(E); if one ever does, cobra runs only that one and this is skipped.
+	PersistentPreRunE: botPreRun,
 	Run: func(cmd *cobra.Command, args []string) {
 		cmd.Help()
 	},
@@ -75,10 +78,6 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	// Set defaults
-	defaultCfg := config.DefaultConfig()
-	viper.SetDefault("domain", defaultCfg.Domain)
-
 	// Persistent flags that are available to every subcommand
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.tnctl.yaml)")
 	rootCmd.PersistentFlags().StringVarP(&domain, "domain", "d", "", "Teknoir domain (e.g., teknoir.cloud)")
@@ -87,6 +86,14 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&config.Debug, "debug", false, "Enable debug output")
 	rootCmd.PersistentFlags().StringVarP(&outputFlag, "output", "o", "", "Output format of robots, robot, config and robot/device disable, enable, remove: table, json or yaml (default table). Data goes to stdout, progress to stderr")
 	rootCmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageErr("%v", err) })
+
+	bindViper()
+}
+
+// bindViper gives viper its defaults and binds the persistent flags and environment variables to
+// it. init calls it once; a test that resets viper (viper.Reset) calls it again.
+func bindViper() {
+	viper.SetDefault("domain", config.DefaultConfig().Domain)
 
 	// Bind flags to viper
 	viper.BindPFlag("domain", rootCmd.PersistentFlags().Lookup("domain"))
@@ -100,18 +107,26 @@ func init() {
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
+	// A bot reads no config file and writes none: its fleet needs neither, and the creating notice
+	// below must not reach the stdout an agent parses as JSON.
+	if on, _, _, _ := botEnabled(); on {
+		return
+	}
 	if cfgFile != "" {
-		// Use config file from the flag.
+		// Use config file from the flag. A file without extension (also a dotfile such as .tnctlrc)
+		// is YAML, as Save writes it.
 		viper.SetConfigFile(cfgFile)
+		viper.SetConfigType(config.FileType(cfgFile))
 	} else {
 		// Find home directory.
 		home, err := os.UserHomeDir()
 		cobra.CheckErr(err)
 
-		// Search config in home directory with name ".tnctl" (without extension).
-		viper.AddConfigPath(home)
+		// The default config is $HOME/.tnctl.yaml. It is named, not searched for: a search path
+		// outlives the run that added it, and a process that reads two HOMEs (the test binary) would
+		// otherwise keep reading the first one it found.
 		viper.SetConfigType("yaml")
-		viper.SetConfigName(".tnctl")
+		viper.SetConfigFile(filepath.Join(home, ".tnctl.yaml"))
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -122,30 +137,34 @@ func initConfig() {
 		// Config file found and read successfully
 	} else {
 		// If no config file found, create a default one
-		createDefaultConfig()
+		createDefaultConfig(viper.ConfigFileUsed())
 		// Try to read it back in so viper knows where to write to later
 		_ = viper.ReadInConfig()
 	}
 }
 
-func createDefaultConfig() {
-	path, err := config.GetConfigPath()
-	if err != nil {
+// createDefaultConfig creates the config file this run reads and Save writes (path: --config or
+// ~/.tnctl.yaml) when it is not there.
+func createDefaultConfig(path string) {
+	if path == "" {
 		return
 	}
-
 	// Only create if it doesn't exist
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		fmt.Printf("Creating default configuration file at %s\n", path)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		return
+	}
+	// The notice goes to stderr: stdout is the command's data, also with -o json.
+	fmt.Fprintf(os.Stderr, "Creating default configuration file at %s\n", path)
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 
-		// Create directory if it doesn't exist (though it's usually $HOME)
-		dir := filepath.Dir(path)
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			os.MkdirAll(dir, 0755)
-		}
-
-		if err := viper.SafeWriteConfigAs(path); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating default config: %v\n", err)
-		}
+	// The file will hold the login's tokens: it is the user's alone (0600). It is written from a
+	// viper of its own with the default domain only, never from the global viper, whose settings
+	// also hold this run's flags and environment (-n, TNCTL_NAMESPACE, --domain).
+	v := viper.New()
+	v.SetConfigPermissions(0o600)
+	v.SetConfigType(config.FileType(path))
+	v.Set("domain", config.DefaultConfig().Domain)
+	if err := v.SafeWriteConfigAs(path); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating default config: %v\n", err)
 	}
 }

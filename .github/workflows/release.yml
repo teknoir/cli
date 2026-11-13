@@ -22,8 +22,18 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          # 1.27.4 or newer: older 1.27 patches carry net/http, crypto/x509 and http2 fixes the
+          # council's hub and model clients need (govulncheck, 2026-11-11).
+          go-version: '1.27'
+          check-latest: true
           cache: true
+      - name: Check the Go toolchain
+        run: |
+          v="$(go env GOVERSION)"
+          echo "building with $v"
+          case "$v" in
+            go1.27|go1.27.[0-3]|go1.27rc*) echo "::error::$v is older than go1.27.4"; exit 1 ;;
+          esac
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:

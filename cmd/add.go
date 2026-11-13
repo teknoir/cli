@@ -9,6 +9,9 @@ import (
 var addCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Add a resource",
+	// Runnable, printing its help: a command that only has subcommands is not (cobra answers with
+	// its help and runs no PersistentPreRunE), and bot mode must refuse "tnctl add" itself.
+	RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 }
 
 var addDomainCmd = &cobra.Command{

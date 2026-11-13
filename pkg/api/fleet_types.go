@@ -107,6 +107,18 @@ type RobotSummary struct {
 	DeviceOwner string `json:"deviceOwner,omitempty"`
 }
 
+// CreateRobotRequest is the body of POST robots (CreateRobotRequest in the platform's contract).
+type CreateRobotRequest struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	// Labels are the robot's own labels (not the device's).
+	Labels map[string]string `json:"labels,omitempty"`
+	// Device adopts an existing Device instead of creating one named like the robot.
+	Device string `json:"device,omitempty"`
+	// OrgUnit places the robot's device in an organisation unit; empty: the caller's own.
+	OrgUnit string `json:"orgUnit,omitempty"`
+}
+
 // RobotDetail is GET robots/:name.
 type RobotDetail struct {
 	RobotSummary

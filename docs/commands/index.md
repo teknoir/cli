@@ -13,10 +13,18 @@ usage, or follow the links below for full documentation.
 | [`ns`](ns.md) | | Select the active namespace from the teamspaces of your account. |
 | [`device`](device.md) | `dev` | Print detailed status for a device; `disable`, `enable`, `remove` (teamspace admin). |
 | [`devices`](devices.md) | `devs` | Print a summary list of devices in the namespace. |
-| [`robots`](robots.md) | | List the robots of the teamspace, or show one (`robot <name>`); `disable`, `enable`, `remove` (teamspace admin). |
+| [`robots`](robots.md) | | List the robots of the teamspace, or show one (`robot <name>`); `add`, `disable`, `enable`, `remove`. |
 | [`config`](config.md) | | Read and override a robot's configuration: values, images, versions, revisions. |
 | [`exec`](exec.md) | | Run a command on a device over WireGuard and pass its exit code through. |
 | [`logs`](logs.md) | | Show the logs of a workload on a robot. |
+| [`inspect`](inspect.md) | | Read a robot's pods, logs and installed Helm releases without opening a session. |
+| [`chat`](chat.md) | | Chat with a TeknoirBot's council, or list your threads with it (`chat threads`). |
+| [`mqtt`](mqtt.md) | | Follow the MQTT messages of the teamspace's devices. |
+| [`mcp`](mcp.md) | | Run the read-only MCP server (stdio) for AI agents; `--council` adds the TeknoirBot council tools. |
+| [`council`](council.md) | | Hidden, bot mode only: the process of a TeknoirBot's council image (`council serve`), not a person's command. |
+| [`api`](api.md) | | Call the fleet API directly. |
+| [`whoami`](whoami.md) | | Show who this `tnctl` works as: a person, or a TeknoirBot. |
+| [`agent`](agent.md) | | Install the Teknoir agent kit (skills, MCP server, guard hook) for Claude Code, Codex and OpenCode. |
 | [`ssh`](ssh.md) | | Open an interactive SSH session on a device through its tunnel. |
 | [`port-forward`](port-forward.md) | | Forward a local port to a service on a device (`port-forward <device>` lists its services). |
 | [`wg status`](wg.md) | | Show whether and how a device is reachable through its WireGuard tunnel, and which services it publishes. |
@@ -33,8 +41,15 @@ needs in the teamspace:
 | Command | Needs |
 | --- | --- |
 | `ns`, `devices`, `device`, `robots`, `robot`, `config get/diff/links`, `logs`, `wg status`, `port-forward <device>` (list services) | Any device role (viewer, developer or admin). |
+| `whoami`, `api` | Any logged-in account; `api` shows whatever the fleet API shows the account. |
+| `inspect pod/logs/release` | The same access as opening a terminal in the robot (`pods/exec`), and `write` in the teamspace. |
+| `mqtt stream` | Any device role; the platform decides which topics the account may follow. |
+| `chat` | Who may chat is who may open the bot's desktop: the bot's creator, and at Read only and Off also the teamspace's admins. The caller also needs permission to open a terminal (`pods/exec`) in the teamspace. The platform answers `403` with the reason otherwise. |
+| `mcp` | Each tool needs what its command needs: `inspect_*` as `inspect pod/logs/release`, `mqtt_sample` as `mqtt stream`, `whoami` any logged-in account, the rest any device role. The `council_*` tools (with `--council`) need what `chat` needs. |
+| `council serve` | A bot's own command: it runs with the bot's key and its access level, so it needs nothing a person's account has. |
 | `config set/unset/delete/reset/try/untry/wait/promote`, `exec`, `port-forward` (forward a service over WireGuard) | Developer role; opening a session also needs permission to open terminals (`pods/exec`). |
 | `ssh`, `bootstrap`, `ansible*`, legacy `port-forward`, `socks-proxy` | Developer role **and** permission to open terminals: they read the device login (user name, key, password) from the platform, which gives it only to those. A viewer gets a clear `403`. |
+| `robot add` | Developer role in the teamspace. |
 | `robot`/`device` `disable`, `enable`, `remove` | Teamspace admin. Everyone else gets `403` and exit code 6. |
 
 A device outside your organisation units does not exist for you: the platform answers `404`, the same as for

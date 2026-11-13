@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/teknoir/cli/pkg/config"
 )
@@ -52,7 +53,10 @@ type Error struct {
 	// Code is the server's error code or error name when it sent one.
 	Code    string
 	Message string
-	// RetryAfter is the Retry-After header of a 429, in seconds (0: none).
+	// Detail is the server's own message of a 401 (why it refused the login), which Message
+	// replaces with the advice to log in. Empty when the server sent none.
+	Detail string
+	// RetryAfter is the Retry-After header of a 429 or a 503, in seconds (0: none).
 	RetryAfter int
 	// Body is the response body of the failed request (at most the size the client reads), for
 	// callers that know a richer error shape, such as a 422 that carries a validation result.
@@ -213,12 +217,14 @@ func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) 
 		// A bearer request the platform could not authenticate: the token is missing, expired or
 		// rejected. The challenge (WWW-Authenticate) and the JSON message say why.
 		ch := parseChallenge(resp.Header.Values("WWW-Authenticate"))
+		// The answer's own message, kept before it is replaced by the advice to log in.
+		e.Detail = e.Message
 		detail := e.Message
 		if detail == "" {
-			detail = ch["error_description"]
+			detail = cleanMessage(ch["error_description"])
 		}
 		if detail == "" {
-			detail = ch["error"]
+			detail = cleanMessage(ch["error"])
 		}
 		if e.Code == "" {
 			e.Code = ch["error"]
@@ -236,7 +242,7 @@ func errorFromResponse(method, rawURL string, resp *http.Response, body []byte) 
 			e.Message = msgForbidden + ": " + e.Message
 		}
 	}
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		e.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
 	return e
@@ -306,8 +312,25 @@ func stripQuery(u string) string {
 }
 
 // parseErrorBody extracts (code, message) from the error shapes of the Backstage
-// backend: {"error":{"name","message"}}, or the fleet access shape {"code","message"}.
+// backend: {"error":{"name","message"}}, or the fleet access shape {"code","message"}. The message
+// keeps no control characters but newline and tab: tnctl prints it on a terminal.
 func parseErrorBody(body []byte) (code, message string) {
+	code, message = parseErrorBodyRaw(body)
+	return code, cleanMessage(message)
+}
+
+// cleanMessage drops every control character but newline and tab (ESC, BEL, NUL, C1 such as
+// U+009B) from text the platform sent: tnctl prints it on a terminal.
+func cleanMessage(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func parseErrorBodyRaw(body []byte) (code, message string) {
 	var v struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`

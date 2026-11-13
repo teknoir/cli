@@ -86,9 +86,14 @@ type wgExec struct {
 }
 
 // newWGExec opens the WireGuard SSH channel to a device. It needs an active WireGuard
-// tunnel: the legacy SSH tunnel is not supported for exec.
+// tunnel: the legacy SSH tunnel is not supported for exec. The fleet client is the one every
+// command uses (defaultEnv.fleet), so no code path here builds a human fleet of its own.
 func newWGExec(ctx context.Context, domain, ns, deviceName string) (deviceExec, error) {
-	return newWGExecWith(ctx, api.NewFleet(domain, ns), domain, ns, deviceName)
+	fl, _, _, err := defaultEnv.fleet()
+	if err != nil {
+		return nil, err
+	}
+	return newWGExecWith(ctx, fl, domain, ns, deviceName)
 }
 
 // newWGExecWith is newWGExec with the fleet client given. It asks the platform for the device

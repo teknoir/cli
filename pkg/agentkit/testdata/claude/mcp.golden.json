@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "teknoir": {
+      "type": "stdio",
+      "command": "tnctl",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

@@ -41,6 +41,28 @@ tnctl robot vision-station-01
 tnctl robot vision-station-01 -o json | jq .phase
 ```
 
+## Create a robot
+
+```bash
+tnctl robot add <name> --type <robot type> [--device D] [--unit U] [--label key=value]...
+```
+
+Creates the robot and the device behind it — a device named like the robot, unless `--device` adopts an
+existing one. `--type` is required: it is the robot type the robot is created from. `--label` sets a label of
+the robot and may be repeated. `--unit` places the robot's device in an organisation unit; without one the
+platform uses the caller's own.
+
+The name and the device are DNS labels: lower-case letters, digits and `-`, at most 63 characters. A bad name,
+a missing `--type` or a malformed label is exit 2 and nothing is sent.
+
+```bash
+tnctl robot add amr-02 --type amr
+tnctl robot add vision-station-02 --type vision --label site=karlstad --label env=prod
+```
+
+It prints `robot amr-02 created (device amr-02)`; `-o json` prints the robot as `tnctl robot` would. A bot may
+run it like a person; see [Bot mode](../bot-mode.md).
+
 ## Disable, enable or remove a robot
 
 ```bash
@@ -77,8 +99,8 @@ name the owner robot; `robot remove` removes only the robot and keeps the device
 a `Device owner` row in that case.
 
 !!! note
-    A robot literally named `disable`, `enable` or `remove` cannot be reached as `tnctl robot <name>`: the
-    subcommand is found first. Reach it with `tnctl robot -- <name>`.
+    A robot literally named `add`, `disable`, `enable` or `remove` cannot be reached as `tnctl robot <name>`:
+    the subcommand is found first. Reach it with `tnctl robot -- <name>`.
 
 ```bash
 tnctl robot disable vision-station-01 --reason "Lost or stolen"
@@ -117,3 +139,4 @@ follow it and tells you to run `tnctl login` (exit 6).
 
 - [`config`](config.md) - read and override a robot's configuration.
 - [`devices`](devices.md) - the same teamspace seen as plain devices.
+- [`inspect`](inspect.md) - a robot's pods, logs and installed releases.

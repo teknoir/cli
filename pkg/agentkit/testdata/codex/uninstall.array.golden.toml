@@ -1,0 +1,7 @@
+model = "gpt-5"
+
+[[skills.config]]
+path = "/a"
+
+[[skills.config]]
+path = "/b"

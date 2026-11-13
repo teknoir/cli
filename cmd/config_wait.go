@@ -26,12 +26,29 @@ const (
 )
 
 // parseWaitLevel reads the value of --wait. A bare --wait is "ready".
-func parseWaitLevel(s string) (waitLevel, error) {
+func parseWaitLevel(s string) (waitLevel, error) { return parseWaitLevelFlag(s, "--wait", waitReady) }
+
+// parseWaitLevelFlag is parseWaitLevel for the flag the level came from: bot mode names that flag in
+// its refusal (config wait takes --for, the commands that write take --wait). bare is the level the
+// flag means without a value (its NoOptDefVal), waitNone for a flag that needs a value.
+func parseWaitLevelFlag(s, flag string, bare waitLevel) (waitLevel, error) {
 	switch waitLevel(strings.ToLower(s)) {
-	case waitNone, waitPublished, waitApplied, waitReady:
+	case waitNone, waitPublished:
 		return waitLevel(strings.ToLower(s)), nil
+	case waitApplied, waitReady:
+		l := waitLevel(strings.ToLower(s))
+		// A TeknoirBot may not open a device shell. Refused here, before the command has read anything
+		// or written anything: a wait that cannot work must not leave a change behind.
+		if on, _, _, _ := botEnabled(); on {
+			return l, botNoDeviceShell(flag, l)
+		}
+		return l, nil
 	}
-	return waitNone, usageErr("--wait must be published, applied or ready, not %q (write --wait=applied; a bare --wait means ready)", s)
+	hint := ""
+	if bare != waitNone {
+		hint = fmt.Sprintf(" (write %s=applied; a bare %s means %s)", flag, flag, bare)
+	}
+	return waitNone, usageErr("%s must be published, applied or ready, not %q%s", flag, s, hint)
 }
 
 const defaultWaitTimeout = 5 * time.Minute
@@ -40,15 +57,24 @@ const defaultWaitTimeout = 5 * time.Minute
 type waitFlags struct {
 	wait    string
 	timeout time.Duration
+	// bare is what --wait without a value means: ready, unless the command sets another level.
+	bare waitLevel
 }
 
 func (f *waitFlags) add(c *cobra.Command) {
 	c.Flags().StringVar(&f.wait, "wait", "", "wait until the change is published, applied or ready on the robot (a bare --wait means ready)")
-	c.Flags().Lookup("wait").NoOptDefVal = string(waitReady)
+	f.bare = waitReady
+	c.Flags().Lookup("wait").NoOptDefVal = string(f.bare)
 	c.Flags().DurationVar(&f.timeout, "timeout", defaultWaitTimeout, "how long --wait may take (exit code 4 when it runs out)")
 }
 
-func (f *waitFlags) level() (waitLevel, error) { return parseWaitLevel(f.wait) }
+func (f *waitFlags) level() (waitLevel, error) {
+	bare := f.bare
+	if bare == waitNone {
+		bare = waitReady
+	}
+	return parseWaitLevelFlag(f.wait, "--wait", bare)
+}
 
 // misplaced catches "--wait applied": a level written after a bare --wait is taken as a
 // positional argument (a key, a resource), which would be written or looked up as such.
@@ -176,6 +202,11 @@ func (w *waiter) progress(key, msg string) {
 func (w *waiter) shell(ctx context.Context) (deviceExec, error) {
 	if w.ex != nil {
 		return w.ex, nil
+	}
+	// Before the device is looked up: a bot may not reach a device shell, and the refusal must send
+	// no request at all.
+	if on, _, _, _ := botEnabled(); on {
+		return nil, botNoDeviceShell("--wait", w.level)
 	}
 	if w.device == "" {
 		v, _, err := w.fl.ConfigTarget(ctx, w.target)

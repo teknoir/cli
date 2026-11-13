@@ -216,6 +216,11 @@ func TestWGProxyCommandRegistration(t *testing.T) {
 func TestWGProxyCobraUsageExit(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	// The login it goes past: initConfig reads this file, so the test does not depend on what the
+	// tests before it left in viper.
+	if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), ".tnctl.yaml"), []byte("domain: teknoir.cloud\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	r, w, _ := os.Pipe()
 	oldErr := os.Stderr
 	os.Stderr = w

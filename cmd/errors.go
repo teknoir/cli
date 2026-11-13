@@ -87,6 +87,22 @@ func classify(err error) error {
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		return &cliError{code: codeAuth, err: errors.New("not logged in: run tnctl login")}
 	}
+	if errors.Is(err, api.ErrBotKey) || errors.Is(err, api.ErrBotAPIInsecure) {
+		// A bot's key problem is an auth problem: the same action as a dead login, the bot is re-created
+		// or its API address fixed.
+		return &cliError{code: codeAuth, err: err}
+	}
+	if on, _, _, _ := botEnabled(); on {
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.Status == http.StatusUnauthorized {
+			// "run tnctl login" is advice a bot cannot take: its key comes from its computer, and only a
+			// person can re-create the bot. The platform's own words say why it refused.
+			if ae.Detail != "" {
+				return newErr(codeAuth, "the bot API did not accept the bot's key (%s): ask a person to re-create the bot", ae.Detail)
+			}
+			return newErr(codeAuth, "the bot API did not accept the bot's key: ask a person to re-create the bot")
+		}
+	}
 	var up *api.UnsupportedPlatformError
 	if errors.As(err, &up) {
 		// not a mistake in the arguments, but the exit code scripts expect for "this cannot work as asked"

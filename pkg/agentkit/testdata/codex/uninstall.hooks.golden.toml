@@ -1,0 +1,5 @@
+model = "gpt-5"
+
+[[hooks.PreToolUse]]
+matcher = "Bash"
+command = "/usr/local/bin/check"

@@ -186,8 +186,8 @@ overrides. The effective configuration and the overrides are under 'tnctl config
 			return nil
 		},
 	}
-	// A robot named disable, enable or remove is shadowed by these.
-	c.AddCommand(newRobotDisableCmd(e), newRobotEnableCmd(e), newRobotRemoveCmd(e))
+	// A robot named disable, enable, remove or add is shadowed by these.
+	c.AddCommand(newRobotDisableCmd(e), newRobotEnableCmd(e), newRobotRemoveCmd(e), newRobotAddCmd(e))
 	return c
 }
 
@@ -267,5 +267,7 @@ func printRobot(w io.Writer, r *api.RobotDetail, now time.Time) {
 }
 
 func init() {
-	rootCmd.AddCommand(newRobotsCmd(defaultEnv), newRobotCmd(defaultEnv))
+	rootCmd.AddCommand(newRobotsCmd(defaultEnv), newRobotCmd(defaultEnv),
+		newWhoamiCmd(defaultEnv), newAPICmd(defaultEnv), newInspectCmd(defaultEnv), newMqttCmd(defaultEnv),
+		newChatCmd(defaultEnv))
 }

@@ -100,3 +100,24 @@ func TestOutputFormat(t *testing.T) {
 		t.Errorf("xml must be a usage error: %v", err)
 	}
 }
+
+// A bad level names its flag, and gives the bare-flag hint only for a flag that has a bare value,
+// with that value: --for needs a value, a bare --wait is ready, and config off's bare --wait is
+// applied.
+func TestWaitLevelErrorHints(t *testing.T) {
+	p := newFakePlatform(t)
+	e, _ := testEnv(t, p, nil)
+	_, _, err := runCLI(t, e, "config", "wait", "vision-station-01", "--for", "bogus")
+	if exitCodeOf(err) != codeUsage || !strings.Contains(err.Error(), `--for must be published, applied or ready, not "bogus"`) ||
+		strings.Contains(err.Error(), "bare") {
+		t.Errorf("config wait --for bogus: exit %d: %v", exitCodeOf(err), err)
+	}
+	_, _, err = setWait(t, e, "--wait=bogus")
+	if exitCodeOf(err) != codeUsage || !strings.Contains(err.Error(), "(write --wait=applied; a bare --wait means ready)") {
+		t.Errorf("config set --wait=bogus: exit %d: %v", exitCodeOf(err), err)
+	}
+	_, _, err = runCLI(t, e, "config", "off", "vision-station-01", nbID, "--wait=bogus")
+	if exitCodeOf(err) != codeUsage || !strings.Contains(err.Error(), "a bare --wait means applied") {
+		t.Errorf("config off --wait=bogus: exit %d: %v", exitCodeOf(err), err)
+	}
+}

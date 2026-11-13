@@ -226,12 +226,20 @@ func runCLI(t *testing.T, e *cliEnv, args ...string) (string, string, error) {
 // runCLIWith is runCLI with more commands under the root (the ones that are package level variables).
 func runCLIWith(t *testing.T, e *cliEnv, extra []*cobra.Command, args ...string) (string, string, error) {
 	t.Helper()
+	// The flags write package level variables: take their values before the flags are defined, so the
+	// restore puts back what this test inherited and not what its own flags set.
+	oldNS, oldOut, oldDomain := namespace, outputFlag, domain
 	root := &cobra.Command{Use: "tnctl", SilenceErrors: true}
 	root.PersistentFlags().StringVarP(&outputFlag, "output", "o", "", "")
+	root.PersistentFlags().StringVarP(&namespace, "namespace", "n", "", "")
 	root.PersistentFlags().StringVar(&device, "device", "", "")
+	root.PersistentFlags().StringVarP(&domain, "domain", "d", "", "")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageErr("%v", err) })
+	// bot mode's refusals, as on the real root (it is a no-op outside bot mode).
+	root.PersistentPreRunE = botPreRun
 	root.AddCommand(newConfigCmd(e), newRobotsCmd(e), newRobotCmd(e), newExecCmd(e), newLogsCmd(e),
-		newNsCmd(e), newDevicesCmd(e), newDeviceCmd(e))
+		newNsCmd(e), newDevicesCmd(e), newDeviceCmd(e), newWhoamiCmd(e), newAPICmd(e),
+		newInspectCmd(e), newMqttCmd(e), newAgentCmd(e), newChatCmd(e))
 	root.AddCommand(extra...)
 	var out, errb bytes.Buffer
 	root.SetOut(&out)
@@ -240,6 +248,7 @@ func runCLIWith(t *testing.T, e *cliEnv, extra []*cobra.Command, args ...string)
 		root.SetIn(cliStdin)
 	}
 	root.SetArgs(args)
+	t.Cleanup(func() { namespace, outputFlag, domain = oldNS, oldOut, oldDomain })
 	err := root.ExecuteContext(context.Background())
 	return out.String(), errb.String(), err
 }

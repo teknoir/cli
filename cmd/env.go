@@ -40,6 +40,15 @@ func realSleep(ctx context.Context, d time.Duration) error {
 // defaultEnv is the env of the real tnctl.
 var defaultEnv = &cliEnv{
 	fleet: func() (*api.Fleet, string, string, error) {
+		if on, apiBase, ns, keyFile, err := botMode(); err != nil {
+			return nil, "", "", err
+		} else if on {
+			// A bot uses its own key and teamspace; it never reads the user's login or config.
+			if err := checkBotNamespace(ns); err != nil {
+				return nil, "", "", err
+			}
+			return botFleet(apiBase, ns, keyFile), botDomain(), ns, nil
+		}
 		cfg, err := config.Load()
 		if err != nil {
 			return nil, "", "", err
@@ -51,6 +60,14 @@ var defaultEnv = &cliEnv{
 		return api.NewFleet(domain, ns), domain, ns, nil
 	},
 	domainFleet: func() (*api.Fleet, string, error) {
+		if on, apiBase, ns, keyFile, err := botMode(); err != nil {
+			return nil, "", err
+		} else if on {
+			if err := checkBotNamespace(ns); err != nil {
+				return nil, "", err
+			}
+			return botFleet(apiBase, ns, keyFile), botDomain(), nil
+		}
 		cfg, err := config.Load()
 		if err != nil {
 			return nil, "", err
@@ -60,10 +77,24 @@ var defaultEnv = &cliEnv{
 		}
 		return api.NewFleet(cfg.Domain, ""), cfg.Domain, nil
 	},
-	newExec:      newWGExec,
 	sleep:        realSleep,
 	now:          time.Now,
 	pollInterval: 2 * time.Second,
+}
+
+// newExec is set in init: newDeviceExec reaches defaultEnv.fleet, and the compiler refuses a cycle
+// through a variable's initializer.
+func init() { defaultEnv.newExec = newDeviceExec }
+
+// newDeviceExec is the real device shell. A TeknoirBot may not open one: it holds no device login,
+// and the routes that hand one out are refused to it.
+func newDeviceExec(ctx context.Context, domain, ns, device string) (deviceExec, error) {
+	if on, _, _, _ := botEnabled(); on {
+		// --wait is the only caller's flag: every command that opens a device shell is refused to a
+		// bot before it gets here.
+		return nil, botNoDeviceShell("--wait", "")
+	}
+	return newWGExec(ctx, domain, ns, device)
 }
 
 func (e *cliEnv) sleepFor(ctx context.Context, d time.Duration) error {

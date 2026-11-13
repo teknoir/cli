@@ -1010,7 +1010,7 @@ applied it but it fails (the helm Job failed, a pod is in CrashLoopBackOff or Im
 			if err != nil {
 				return err
 			}
-			level, err := parseWaitLevel(f.forLevel)
+			level, err := parseWaitLevelFlag(f.forLevel, "--for", waitNone)
 			if err != nil {
 				return err
 			}

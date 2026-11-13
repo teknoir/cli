@@ -1,0 +1,72 @@
+# A Deployment for the apps namespace of a TeknoirBot's computer.
+# Replace <app> (the name of the app, a DNS label) and <image> (the line `teknoirbot-build`
+# printed last, localhost:5000/<app>:<tag>). Apply it with:
+#   kubectl apply -f deployment.yaml -n apps
+#
+# The pod security context satisfies PodSecurity "restricted", so the namespace's baseline
+# enforcement never refuses it and the restricted warning never prints. To add it to a robot
+# (tnctl config add), change `namespace: apps` to a namespace the robot already has (default works)
+# and the image to one in a registry the robot can pull from: localhost:5000 exists only on the
+# bot's computer.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <app>
+  namespace: apps
+  labels:
+    app: <app>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <app>
+  template:
+    metadata:
+      labels:
+        app: <app>
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: <app>
+          image: <image>
+          # Always pair IfNotPresent with a new tag per build: the same tag would keep running
+          # the old image.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+              ephemeral-storage: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+              ephemeral-storage: 512Mi
+          # Uncomment once the app answers on the port above; without it the Deployment reports
+          # ready as soon as the container starts.
+          # readinessProbe:
+          #   httpGet:
+          #     path: /
+          #     port: http
+          #   periodSeconds: 10
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # readOnlyRootFilesystem leaves no writable place for Python's temporary files.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

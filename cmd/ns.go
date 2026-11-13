@@ -22,6 +22,10 @@ With a name, sets it. Without one, lists the teamspaces your account has access 
 pick one. --list only prints them (name, your access, display name).`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if on, _, _, _ := botEnabled(); on && len(args) == 0 {
+				// A bot has exactly one teamspace and never writes the user's config: listing only.
+				list = true
+			}
 			if len(args) > 0 && !list {
 				cfg, err := config.Load()
 				if err != nil {

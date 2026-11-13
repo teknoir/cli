@@ -9,6 +9,7 @@ nav:
   - Installation: installation.md
   - Getting Started: getting-started.md
   - Configuration: configuration.md
+  - Bot mode: bot-mode.md
   - Concepts:
       - Architecture: concepts/architecture.md
       - Contexts (Domain & Namespace): concepts/contexts.md
@@ -23,6 +24,14 @@ nav:
       - device: commands/device.md
       - devices: commands/devices.md
       - robots: commands/robots.md
+      - whoami: commands/whoami.md
+      - agent: commands/agent.md
+      - api: commands/api.md
+      - inspect: commands/inspect.md
+      - chat: commands/chat.md
+      - council: commands/council.md
+      - mqtt: commands/mqtt.md
+      - mcp: commands/mcp.md
       - config: commands/config.md
       - exec: commands/exec.md
       - logs: commands/logs.md

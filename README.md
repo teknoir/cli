@@ -82,12 +82,39 @@ tnctl config try vision-station-01 apps/mock-vision feature-x        # another b
 tnctl config reset vision-station-01 --all      # back to git
 tnctl exec vision-station-01 -- sudo k3s kubectl get pods -A
 tnctl logs vision-station-01 HelmChart/default/notebook -f
+tnctl robot add amr-02 --type amr --label site=karlstad   # create a robot and its device
+tnctl inspect logs vision-station-01 default/whoami-7d9f-x2k4p --tail 50   # a pod's log, no session
+tnctl inspect release vision-station-01 default/notebook  # an installed Helm release
+tnctl mqtt stream /devices/+/state/# --count 10           # the devices' MQTT messages
+tnctl api GET teknoir-demo/robots                         # the fleet API, directly
+tnctl whoami                                              # which account, which teamspace
+tnctl agent install --agent claude --mcp                  # the Teknoir agent kit, for a coding agent
 ```
 
 Overrides win over every git layer, need no commit and are published to the robot by the platform;
 `--wait=published|applied|ready` follows them, `-o json` and fixed exit codes make them scriptable by agents.
 See [`docs/concepts/robot-configuration.md`](docs/concepts/robot-configuration.md) for the model, [`docs/commands/config.md`](docs/commands/config.md), [`robots`](docs/commands/robots.md),
 [`exec`](docs/commands/exec.md) and [`logs`](docs/commands/logs.md).
+`inspect` ([docs](docs/commands/inspect.md)), `mqtt stream` ([docs](docs/commands/mqtt.md)), `api`
+([docs](docs/commands/api.md)), `whoami` ([docs](docs/commands/whoami.md)) and `mcp`
+([docs](docs/commands/mcp.md)) work for a person and inside a TeknoirBot ([bot mode](docs/bot-mode.md)).
+
+### Agents
+
+`tnctl` carries the **Teknoir agent kit**: Agent Skills, the guard hook and the registration of the
+read-only `teknoir` MCP server, everything a coding agent (Claude Code, Codex, OpenCode) needs to operate
+devices and robots. It installs offline, from the binary itself, with your own `tnctl` rights:
+
+```bash
+tnctl agent install --agent claude --mcp     # Claude Code: skills and the MCP server
+tnctl agent install --agent codex --mcp      # Codex (opencode likewise)
+tnctl agent install --project --mcp --hooks  # into this repository, with the guard hook
+tnctl agent list --check                     # does the install match this tnctl?
+```
+
+`tnctl mcp` is the server these registrations start ([docs](docs/commands/mcp.md)).
+
+See [`docs/commands/agent.md`](docs/commands/agent.md) and [`agentkit/README.md`](agentkit/README.md).
 
 ### 3. Tunneling
 
@@ -158,6 +185,15 @@ The CLI stores its configuration at `~/.tnctl.yaml`. You can also use environmen
 export TNCTL_DOMAIN=teknoir.cloud
 export TNCTL_NAMESPACE=my-namespace
 ```
+
+### Bot mode
+
+Inside a TeknoirBot's computer the same `tnctl` runs as the bot: set `TEKNOIRBOT_API` (the bot API's base)
+and `TNCTL_BOT_KEY_FILE` (the key file the platform put there), plus `TEKNOIRBOT_NAMESPACE` (the bot's
+teamspace), and every fleet call uses the bot's key instead of the user's login. A bot cannot open tunnels or
+read device logins: `ssh`, `exec`, `logs`, `port-forward`, `socks-proxy`, `wg*`, `ansible*`, `bootstrap`,
+`add` and `login` are refused (exit 6); use `tnctl inspect` for logs and pods. See
+[`docs/bot-mode.md`](docs/bot-mode.md).
 
 ## Using the templates from Go
 

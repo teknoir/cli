@@ -1,0 +1,946 @@
+package agentkit
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"math/rand/v2"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/pelletier/go-toml/v2"
+)
+
+// The entries every agent gets: `tnctl mcp`, the read-only MCP server of the kit, and its council form
+// `tnctl mcp --council`, which adds the council tools beside the read tools. The kit's entry has one of
+// the two forms; an install writes the form the options ask for and switches the other one without
+// --force.
+var (
+	claudeMCPEntry        = json.RawMessage(`{"type":"stdio","command":"tnctl","args":["mcp"]}`)
+	claudeMCPCouncilEntry = json.RawMessage(`{"type":"stdio","command":"tnctl","args":["mcp","--council"]}`)
+	opencodeMCPEntry      = json.RawMessage(`{"type":"local","command":["tnctl","mcp"]}`)
+	// opencodeMCPCouncilEntry is the council form of the OpenCode entry.
+	opencodeMCPCouncilEntry = json.RawMessage(`{"type":"local","command":["tnctl","mcp","--council"]}`)
+	// opencodeSnippet is what the user adds by hand to an OpenCode file with comments.
+	opencodeSnippet = `{"mcp":{"servers":{"teknoir":{"type":"local","command":["tnctl","mcp"]}}}}`
+	// mcpServerName is the name of the server in every config file.
+	mcpServerName = "teknoir"
+)
+
+// jsonEntryForms are the kit's two forms of one agent's MCP entry: the read-only server and the council
+// one.
+type jsonEntryForms struct {
+	readOnly json.RawMessage
+	council  json.RawMessage
+}
+
+// claudeMCPForms and opencodeMCPForms are the forms of the two JSON config files.
+var (
+	claudeMCPForms   = jsonEntryForms{readOnly: claudeMCPEntry, council: claudeMCPCouncilEntry}
+	opencodeMCPForms = jsonEntryForms{readOnly: opencodeMCPEntry, council: opencodeMCPCouncilEntry}
+)
+
+// wanted is the form the options ask for; other is the one they do not.
+func (f jsonEntryForms) wanted(council bool) json.RawMessage {
+	if council {
+		return f.council
+	}
+	return f.readOnly
+}
+
+func (f jsonEntryForms) other(council bool) json.RawMessage { return f.wanted(!council) }
+
+// all is both forms: the messages and the checks of an uninstall accept either.
+func (f jsonEntryForms) all() []json.RawMessage {
+	return []json.RawMessage{f.readOnly, f.council}
+}
+
+// installMCP registers the teknoir MCP server in the config file of each agent, merging into what is
+// there and never clobbering other servers or keys.
+func (p *op) installMCP() error {
+	for _, a := range p.o.Agents {
+		var err error
+		switch a {
+		case AgentClaude:
+			err = p.registerClaudeMCP()
+		case AgentCodex:
+			err = p.registerCodexMCP()
+		case AgentOpencode:
+			err = p.registerOpencodeMCP()
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// uninstallMCP removes the teknoir MCP server from the config file of each agent.
+func (p *op) uninstallMCP() error {
+	for _, a := range p.o.Agents {
+		var err error
+		switch a {
+		case AgentClaude:
+			path, def := p.claudeMCPFile()
+			err = p.removeJSONEntry(path, def, false, []string{"mcpServers"}, claudeMCPForms, string(AgentClaude))
+		case AgentCodex:
+			err = p.removeCodexMCP()
+		case AgentOpencode:
+			path, jsonc := p.opencodeMCPFile()
+			err = p.removeJSONEntry(path, 0o644, jsonc, []string{"mcp", "servers"}, opencodeMCPForms, string(AgentOpencode))
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// claudeMCPFile is the file Claude Code reads the MCP servers from, and the mode of a new one.
+func (p *op) claudeMCPFile() (string, os.FileMode) {
+	if p.o.Scope == ScopeProject {
+		return filepath.Join(p.o.ProjectDir, ".mcp.json"), 0o644
+	}
+	// The .claude.json of user scope holds the whole Claude Code state: a new one is private.
+	return p.o.ClaudeConfigFile, 0o600
+}
+
+func (p *op) codexMCPFile() string {
+	if p.o.Scope == ScopeProject {
+		return filepath.Join(p.o.ProjectDir, ".codex", "config.toml")
+	}
+	return filepath.Join(p.o.CodexHome, "config.toml")
+}
+
+// opencodeMCPFile is the OpenCode config: the .jsonc when there is one, the .json when there is not,
+// and .json when there is neither. A commented .jsonc is never edited, and neither file is ever
+// created next to the other.
+func (p *op) opencodeMCPFile() (string, bool) {
+	dir := p.o.ProjectDir
+	if p.o.Scope == ScopeUser {
+		dir = p.o.OpencodeConfigDir
+	}
+	jsonc := filepath.Join(dir, "opencode.jsonc")
+	// Lstat: a dangling opencode.jsonc link is found too, so the .json is not created beside it.
+	if _, err := os.Lstat(jsonc); err == nil {
+		return jsonc, true
+	}
+	return filepath.Join(dir, "opencode.json"), false
+}
+
+// ---------- Claude Code and OpenCode: JSON ----------
+
+func (p *op) registerClaudeMCP() error {
+	path, def := p.claudeMCPFile()
+	return p.registerJSONEntry(path, def, false, []string{"mcpServers"}, "mcpServers", string(AgentClaude), claudeMCPForms)
+}
+
+func (p *op) registerOpencodeMCP() error {
+	path, jsonc := p.opencodeMCPFile()
+	return p.registerJSONEntry(path, 0o644, jsonc, []string{"mcp", "servers"}, "mcp.servers", string(AgentOpencode), opencodeMCPForms)
+}
+
+// switchNote is the note of an entry replaced by the kit's other form: an install switches between the
+// read-only server and the council one without --force.
+func (p *op) switchNote(entryAt string) string {
+	if p.o.Council {
+		return entryAt + ": switched to tnctl mcp --council"
+	}
+	return entryAt + ": switched to the read-only tnctl mcp"
+}
+
+// registerJSONEntry merges the MCP entry into a JSON (or, with jsonc, possibly JSONC) config file.
+// entryAt is the readable name of the entry's place, for messages.
+func (p *op) registerJSONEntry(path string, def os.FileMode, jsonc bool, container []string, entryAt, agent string, forms jsonEntryForms) error {
+	entry := forms.wanted(p.o.Council)
+	snippet := "add " + jsonSnippet(container, entry)
+	// A file that already holds the entry of the other form asks the user to replace it, as the Codex
+	// refusal does; only a file without one asks to add it.
+	replace := "replace " + entryAt + "." + mcpServerName + " with " + jsonSnippet(container, entry)
+	target, why := p.foreignTarget(path)
+	if why != "" {
+		p.refuse(path, agent, why+" "+snippet, why+" "+snippet)
+		return nil
+	}
+	return p.withClaudeConfigLock(path, func() error {
+		top, err := p.readJSONConfig(target, jsonc, agent, snippet, replace)
+		if top == nil {
+			return err
+		}
+		existing, err := jsonLookup(top, container, mcpServerName)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		switch {
+		case existing == nil:
+			if err := jsonSetPath(top, container, mcpServerName, entry); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			p.r.act(ActionRegister, path, agent, entryAt)
+		case jsonEqual(existing, entry):
+			p.r.act(ActionAlreadyRegister, path, agent, entryAt)
+			return nil
+		case jsonEqual(existing, forms.other(p.o.Council)):
+			// The kit's other form: install writes the form this run asks for.
+			if err := jsonSetPath(top, container, mcpServerName, entry); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			p.r.act(ActionRegister, path, agent, p.switchNote(entryAt))
+		case p.o.Force:
+			if err := jsonSetPath(top, container, mcpServerName, entry); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			p.r.act(ActionRegister, path, agent, entryAt+": replaced a differing one (--force)")
+		default:
+			p.r.act(ActionSkip, path, agent, entryAt+".teknoir differs: kept it (use --force to replace it)")
+			p.r.warn("%s already has a different %s.%s; kept it (use --force to replace it)", path, entryAt, mcpServerName)
+			return nil
+		}
+		return p.writeJSON(target, top, def)
+	})
+}
+
+// removeJSONEntry drops the MCP entry from a JSON config file, when it is ours in either form.
+func (p *op) removeJSONEntry(path string, def os.FileMode, jsonc bool, container []string, forms jsonEntryForms, agent string) error {
+	snippet := "remove " + jsonSnippetAny(container, forms.all())
+	target, why := p.foreignTarget(path)
+	if why != "" {
+		p.refuse(path, agent, why+" "+snippet, why+" "+snippet)
+		return nil
+	}
+	return p.withClaudeConfigLock(path, func() error {
+		top, err := p.readJSONConfig(target, jsonc, agent, snippet, snippet)
+		if top == nil {
+			return err
+		}
+		existing, err := jsonLookup(top, container, mcpServerName)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		switch {
+		case existing == nil:
+			p.r.act(ActionSkip, path, agent, "no teknoir MCP entry")
+			return nil
+		case !jsonEqualAny(existing, forms.all()):
+			p.r.act(ActionSkip, path, agent, "a different teknoir MCP entry: kept it")
+			p.r.warn("%s has a teknoir MCP entry that is not the kit's; kept it", path)
+			return nil
+		}
+		if err := jsonRemovePath(top, container, mcpServerName); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		p.r.act(ActionDelete, path, agent, "teknoir MCP entry")
+		return p.writeJSON(target, top, def)
+	})
+}
+
+const (
+	// claudeConfigLockWait is how long an edit of the user-scope Claude config waits for Claude Code's
+	// lock before it gives up, as Claude Code's own lock does.
+	claudeConfigLockWait = 5 * time.Second
+	// claudeConfigLockStale is the age at which a lock is taken over: Claude Code removes its own lock
+	// when it closes, so one this old was left behind by a process that died.
+	claudeConfigLockStale = 10 * time.Second
+)
+
+// withClaudeConfigLock runs fn under the lock Claude Code takes while it saves its config file (the
+// configured path plus ".lock", a lock directory), so tnctl's read, merge and write cannot lose a save
+// Claude Code makes at the same moment. Only the user-scope Claude config file is locked; a dry run never
+// takes the lock, and a symlinked config file is locked under the path Claude Code knows.
+func (p *op) withClaudeConfigLock(path string, fn func() error) error {
+	if p.o.DryRun || p.o.Scope != ScopeUser || p.o.ClaudeConfigFile == "" ||
+		filepath.Clean(path) != filepath.Clean(p.o.ClaudeConfigFile) {
+		return fn()
+	}
+	// A config directory that does not exist holds no config file and no Claude Code saving one: an
+	// uninstall finds nothing to remove, and an install's write creates the directory.
+	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
+		return fn()
+	}
+	lock := path + ".lock"
+	wait := p.o.lockTimeout
+	if wait <= 0 {
+		wait = claudeConfigLockWait
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		err := os.Mkdir(lock, 0o755)
+		if err == nil {
+			break // held: run fn, then remove the lock (below)
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return err // a missing config directory is handled before the loop; anything else is an error
+		}
+		// Lstat, not Stat: mkdir's EEXIST is about the name, so a dangling symlink there is seen and aged
+		// instead of looking released forever.
+		fi, serr := os.Lstat(lock)
+		switch {
+		case errors.Is(serr, fs.ErrNotExist) && !time.Now().After(deadline):
+			continue // released between our mkdir and lstat: try again at once
+		case serr == nil && time.Since(fi.ModTime()) > claudeConfigLockStale:
+			// Left behind by a process that died. Another taker may have seen the same stale lock: remove
+			// it only if it is still the same stale directory (same file and same mtime: ext4 reuses the
+			// inode number of a removed directory, and Windows compares whatever is at the path now), then
+			// wait before the mkdir, so a second taker's remove finds nothing instead of the new lock.
+			if again, aerr := os.Lstat(lock); aerr == nil && os.SameFile(fi, again) && again.ModTime().Equal(fi.ModTime()) {
+				if rerr := os.Remove(lock); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+					return rerr
+				}
+			}
+			time.Sleep(lockRetryDelay())
+			continue
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Claude Code holds %s; run again", lock) //nolint:staticcheck // ST1005: the message starts with the name Claude Code
+		}
+		time.Sleep(lockRetryDelay())
+	}
+	defer func() { _ = os.Remove(lock) }()
+	return fn()
+}
+
+// lockRetryDelay is how long a taker waits before it tries the lock again: 50 to 200 ms, so takers that
+// start together do not retry in step.
+func lockRetryDelay() time.Duration { return time.Duration(50+rand.IntN(150)) * time.Millisecond }
+
+// jsonEntryKeyRE finds the key of an entry in a text that does not parse as JSON: a JSONC file with
+// comments. It is a hint for the refusal's wording ("add" or "replace"), never an edit.
+var jsonEntryKeyRE = regexp.MustCompile(`"` + regexp.QuoteMeta(mcpServerName) + `"\s*:`)
+
+// readJSONConfig reads a JSON config file, returning nil (and an error) when it cannot be edited. A
+// .jsonc with comments, which encoding/json rejects but a JSONC reader accepts, is reported with the
+// snippet to add by hand, or to replace the entry with when the file already holds one; the run ends
+// non-zero and the file is left as it is.
+func (p *op) readJSONConfig(path string, jsonc bool, agent, snippet, replaceSnippet string) (map[string]json.RawMessage, error) {
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	top := map[string]json.RawMessage{}
+	if len(bytes.TrimSpace(data)) > 0 {
+		if err := json.Unmarshal(data, &top); err != nil {
+			if !jsonc {
+				return nil, fmt.Errorf("%s is not valid JSON: %w", path, err)
+			}
+			if jsonEntryKeyRE.Match(data) {
+				snippet = replaceSnippet
+			}
+			note := "the file has comments: " + snippet + " by hand"
+			p.r.act(ActionRefuse, path, agent, note)
+			p.r.warn("%s has comments, so tnctl does not edit it. %s", path, note)
+			p.refused = append(p.refused, path)
+			p.reasons = append(p.reasons, fmt.Sprintf("%s has comments: edit it by hand and run the command again", path))
+			return nil, nil
+		}
+	}
+	return top, nil
+}
+
+// jsonSnippet is the entry as the JSON object that holds it, for the message that tells the user to add or
+// remove it by hand: the container keys of the caller, outermost first.
+func jsonSnippet(container []string, entry json.RawMessage) string {
+	v := map[string]json.RawMessage{mcpServerName: entry}
+	for i := len(container) - 1; i >= 0; i-- {
+		b, _ := json.Marshal(v)
+		v = map[string]json.RawMessage{container[i]: b}
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// jsonSnippetAny is jsonSnippet of each entry, joined with " or ": the message that tells the user to
+// remove an entry by hand names both of the kit's forms, since uninstall removes either.
+func jsonSnippetAny(container []string, entries []json.RawMessage) string {
+	parts := make([]string, len(entries))
+	for i, e := range entries {
+		parts[i] = jsonSnippet(container, e)
+	}
+	return strings.Join(parts, " or ")
+}
+
+// jsonLookup returns the value at container.../name, or nil when the path is not there.
+func jsonLookup(obj map[string]json.RawMessage, container []string, name string) (json.RawMessage, error) {
+	for _, k := range container {
+		raw, ok := obj[k]
+		if !ok || len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+			return nil, nil
+		}
+		child := map[string]json.RawMessage{}
+		if err := json.Unmarshal(raw, &child); err != nil {
+			return nil, fmt.Errorf("%q is not an object", k)
+		}
+		obj = child
+	}
+	raw, ok := obj[name]
+	if !ok {
+		return nil, nil
+	}
+	return raw, nil
+}
+
+// jsonSetPath sets container.../name to value, creating the objects along the way.
+func jsonSetPath(obj map[string]json.RawMessage, container []string, name string, value json.RawMessage) error {
+	if len(container) == 0 {
+		obj[name] = value
+		return nil
+	}
+	child := map[string]json.RawMessage{}
+	raw, ok := obj[container[0]]
+	if ok && len(bytes.TrimSpace(raw)) > 0 && string(bytes.TrimSpace(raw)) != "null" {
+		if err := json.Unmarshal(raw, &child); err != nil {
+			return fmt.Errorf("%q is not an object", container[0])
+		}
+	}
+	if err := jsonSetPath(child, container[1:], name, value); err != nil {
+		return err
+	}
+	b, err := marshalNoEscape(child)
+	if err != nil {
+		return err
+	}
+	obj[container[0]] = b
+	return nil
+}
+
+// jsonRemovePath deletes container.../name; an object that is left empty is dropped as well, so a file
+// does not keep an empty mcpServers behind.
+func jsonRemovePath(obj map[string]json.RawMessage, container []string, name string) error {
+	if len(container) == 0 {
+		delete(obj, name)
+		return nil
+	}
+	raw, ok := obj[container[0]]
+	if !ok {
+		return nil
+	}
+	child := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &child); err != nil {
+		return fmt.Errorf("%q is not an object", container[0])
+	}
+	if err := jsonRemovePath(child, container[1:], name); err != nil {
+		return err
+	}
+	if len(child) == 0 {
+		delete(obj, container[0])
+		return nil
+	}
+	b, err := marshalNoEscape(child)
+	if err != nil {
+		return err
+	}
+	obj[container[0]] = b
+	return nil
+}
+
+// jsonEqual compares two JSON values by value, not by their spelling.
+func jsonEqual(a, b []byte) bool {
+	var va, vb any
+	if err := json.Unmarshal(a, &va); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b, &vb); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(va, vb)
+}
+
+// jsonEqualAny reports whether v is one of the entries, by value.
+func jsonEqualAny(v json.RawMessage, entries []json.RawMessage) bool {
+	for _, e := range entries {
+		if jsonEqual(v, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------- Codex: TOML ----------
+
+// codexEnvVars are the variables the kit's Codex entry passes to `tnctl mcp`. Codex starts a stdio MCP
+// server with a cleared environment but for a few defaults, so without them `tnctl mcp` misses bot mode
+// (TEKNOIRBOT_API, TNCTL_BOT_KEY_FILE, TEKNOIRBOT_NAMESPACE and TEKNOIR_DOMAIN, cmd/botmode.go), the
+// teamspace and domain a person targets (TNCTL_NAMESPACE, and TNCTL_DOMAIN through viper's TNCTL prefix),
+// and what Go's net/http and crypto/x509 read to reach the platform: the proxy variables and a CA
+// directory (Codex passes SSL_CERT_FILE on its own, not SSL_CERT_DIR). Codex passes only the ones set.
+var codexEnvVars = []string{
+	"TEKNOIRBOT_API", "TNCTL_BOT_KEY_FILE", "TEKNOIRBOT_NAMESPACE", "TEKNOIR_DOMAIN",
+	"TNCTL_NAMESPACE", "TNCTL_DOMAIN",
+	"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_DIR",
+}
+
+// tomlEntryBlock is the codex config entry of the read-only MCP server, with the environment variables
+// of codexEnvVars.
+var tomlEntryBlock = "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\nenv_vars = " + tomlEnvVars() + "\n"
+
+// tomlCouncilBlock is the same entry in its council form, `tnctl mcp --council`.
+var tomlCouncilBlock = "[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\", \"--council\"]\nenv_vars = " + tomlEnvVars() + "\n"
+
+// tomlBlock is the entry of the form the options ask for.
+func (p *op) tomlBlock() string { return tomlBlockOf(p.o.Council) }
+
+// tomlBlockOf is the codex config entry of one form.
+func tomlBlockOf(council bool) string {
+	if council {
+		return tomlCouncilBlock
+	}
+	return tomlEntryBlock
+}
+
+// tomlEnvVars is codexEnvVars as a TOML array of strings.
+func tomlEnvVars() string {
+	quoted := make([]string, len(codexEnvVars))
+	for i, v := range codexEnvVars {
+		quoted[i] = strconv.Quote(v)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+// codexReplace is the verb of a refusal that asks the user to replace an entry that is there already.
+const codexReplace = "replace mcp_servers.teknoir with"
+
+// tomlSnippet is what the user does by hand: the verb ("add", "remove" or codexReplace) and the entry.
+// remove names both of the kit's forms, since uninstall removes either.
+func tomlSnippet(verb string, council bool) string {
+	if verb == "remove" {
+		return verb + " " + strings.TrimRight(tomlEntryBlock, "\n") + " or " + strings.TrimRight(tomlCouncilBlock, "\n")
+	}
+	return verb + " " + strings.TrimRight(tomlBlockOf(council), "\n")
+}
+
+// refuseCodex refuses an edit of the Codex config, naming the snippet to add, remove or replace by hand.
+func (p *op) refuseCodex(path, why, verb string) {
+	snippet := tomlSnippet(verb, p.o.Council)
+	p.refuse(path, string(AgentCodex), why+" "+snippet, why+" "+snippet)
+}
+
+func (p *op) registerCodexMCP() error {
+	path := p.codexMCPFile()
+	agent := string(AgentCodex)
+	target, why := p.foreignTarget(path)
+	if why != "" {
+		p.refuseCodex(path, why, "add")
+		return nil
+	}
+	data, err := os.ReadFile(target)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	text := string(data)
+	parsed, err := tomlParse(text)
+	if err != nil {
+		return fmt.Errorf("%s is not valid TOML: %w", path, err)
+	}
+	note := "mcp_servers." + mcpServerName
+	existing, isTable := tomlServer(parsed)
+	_, present := tomlServerValue(parsed)
+	verb := "add"
+	// The kit's other form is switched without --force, but only while the table is exactly the block
+	// the kit writes: a comment the user added to it is kept, as for any other differing entry. Any
+	// entry that is not the kit's needs --force.
+	other := tomlServerIs(existing, !p.o.Council)
+	switchToOther := other && (p.o.Force || codexTableIsKitBlock(text, !p.o.Council))
+	switch {
+	case !present:
+		text = appendTOML(text, p.tomlBlock())
+	case tomlServerIs(existing, p.o.Council):
+		p.r.act(ActionAlreadyRegister, path, agent, note)
+		return nil
+	case !switchToOther && !p.o.Force:
+		p.r.act(ActionSkip, path, agent, note+" differs: kept it (use --force to replace it)")
+		p.r.warn("%s already has a different [mcp_servers.%s]; kept it (use --force to replace it)", path, mcpServerName)
+		return nil
+	case !isTable:
+		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: edit it by hand:",
+			path, mcpServerName, mcpServerName), codexReplace)
+		return nil
+	default:
+		start, end, ok := tomlTableRange(text, "mcp_servers."+mcpServerName)
+		if !ok {
+			p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a [mcp_servers.%s] table: edit it by hand:",
+				path, mcpServerName, mcpServerName), codexReplace)
+			return nil
+		}
+		text = text[:start] + p.tomlBlock() + tomlJoin(text[end:])
+		verb = codexReplace
+		if other {
+			note = p.switchNote(note)
+		} else {
+			note += ": replaced a differing one (--force)"
+		}
+	}
+	// The new text is checked before anything is written, a dry run included: tnctl never promises a
+	// register that would break the file.
+	entry, err := tomlKitEntry(p.o.Council)
+	if err != nil {
+		return err
+	}
+	if !p.codexEditOK(path, string(data), text, entry, verb) {
+		return nil
+	}
+	p.r.act(ActionRegister, path, agent, note)
+	if p.o.DryRun {
+		return nil
+	}
+	return p.overwriteFile(target, []byte(text), 0o644)
+}
+
+func (p *op) removeCodexMCP() error {
+	path := p.codexMCPFile()
+	agent := string(AgentCodex)
+	target, why := p.foreignTarget(path)
+	if why != "" {
+		p.refuseCodex(path, why, "remove")
+		return nil
+	}
+	data, err := os.ReadFile(target)
+	if errors.Is(err, fs.ErrNotExist) {
+		p.r.act(ActionSkip, path, agent, "no config file")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	text := string(data)
+	parsed, err := tomlParse(text)
+	if err != nil {
+		return fmt.Errorf("%s is not valid TOML: %w", path, err)
+	}
+	existing, isTable := tomlServer(parsed)
+	_, present := tomlServerValue(parsed)
+	switch {
+	case !present:
+		p.r.act(ActionSkip, path, agent, "no mcp_servers."+mcpServerName)
+		return nil
+	case !isTable || !tomlServerIsKits(existing):
+		p.r.act(ActionSkip, path, agent, "a different mcp_servers."+mcpServerName+": kept it")
+		p.r.warn("%s has a [mcp_servers.%s] that is not the kit's; kept it", path, mcpServerName)
+		return nil
+	}
+	start, end, ok := tomlTableRange(text, "mcp_servers."+mcpServerName)
+	if !ok {
+		p.refuseCodex(path, fmt.Sprintf("%s defines mcp_servers.%s without a table header: edit it by hand:",
+			path, mcpServerName), "remove")
+		return nil
+	}
+	// Only the seam is trimmed: the blank line the entry was separated by. Nothing else in the file is
+	// rewritten, so a multi-line string keeps every line it has.
+	before, after := text[:start], text[end:]
+	switch {
+	case after == "":
+		before = strings.TrimRight(before, "\n")
+		if before != "" {
+			before += "\n"
+		}
+	case before == "":
+		// Our table came first: nothing of the user's may end up at the head of the file.
+		after = strings.TrimLeft(after, "\n")
+	case strings.HasSuffix(before, "\n\n") && strings.HasPrefix(after, "\n"):
+		after = strings.TrimLeft(after, "\n")
+	}
+	next := before + after
+	if !p.codexEditOK(path, string(data), next, nil, "remove") {
+		return nil
+	}
+	p.r.act(ActionDelete, path, agent, "mcp_servers."+mcpServerName)
+	if p.o.DryRun {
+		return nil
+	}
+	return p.overwriteFile(target, []byte(next), 0o644)
+}
+
+// codexEditOK checks, before any write, that next is orig with exactly the mcp_servers.teknoir entry
+// removed (put nil) or replaced by put. A text that does not parse, or an edit that would touch anything
+// else, is refused and false comes back; the file is left as it is.
+func (p *op) codexEditOK(path, orig, next string, put map[string]any, verb string) bool {
+	if _, err := tomlParse(next); err != nil {
+		p.refuseCodex(path, fmt.Sprintf("%s: the edit would not parse (%v); unchanged: edit it by hand:", path, err), verb)
+		return false
+	}
+	if err := tomlSameExcept(orig, next, put); err != nil {
+		p.refuseCodex(path, fmt.Sprintf("%s: tnctl cannot edit [mcp_servers.%s] safely here; edit it by hand:",
+			path, mcpServerName), verb)
+		return false
+	}
+	return true
+}
+
+// tomlParse parses a config into a map. Empty text is an empty map: go-toml leaves a nil one.
+func tomlParse(text string) (map[string]any, error) {
+	m := map[string]any{}
+	if strings.TrimSpace(text) == "" {
+		return m, nil
+	}
+	if err := toml.Unmarshal([]byte(text), &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// tomlServerValue returns parsed["mcp_servers"]["teknoir"] as it is there: a table, a string, anything.
+func tomlServerValue(parsed map[string]any) (any, bool) {
+	servers, ok := parsed["mcp_servers"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	v, ok := servers[mcpServerName]
+	return v, ok
+}
+
+// tomlServer returns parsed["mcp_servers"]["teknoir"] when it is a table.
+func tomlServer(parsed map[string]any) (map[string]any, bool) {
+	v, ok := tomlServerValue(parsed)
+	if !ok {
+		return nil, false
+	}
+	srv, ok := v.(map[string]any)
+	return srv, ok
+}
+
+// tomlServerIs reports whether the table is exactly the kit's entry of one form: the council one, or the
+// read-only one.
+func tomlServerIs(srv map[string]any, council bool) bool {
+	kit, err := tomlKitEntry(council)
+	if err != nil {
+		return false
+	}
+	return reflect.DeepEqual(srv, kit)
+}
+
+// tomlLegacyEntries are the entries an earlier tnctl wrote: v0.2.0-rc.1's had no env_vars. Install
+// still reports one as differing (--force replaces it); uninstall removes it as the kit's own, and
+// list says what it is.
+var tomlLegacyEntries = []string{"[mcp_servers.teknoir]\ncommand = \"tnctl\"\nargs = [\"mcp\"]\n"}
+
+// tomlServerIsKits reports whether the table is the kit's entry of this tnctl, in either form, or of an
+// earlier one.
+func tomlServerIsKits(srv map[string]any) bool {
+	if tomlServerIs(srv, false) || tomlServerIs(srv, true) {
+		return true
+	}
+	for _, block := range tomlLegacyEntries {
+		m, err := tomlParse(block)
+		if err != nil {
+			continue
+		}
+		if old, ok := tomlServer(m); ok && reflect.DeepEqual(srv, old) {
+			return true
+		}
+	}
+	return false
+}
+
+// tomlKitEntry is the kit's own table of one form, parsed, for the edit invariant.
+func tomlKitEntry(council bool) (map[string]any, error) {
+	m, err := tomlParse(tomlBlockOf(council))
+	if err != nil {
+		return nil, err
+	}
+	srv, ok := tomlServer(m)
+	if !ok {
+		return nil, errors.New("the kit's own [mcp_servers.teknoir] does not parse")
+	}
+	return srv, nil
+}
+
+// tomlSameExcept requires next to be orig with only mcp_servers.teknoir changed: removed when put is nil,
+// set to put otherwise. Both texts must parse; the caller checks next first.
+func tomlSameExcept(orig, next string, put map[string]any) error {
+	want, err := tomlParse(orig)
+	if err != nil {
+		return err
+	}
+	servers, _ := want["mcp_servers"].(map[string]any)
+	if servers == nil && put != nil {
+		servers = map[string]any{}
+		want["mcp_servers"] = servers
+	}
+	if servers != nil {
+		if put == nil {
+			delete(servers, mcpServerName)
+		} else {
+			servers[mcpServerName] = put
+		}
+		if len(servers) == 0 {
+			delete(want, "mcp_servers")
+		}
+	}
+	got, err := tomlParse(next)
+	if err != nil {
+		return err
+	}
+	if servers, ok := got["mcp_servers"].(map[string]any); ok && len(servers) == 0 {
+		delete(got, "mcp_servers")
+	}
+	if !reflect.DeepEqual(want, got) {
+		return errors.New("the edit changes more than [mcp_servers.teknoir]")
+	}
+	return nil
+}
+
+// codexTableIsKitBlock reports whether the [mcp_servers.teknoir] table of text is exactly the block the
+// kit writes for that form: its text from the header to the next table or the end of the file, with
+// trailing blank lines and the final newline ignored. A comment inside it, or anything else the user
+// added, makes it a differing entry, which only --force replaces.
+func codexTableIsKitBlock(text string, council bool) bool {
+	start, end, ok := tomlTableRange(text, "mcp_servers."+mcpServerName)
+	if !ok {
+		return false
+	}
+	// tomlTableRange stops before the blank and comment lines below the table, which it leaves to the
+	// next table: the table's own text runs on to the next header, or to the end of the file.
+	stop := end
+	for _, line := range strings.SplitAfter(text[end:], "\n") {
+		if tomlHeaderRE.MatchString(strings.TrimRight(line, "\r\n")) {
+			break
+		}
+		stop += len(line)
+	}
+	trim := func(s string) string { return strings.TrimRight(s, " \t\r\n") }
+	return trim(text[start:stop]) == trim(tomlBlockOf(council))
+}
+
+// tomlJoin is the text that follows a replaced table: it keeps its own leading newline, and gets one when
+// it has none, so it stays apart from the new table.
+func tomlJoin(rest string) string {
+	if rest == "" || strings.HasPrefix(rest, "\n") {
+		return rest
+	}
+	return "\n" + rest
+}
+
+// appendTOML appends the entry as a table of its own, after a blank line.
+func appendTOML(text, block string) string {
+	if text == "" {
+		return block
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return text + "\n" + block
+}
+
+// tomlHeaderRE matches a table header, [x] or [[x]], which ends the table above it.
+var tomlHeaderRE = regexp.MustCompile(`^[ \t]*(\[\[[^\]]*\]\]|\[[^\[\]]*\])[ \t]*(#.*)?$`)
+
+// tomlHeaderParts splits a header match into its key, without the brackets, and whether it is an array
+// table ([[x]]), which can only end a table, never start one.
+func tomlHeaderParts(header string) (key string, array bool) {
+	if strings.HasPrefix(header, "[[") {
+		return strings.TrimSuffix(strings.TrimPrefix(header, "[["), "]]"), true
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(header, "["), "]"), false
+}
+
+// tomlCanonicalName is the name a header refers to: `mcp_servers."teknoir"` is mcp_servers.teknoir. A
+// quoted key that holds a dot is one key of its own (`["mcp_servers.teknoir"]`), and keeps its quotes so
+// it does not read as a dotted path.
+func tomlCanonicalName(s string) string {
+	parts := tomlSplitKey(s)
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if len(p) >= 2 && (p[0] == '"' || p[0] == '\'') && p[len(p)-1] == p[0] {
+			if inner := p[1 : len(p)-1]; !strings.Contains(inner, ".") {
+				p = inner
+			}
+		}
+		parts[i] = p
+	}
+	return strings.Join(parts, ".")
+}
+
+// tomlSplitKey splits a header key on the dots outside quotes, so ["a.b"] stays one key.
+func tomlSplitKey(s string) []string {
+	var out []string
+	start := 0
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case quote != 0:
+			if c == '\\' && quote == '"' {
+				i++
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '.':
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, s[start:])
+}
+
+// tomlTableRange returns the byte range of the [name] table: its header line through the last line of
+// its own, so the blank and comment lines that separate it from the next table stay with that table. Any
+// header, [x] or [[x]], ends the table; when none follows, the range runs to the end of the text when
+// only blank lines are left, and stops before the comment lines at the end of the file, which stay. Those
+// comment lines start only where the text above them parses: a line that starts with # inside a
+// multi-line string of the table is the table's, so the whole tail is then taken.
+func tomlTableRange(text, name string) (int, int, bool) {
+	lines := strings.SplitAfter(text, "\n")
+	offs := make([]int, len(lines))
+	off := 0
+	for i, line := range lines {
+		offs[i] = off
+		off += len(line)
+	}
+	startLine := -1
+	for i, line := range lines {
+		m := tomlHeaderRE.FindStringSubmatch(strings.TrimRight(line, "\r\n"))
+		if m == nil {
+			continue
+		}
+		key, array := tomlHeaderParts(m[1])
+		if startLine < 0 {
+			if !array && tomlCanonicalName(key) == name {
+				startLine = i
+			}
+			continue
+		}
+		end := i
+		for end > startLine+1 && separatorLine(lines[end-1]) {
+			end--
+		}
+		return offs[startLine], offs[end], true
+	}
+	if startLine < 0 {
+		return 0, 0, false
+	}
+	// No header follows: comment lines at the end of the file stay; a tail of blank lines alone goes with
+	// the table.
+	end := len(lines)
+	for end > startLine+1 && separatorLine(lines[end-1]) {
+		end--
+	}
+	// The run only starts where the text above it is complete TOML: lines that start with # inside a
+	// multi-line string of the table are the table's, not comments of the user's. Both callers have
+	// parsed the whole text and every line from end on is blank or a comment, so once the text above one
+	// parses, the text above each later one does too: the first is found by bisection, and a long run of
+	// such lines costs a few parses, not one per line.
+	k := end + sort.Search(len(lines)-end, func(i int) bool {
+		_, err := tomlParse(text[:offs[end+i]])
+		return err == nil
+	})
+	if k == len(lines) || strings.TrimSpace(text[offs[k]:]) == "" {
+		return offs[startLine], len(text), true
+	}
+	return offs[startLine], offs[k], true
+}
+
+// separatorLine reports whether a line is blank or holds only a comment: it belongs to the table below
+// it, not to the one above.
+func separatorLine(line string) bool {
+	t := strings.TrimSpace(line)
+	return t == "" || strings.HasPrefix(t, "#")
+}

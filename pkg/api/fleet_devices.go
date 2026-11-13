@@ -96,9 +96,15 @@ type FleetDeviceApp struct {
 	// CPU and Memory are fractions of 1.
 	CPU    float64 `json:"cpu,omitempty"`
 	Memory float64 `json:"memory,omitempty"`
+	// Namespace is the pod's namespace on the robot.
+	Namespace string `json:"namespace,omitempty"`
+	// ManagedBy is what deployed the pod: devstudio, backstage, device-controller, or empty when the
+	// platform does not know.
+	ManagedBy string `json:"managedBy,omitempty"`
 }
 
-// FleetDeviceState is what the device last reported. A device that reported nothing has no state.
+// FleetDeviceState is what the platform last read about the device from the teamspace's Prometheus.
+// A device that reported nothing has no state.
 type FleetDeviceState struct {
 	// CPU, Memory and Storage are fractions of 1 (0.25 is 25 %).
 	CPU     float64 `json:"cpu,omitempty"`
@@ -345,13 +351,23 @@ func isStatus(err error, status int) bool {
 	return errors.As(err, &ae) && ae.Status == status
 }
 
-// Teamspaces lists the teamspaces the caller can work with. A platform without the fleet API
-// (404) answers with an *UnsupportedPlatformError.
-func (f *Fleet) Teamspaces(ctx context.Context) ([]FleetTeamspace, error) {
+// TeamspacesRaw is the teamspaces route's JSON as the platform sent it, every field included. A
+// platform without the fleet API (404) answers with an *UnsupportedPlatformError.
+func (f *Fleet) TeamspacesRaw(ctx context.Context) (json.RawMessage, error) {
 	raw, err := f.doRoot(ctx, "GET", "teamspaces")
 	if isStatus(err, http.StatusNotFound) {
 		return nil, &UnsupportedPlatformError{Version: Version}
 	}
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// Teamspaces lists the teamspaces the caller can work with. A platform without the fleet API
+// (404) answers with an *UnsupportedPlatformError.
+func (f *Fleet) Teamspaces(ctx context.Context) ([]FleetTeamspace, error) {
+	raw, err := f.TeamspacesRaw(ctx)
 	out, _, err := decode[[]FleetTeamspace](raw, err)
 	return out, err
 }
@@ -372,9 +388,9 @@ func (f *Fleet) platformErr(ctx context.Context, err error) error {
 	return err
 }
 
-// Devices lists the devices of the teamspace the caller may see, optionally only those whose labels
-// match every key=value in labels.
-func (f *Fleet) Devices(ctx context.Context, labels map[string]string) ([]FleetDevice, error) {
+// DevicesRaw is the device list's JSON as the platform sent it, every field included, optionally
+// only the devices whose labels match every key=value in labels.
+func (f *Fleet) DevicesRaw(ctx context.Context, labels map[string]string) (json.RawMessage, error) {
 	if len(labels) > MaxLabelFilters {
 		return nil, fmt.Errorf("at most %d label filters are allowed, got %d", MaxLabelFilters, len(labels))
 	}
@@ -390,19 +406,37 @@ func (f *Fleet) Devices(ctx context.Context, labels map[string]string) ([]FleetD
 			q.Add("label", k+"="+labels[k])
 		}
 	}
-	out, _, err := decode[[]FleetDevice](f.Do(ctx, "GET", "devices", q, nil))
+	raw, err := f.Do(ctx, "GET", "devices", q, nil)
 	if err != nil {
 		return nil, f.platformErr(ctx, err)
 	}
-	return out, nil
+	return raw, nil
+}
+
+// Devices lists the devices of the teamspace the caller may see, optionally only those whose labels
+// match every key=value in labels.
+func (f *Fleet) Devices(ctx context.Context, labels map[string]string) ([]FleetDevice, error) {
+	raw, err := f.DevicesRaw(ctx, labels)
+	out, _, err := decode[[]FleetDevice](raw, err)
+	return out, err
+}
+
+// DeviceRaw is one device's JSON as the platform sent it, every field included.
+func (f *Fleet) DeviceRaw(ctx context.Context, name string) (json.RawMessage, error) {
+	raw, err := f.Do(ctx, "GET", "devices/"+url.PathEscape(name), nil, nil)
+	if err != nil {
+		return nil, f.platformErr(ctx, err)
+	}
+	return raw, nil
 }
 
 // Device returns one device; a device that does not exist or lies outside the caller's organisation
 // units is a 404.
 func (f *Fleet) Device(ctx context.Context, name string) (*FleetDevice, error) {
-	d, _, err := decode[FleetDevice](f.Do(ctx, "GET", "devices/"+url.PathEscape(name), nil, nil))
+	raw, err := f.DeviceRaw(ctx, name)
+	d, _, err := decode[FleetDevice](raw, err)
 	if err != nil {
-		return nil, f.platformErr(ctx, err)
+		return nil, err
 	}
 	if d.Name == "" {
 		d.Name = name
@@ -424,8 +458,12 @@ func (f *Fleet) DeviceNames(ctx context.Context) ([]string, error) {
 }
 
 // Credentials returns the login of one device. It needs the developer role in the teamspace and
-// permission to open a terminal; a viewer gets a 403 whose code is no_write or no_exec.
+// permission to open a terminal; a viewer gets a 403 whose code is no_write or no_exec. A TeknoirBot
+// never gets one: bot mode answers ErrBotNoDeviceLogin without asking the platform.
 func (f *Fleet) Credentials(ctx context.Context, name string) (*FleetDeviceCredentials, error) {
+	if f.bot {
+		return nil, ErrBotNoDeviceLogin
+	}
 	c, _, err := decode[FleetDeviceCredentials](f.Do(ctx, "POST", "devices/"+url.PathEscape(name)+"/credentials", nil, map[string]any{}))
 	if err != nil {
 		return nil, f.platformErr(ctx, err)
@@ -434,8 +472,12 @@ func (f *Fleet) Credentials(ctx context.Context, name string) (*FleetDeviceCrede
 }
 
 // CredentialsBulk returns the logins of many devices, in calls of at most MaxBulkCredentials names.
-// Names the caller may not see, or that do not exist, come back in Missing.
+// Names the caller may not see, or that do not exist, come back in Missing. A TeknoirBot gets
+// ErrBotNoDeviceLogin without asking the platform.
 func (f *Fleet) CredentialsBulk(ctx context.Context, names []string) (*FleetDeviceCredentialsBulk, error) {
+	if f.bot {
+		return nil, ErrBotNoDeviceLogin
+	}
 	out := &FleetDeviceCredentialsBulk{}
 	seen := map[string]bool{}
 	var uniq []string
