@@ -242,13 +242,27 @@ func (m *fakeModel) count() int {
 	return len(m.reqs)
 }
 
+// leftover is how many scripted answers of each role the fake never gave: a script that does not
+// match the flow the council ran.
+func (m *fakeModel) leftover() map[string]int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]int, len(m.steps))
+	for role, q := range m.steps {
+		if n := len(q); n > 0 {
+			out[role] = n
+		}
+	}
+	return out
+}
+
 // ---------- the tools ----------
 
 // testToolNames are the tools each level may use.
 var testToolNames = map[string][]string{
 	"none":    {"whoami"},
 	"read":    {"whoami", "list_robots"},
-	"creator": {"whoami", "list_robots", "inspect_pods"},
+	"creator": {"whoami", "list_robots", "inspect_pod"},
 }
 
 // toolCallRec is one tool call the fake saw.
@@ -262,9 +276,21 @@ type fakeTools struct {
 	mu      sync.Mutex
 	calls   []toolCallRec
 	results map[string]tools.Result
+	// queues are results for one tool, one per call in order: the first is given to the first
+	// call, and once it is used up the tool answers from results as usual.
+	queues map[string][]tools.Result
 }
 
-func newFakeTools() *fakeTools { return &fakeTools{results: map[string]tools.Result{}} }
+func newFakeTools() *fakeTools {
+	return &fakeTools{results: map[string]tools.Result{}, queues: map[string][]tools.Result{}}
+}
+
+// queueResults gives a tool one result per call, in order, before its default result.
+func (f *fakeTools) queueResults(name string, results ...tools.Result) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queues[name] = append(f.queues[name], results...)
+}
 
 func (f *fakeTools) For(level string) []anthropic.ToolUnionParam {
 	names := testToolNames[level]
@@ -281,7 +307,14 @@ func (f *fakeTools) For(level string) []anthropic.ToolUnionParam {
 func (f *fakeTools) Call(ctx context.Context, level, name string, input json.RawMessage) (tools.Result, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, toolCallRec{Level: level, Name: name, Input: string(input)})
-	res, ok := f.results[name]
+	var res tools.Result
+	var ok bool
+	if q := f.queues[name]; len(q) > 0 {
+		res, ok = q[0], true
+		f.queues[name] = q[1:]
+	} else {
+		res, ok = f.results[name]
+	}
 	f.mu.Unlock()
 	if ctx.Err() != nil {
 		return tools.Result{}, context.Cause(ctx)
@@ -307,10 +340,12 @@ func (f *fakeTools) called() []string {
 
 // fakeCoder is a scripted Coder.
 type fakeCoder struct {
-	mu     sync.Mutex
-	tasks  []coder.Task
-	report coder.Report
-	run    func(ctx context.Context, task coder.Task) coder.Report
+	mu          sync.Mutex
+	tasks       []coder.Task
+	report      coder.Report
+	run         func(ctx context.Context, task coder.Task) coder.Report
+	inFlight    int
+	maxInFlight int
 }
 
 func newFakeCoder() *fakeCoder {
@@ -320,8 +355,17 @@ func newFakeCoder() *fakeCoder {
 func (c *fakeCoder) Run(ctx context.Context, task coder.Task) coder.Report {
 	c.mu.Lock()
 	c.tasks = append(c.tasks, task)
+	c.inFlight++
+	if c.inFlight > c.maxInFlight {
+		c.maxInFlight = c.inFlight
+	}
 	run := c.run
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.inFlight--
+		c.mu.Unlock()
+	}()
 	if run != nil {
 		return run(ctx, task)
 	}
@@ -332,6 +376,13 @@ func (c *fakeCoder) started() []coder.Task {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]coder.Task{}, c.tasks...)
+}
+
+// maxConcurrent is the most coder tasks that ran at once.
+func (c *fakeCoder) maxConcurrent() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.maxInFlight
 }
 
 // ---------- the hub and the posters ----------

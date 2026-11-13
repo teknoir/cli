@@ -1,0 +1,75 @@
+{
+  "requests": [],
+  "coderTasks": [
+    {
+      "prompt": "write a script that prints hello",
+      "effort": "high"
+    }
+  ],
+  "toolCalls": [],
+  "events": [
+    {
+      "type": "turn_start",
+      "data": {
+        "mode": "member"
+      }
+    },
+    {
+      "type": "member_start",
+      "data": {
+        "effort": "high",
+        "member": "coder",
+        "model": "opencode",
+        "task": 0,
+        "text": "write a script that prints hello"
+      }
+    },
+    {
+      "type": "member_done",
+      "data": {
+        "member": "coder",
+        "report": {
+          "changed": [
+            "A hello.sh"
+          ],
+          "durationMs": 0,
+          "state": "done",
+          "steps": 0,
+          "text": "I wrote hello.sh",
+          "tools": 0,
+          "usage": {
+            "CacheRead": 0,
+            "CacheWrite": 0,
+            "Calls": 0,
+            "Input": 0,
+            "Output": 0
+          }
+        },
+        "task": 0,
+        "usage": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "calls": 0,
+          "input": 0,
+          "output": 0
+        }
+      }
+    },
+    {
+      "type": "usage",
+      "data": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "calls": 0,
+        "input": 0,
+        "output": 0
+      }
+    }
+  ],
+  "finish": {
+    "state": "done",
+    "final": "I wrote hello.sh\n\n**Changed files**\n\n```\nA hello.sh\n```",
+    "errCode": "",
+    "errMsg": ""
+  }
+}
