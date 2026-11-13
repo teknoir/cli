@@ -14,8 +14,9 @@ import (
 
 // The council's own tools, which no MCP server provides.
 const (
-	toolConvene   = "convene_council"
-	toolReadSkill = "read_skill"
+	toolConvene    = "convene_council"
+	toolReadSkill  = "read_skill"
+	toolReadResult = "read_result"
 )
 
 // The council's members a task may name, and the limits of a convene_council input.
@@ -64,16 +65,18 @@ func conveneTool() anthropic.ToolUnionParam {
 	}}
 }
 
-// readSkillTool is the read_skill tool.
+// readSkillTool is the read_skill tool. A guide is read a page at a time: offset 0 first, then the
+// offset the page's [more: ...] line gives.
 func readSkillTool() anthropic.ToolUnionParam {
 	return anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
 		Name:        toolReadSkill,
-		Description: anthropic.String("Read one of the Teknoir guides listed in your instructions."),
+		Description: anthropic.String("Read one of the Teknoir guides listed in your instructions: pass offset 0 first, then the offset a [more: ...] line gives."),
 		InputSchema: anthropic.ToolInputSchemaParam{
 			Properties: map[string]any{
-				"name": map[string]any{"type": "string", "enum": skillNames},
+				"name":   map[string]any{"type": "string", "enum": skillNames},
+				"offset": map[string]any{"type": "integer"},
 			},
-			Required: []string{"name"},
+			Required: []string{"name", "offset"},
 			ExtraFields: map[string]any{
 				"additionalProperties": false,
 			},

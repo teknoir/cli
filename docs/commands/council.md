@@ -95,8 +95,9 @@ What the platform's tools give a member follows the bot's access level, and so d
 | `creator` (Act as me) | every tool, `inspect_*` included | the same | its own computer, and `tnctl` as the bot at `creator` |
 
 The Critic gets no tool at all. The Captain and Fleet also get `read_skill`, which reads one of the kit's
-guides (`teknoir-platform`, `teknoir-robots`, `teknoir-config`, `teknoir-debug`, `teknoir-mqtt-streams`), and
-the Captain gets `convene_council`: 1 to 3 tasks for `fleet` and `coder`, at most one of them a Coder task, a
+seven guides (`teknoir-platform`, `teknoir-robots`, `teknoir-config`, `teknoir-debug`, `teknoir-mqtt-streams`,
+`teknoir-k3s-apps`, `teknoir-council`) a page at a time, and `read_result`, which pages the rest of a cut tool
+result; the Captain gets `convene_council`: 1 to 3 tasks for `fleet` and `coder`, at most one of them a Coder task, a
 task of at most 4000 characters and a reason of at most 1000. It is not offered in a quick turn, and at
 access level `none` a `fleet` task is refused.
 
@@ -156,6 +157,36 @@ claim when it sets none:
 | `D − 75 s` | the work phases: routing with tools, the members, the Critic |
 | `D + 20 s` | the answer calls: the Captain's forced answer, and its synthesis |
 | `D + 50 s` | the turn's finish is posted by |
+
+## When a tool result is too long
+
+A tool result is cut to 16 KiB before a member sees it, and the tool's own server cuts at 48 KiB before
+that. Neither cut is silent: the member gets a result that says what it is missing.
+
+- **The header.** A result a member sees only part of starts with a `RESULT PARTIAL` line:
+  `RESULT PARTIAL: shown 15360 of 48123 bytes, 12 of 40 items (ref r1). Do not infer missing items, counts
+  or absences; read_result with ref r1 and offset 15360 gives the rest, or narrow the query.` The bytes and
+  the items are counted, `of "<field>"` names the object's array that was cut, and the offset is where the
+  unseen rest starts. A tool that cut its own result (the MCP server's `{"truncated": true}` wrapper, an
+  MQTT sample) gets the first sentence instead, with its own hint.
+- **`read_result`** reads the rest: `{"ref": "r1", "offset": 15360}` gives up to 12288 bytes of the whole
+  result from that offset, after a line `PAGE: bytes 15360..27648 of 48123 (ref r1); nextOffset 27648`. A
+  page joins with what was shown into the tool's own text, byte for byte. The offset must be on a rune
+  boundary; an unknown reference and an offset outside the result are error results.
+- **The untrusted tags.** Every MCP tool result, and every page, is inside
+  `<untrusted source="tool:<name>" sha256="…">…</untrusted>`: the source, and the SHA-256 of the whole
+  result, so a page is recognizable as part of the result it came from. An `<untrusted` or `</untrusted`
+  in the result itself is escaped, so a device cannot close the block and pass for the platform's own
+  words. The prompts tell the members that what is inside the tags comes from the platform and its
+  devices. A refusal made by the council itself, and a guide from `read_skill`, are not wrapped.
+- **The store.** A result is kept whole only when it was cut: at most 16 MiB per turn, in memory, gone
+  with the turn. Past the cap the member gets no reference, and its header says `the rest is not kept`.
+- **The Critic's rule.** The Critic's input counts the evidence entries that rest on a cut result
+  (`truncatedCalls`, and `"truncated": true` on each), and its instructions say that a count, a "none" or
+  an absence resting on one is a problem, blocking when the answer depends on it, unless the member paged
+  it with `read_result`.
+- **`read_skill` pages too.** A guide is read with `{"name": …, "offset": 0}`, at most 16 KiB a page, and a
+  page that is not the last ends with `[more: read_skill with offset <n>]`.
 
 ## The Coder
 
