@@ -428,9 +428,13 @@ func isHidden(r rune) bool {
 	return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Mn, unicode.Me)
 }
 
-// escapeOpener swaps the opener rune of an untrustedTag match (an ASCII "<" or one of its
-// look-alikes, which can be several bytes) for "&lt;", leaving the rest as it was.
+// escapeOpener swaps the opener of an untrustedTag match (an ASCII "<", one of its look-alikes,
+// which can be several bytes, or the 6-byte JSON escape \u003c) for "&lt;", leaving the rest as it
+// was.
 func escapeOpener(m string) string {
+	if m[0] == '\\' {
+		return "&lt;" + m[len(`\u003c`):]
+	}
 	_, n := utf8.DecodeRuneInString(m)
 	return "&lt;" + m[n:]
 }
@@ -561,33 +565,55 @@ func fieldOf(c resultcut.Result) string {
 // split or disguise one to slip past:
 //
 //   - the opener "<" or a look-alike: fullwidth U+FF1C, small U+FE64, modifier U+02C2, the angle
-//     quotation mark U+2039 and the angle brackets U+3008, U+27E8 and U+2329;
+//     quotation mark U+2039 and the angle brackets U+3008, U+27E8 and U+2329; or "<" as the JSON
+//     escape \u003c, which Go's json.Marshal writes for it (mqtt_sample's result, and any upstream
+//     answer a Go encoder wrote);
 //   - between the opener and the name, any run of white space, Unicode separators, "/", backslash,
 //     their look-alikes (fullwidth solidus U+FF0F and reverse solidus U+FF3C, division slash
-//     U+2215, fraction slash U+2044, big solidus U+29F8) and hidden characters;
-//   - the name in ASCII or fullwidth letters, with hidden characters between its letters.
+//     U+2215, fraction slash U+2044, big solidus U+29F8), the braille blank U+2800, hidden
+//     characters and JSON escapes of controls and of the line and paragraph separators;
+//   - the name in ASCII or fullwidth letters, with hidden characters, line and paragraph separators
+//     and JSON escapes of controls and of the line and paragraph separators between its letters.
 //
 // Hidden characters are those of isHidden: controls (C0, DEL, C1), format characters, combining
-// marks (variation selectors, the combining grapheme joiner) and the Hangul fillers. Homoglyphs from
-// other scripts (a Cyrillic "е" in the name) are not caught: the prompts' rule that what is inside
-// the tags comes from devices is the actual boundary, and this escaping is a second line. Only the
+// marks (variation selectors, the combining grapheme joiner) and the Hangul fillers. Most tool
+// results are JSON text, which carries a C0 control only escaped (DEL and the C1 controls stay raw
+// and count as hidden): the JSON escapes of C0 controls (\b \f \n \r \t and \u0000-\u001f) and of
+// U+2028/U+2029 (\u2028, \u2029, which Go's encoder always writes) count as the characters they
+// stand for. The encoders between a device and the
+// council (Go's encoding/json in tnctl and in the platform's Go upstreams, and the platform's
+// JSON.stringify, which re-serialises what a device's services answer) escape nothing else the rule
+// knows, so no other escape is matched. A device's own JSON (an MQTT payload, a JSON log line)
+// arrives one level down, as the content of a JSON string with its backslashes doubled. The escapes
+// of controls and separators inside the name are taken at any depth (\\u2028 as well as \u2028);
+// other escapes a device writes itself (\\u003c\\u002funtrusted, \\uff1c/untrusted) are not
+// caught, and that \\u003c/untrusted becomes \&lt;/untrusted is incidental. Homoglyphs from other
+// scripts (a Cyrillic "е" in the name) are not caught: the prompts' rule that what is inside the
+// tags comes from devices is the actual boundary, and this escaping is a second line. Only the
 // opener is escaped, so the text stays readable.
 var untrustedTag = func() *regexp.Regexp {
 	const hide = `\p{Cc}\p{Cf}\p{Mn}\p{Me}\x{115F}\x{1160}\x{3164}\x{FFA0}`
-	const gap = `[\s\p{Z}/\\\x{FF0F}\x{FF3C}\x{2215}\x{2044}\x{29F8}` + hide + `]*`
-	const in = `[` + hide + `]*`
+	// esc is a control or a line or paragraph separator as a JSON string spells it. It never
+	// matches \u003c, so a gap cannot swallow an escaped opener.
+	const esc = `|\\[bfnrt]|\\u00[01][0-9a-f]|\\u202[89]`
+	const gap = `(?:[\s\p{Z}/\\\x{FF0F}\x{FF3C}\x{2215}\x{2044}\x{29F8}\x{2800}` + hide + `]` + esc + `)*`
+	// in also takes those escapes one level down or deeper (a run of backslashes): a device's own
+	// JSON inside a JSON string doubles them.
+	const in = `(?:[` + hide + `\x{2028}\x{2029}]|\\+[bfnrt]|\\+u00[01][0-9a-f]|\\+u202[89])*`
 	const name = `[u\x{FF55}]` + in + `[n\x{FF4E}]` + in + `[t\x{FF54}]` + in + `[r\x{FF52}]` + in +
 		`[u\x{FF55}]` + in + `[s\x{FF53}]` + in + `[t\x{FF54}]` + in + `[e\x{FF45}]` + in + `[d\x{FF44}]`
-	const opener = `(?:<|\x{FF1C}|\x{FE64}|\x{02C2}|\x{2039}|\x{3008}|\x{27E8}|\x{2329})`
+	const opener = `(?:<|\\u003c|\x{FF1C}|\x{FE64}|\x{02C2}|\x{2039}|\x{3008}|\x{27E8}|\x{2329})`
 	return regexp.MustCompile(`(?i)` + opener + gap + name)
 }()
 
 // Untrusted is text inside the block that says where it came from: source, and the sha256 of the
 // whole text the shown part belongs to. An <untrusted or </untrusted inside the text is escaped, in
-// any case, with look-alike openers and slashes, fullwidth letters, and separators and hidden
-// characters (controls, format characters, combining marks, Hangul fillers) around and inside the
-// name (see untrustedTag). Homoglyphs from other scripts are not caught: the prompts' rule that what
-// is inside the tags comes from devices is the actual boundary.
+// any case, with look-alike openers and slashes, fullwidth letters, white space and separators
+// around the name, line and paragraph separators inside it, and hidden characters (controls, format
+// characters, combining marks, Hangul fillers) around and inside it, raw or as the JSON escapes a JSON text carries them in (\u003c for the opener; \b \f \n \r
+// \t, \u0000-\u001f, \u2028 and \u2029 for the rest; see untrustedTag). Only the opener becomes "&lt;";
+// the rest of the text is left as it is. Homoglyphs from other scripts are not caught: the prompts'
+// rule that what is inside the tags comes from devices is the actual boundary.
 func Untrusted(source string, whole []byte, shown string) string {
 	sum := sha256.Sum256(whole)
 	var b strings.Builder
