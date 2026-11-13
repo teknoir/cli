@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,11 @@ type mcpCapture struct {
 	created time.Time
 	expires time.Time
 	count   int
-	total   int
+	// total is the payload bytes the messages hold, as a result reports them; fileBytes is what the
+	// file takes on disk, which is what the store's cap counts (the two differ by the index fields
+	// either side of every payload, and by a base64 payload's own overhead).
+	total     int
+	fileBytes int
 }
 
 // mcpCaptureStore is the captures of one MCP server. Its mutex guards the map: two tool calls may
@@ -52,9 +57,16 @@ func newCaptureStore(dir string) *mcpCaptureStore {
 	return &mcpCaptureStore{dir: dir, caps: map[string]*mcpCapture{}}
 }
 
-// mcpStdioCaptureDir is where the stdio server keeps its captures: the temp dir's tnctl-captures.
-// A variable so a test keeps its captures in its own directory.
-var mcpStdioCaptureDir = func() string { return filepath.Join(os.TempDir(), "tnctl-captures") }
+// mcpStdioCaptureDir is where the stdio server keeps its captures: a directory of its own under the
+// temp dir, named for the user, so that two people on one machine never read each other's captures.
+// Windows has no uid (Getuid returns -1) and gives every user a temp dir of their own, so it gets
+// the plain name. A variable so a test keeps its captures in its own directory.
+var mcpStdioCaptureDir = func() string {
+	if uid := os.Getuid(); uid >= 0 {
+		return filepath.Join(os.TempDir(), "tnctl-captures-"+strconv.Itoa(uid))
+	}
+	return filepath.Join(os.TempDir(), "tnctl-captures")
+}
 
 // validCaptureID reports whether id is cap- and 12 hex characters. It is checked before any path is
 // built from an id: a tool's input is never a file name.
@@ -93,11 +105,12 @@ func (s *mcpCaptureStore) sweep() {
 // sample is never held whole. It returns the capture's id and entry; a failed write removes the
 // partial file and is an error, never a silent success.
 func (s *mcpCaptureStore) writeCapture(lines func(w *bufio.Writer) (count, total int, err error)) (string, *mcpCapture, error) {
+	s.expire()
 	keepErr := func(err error) error {
 		return fmt.Errorf("could not keep the capture: %v; use a smaller max or maxBytes", err)
 	}
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return "", nil, keepErr(err)
+	if err := ensurePrivateDir(s.dir); err != nil {
+		return "", nil, err
 	}
 	s.sweep()
 	id, err := newCaptureID()
@@ -105,7 +118,7 @@ func (s *mcpCaptureStore) writeCapture(lines func(w *bufio.Writer) (count, total
 		return "", nil, keepErr(err)
 	}
 	file := filepath.Join(s.dir, id+".jsonl")
-	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := mcpCaptureOpenFile(file)
 	if err != nil {
 		return "", nil, keepErr(err)
 	}
@@ -113,6 +126,10 @@ func (s *mcpCaptureStore) writeCapture(lines func(w *bufio.Writer) (count, total
 	count, total, werr := lines(bw)
 	if werr == nil {
 		werr = bw.Flush()
+	}
+	fileBytes := 0
+	if st, serr := f.Stat(); serr == nil {
+		fileBytes = int(st.Size())
 	}
 	if cerr := f.Close(); werr == nil {
 		werr = cerr
@@ -122,12 +139,54 @@ func (s *mcpCaptureStore) writeCapture(lines func(w *bufio.Writer) (count, total
 		return "", nil, keepErr(werr)
 	}
 	now := time.Now()
-	c := &mcpCapture{file: file, created: now, expires: now.Add(mcpCaptureTTL), count: count, total: total}
+	c := &mcpCapture{file: file, created: now, expires: now.Add(mcpCaptureTTL), count: count, total: total, fileBytes: fileBytes}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.caps[id] = c
 	s.evictLocked()
 	return id, c, nil
+}
+
+// expire drops the captures that have lived their TTL. It runs before a new one is written, so that
+// the room their files took is the new capture's.
+func (s *mcpCaptureStore) expire() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for id, c := range s.caps {
+		if now.After(c.expires) {
+			_ = os.Remove(c.file)
+			delete(s.caps, id)
+		}
+	}
+}
+
+// forget drops one capture and its file: the file went from under it, and reading it again would
+// only fail the same way.
+func (s *mcpCaptureStore) forget(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.caps[id]; ok {
+		_ = os.Remove(c.file)
+		delete(s.caps, id)
+	}
+}
+
+// removeAll deletes every capture the store holds, with its file: the server that owned them has
+// ended, and nobody can read a capture it does not know.
+func (s *mcpCaptureStore) removeAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, c := range s.caps {
+		_ = os.Remove(c.file)
+		delete(s.caps, id)
+	}
+}
+
+// mcpCaptureOpenFile is how a capture's file is made: a new one, 0600 and never an existing file's.
+// A variable so that a test can hand back a file it closed, and see the flush at the end fail.
+var mcpCaptureOpenFile = func(name string) (*os.File, error) {
+	return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 }
 
 // newCaptureID is cap- and 12 hex characters from crypto/rand.
@@ -140,7 +199,9 @@ func newCaptureID() (string, error) {
 }
 
 // evictLocked drops the expired captures, then the oldest, until the store's files total at most
-// mcpCaptureStoreMax bytes. The capture just written is part of that total.
+// mcpCaptureStoreMax bytes. It counts the files' own bytes, which is what the disk holds: a
+// payload's base64 is a third larger than the bytes it carries, and the index of every line is
+// there too. The capture just written is part of that total.
 func (s *mcpCaptureStore) evictLocked() {
 	now := time.Now()
 	total := 0
@@ -151,7 +212,7 @@ func (s *mcpCaptureStore) evictLocked() {
 			delete(s.caps, id)
 			continue
 		}
-		total += c.total
+		total += c.fileBytes
 		live = append(live, id)
 	}
 	if total <= mcpCaptureStoreMax {
@@ -163,7 +224,7 @@ func (s *mcpCaptureStore) evictLocked() {
 			return
 		}
 		_ = os.Remove(s.caps[id].file)
-		total -= s.caps[id].total
+		total -= s.caps[id].fileBytes
 		delete(s.caps, id)
 	}
 }

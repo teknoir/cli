@@ -166,29 +166,55 @@ func TestMCPGetSampleInlineBoundary(t *testing.T) {
 	}
 }
 
-// The brief's worst preview case: 200 messages of 512 bytes drop previews from the last message
-// backwards until the index fits, and say how many.
+// The brief's worst preview case: 200 messages of 512 bytes and a real 24-character timestamp drop
+// previews from the last message backwards until the index fits, and the hint says what the index
+// could not show.
 func TestMCPGetSampleOmitsPreviews(t *testing.T) {
 	mcpCaptureFast(t)
 	store := newCaptureStore(t.TempDir())
 	c := &mcpCapturedSample{}
 	for i := 0; i < 200; i++ {
 		line, data := sampleMsgOf(i, &api.StreamMessage{
-			Topic: fmt.Sprintf("/devices/d1/state/x%d", i), Payload: strings.Repeat("p", 512), TS: "t"})
+			Topic: fmt.Sprintf("/devices/d1/state/x%d", i), Payload: strings.Repeat("p", 512),
+			TS: "2026-11-08T10:00:00.000Z"})
+		if len(line.TS) != 24 {
+			t.Fatalf("the timestamp is %d characters", len(line.TS))
+		}
 		c.messages = append(c.messages, mcpCapturedMessage{line: line, data: data, kind: "text"})
 	}
 	res, err := c.spill(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.PreviewsOmitted == 0 || res.Omitted != 0 {
-		t.Errorf("%d previews omitted, %d messages omitted: the previews should have paid first", res.PreviewsOmitted, res.Omitted)
+	if res.PreviewsOmitted == 0 {
+		t.Errorf("%d previews omitted: the index did not fit", res.PreviewsOmitted)
+	}
+	// The previews paid for the room first: every message still listed shows none.
+	for i, m := range res.Messages {
+		if m.Preview != "" {
+			t.Fatalf("message %d still shows a preview while %d were dropped", i, res.PreviewsOmitted)
+		}
 	}
 	if b, _ := mcpMarshal(res); len(b) > mcpIndexMax {
 		t.Errorf("the index is %d bytes", len(b))
 	}
-	if res.Messages[0].Preview == "" || res.Messages[199].Preview != "" {
-		t.Errorf("first preview %q, last %q", res.Messages[0].Preview, res.Messages[199].Preview)
+	if !mcpIndexFits(res) {
+		t.Errorf("the index does not survive mcpResult whole: %d listed of %d", len(res.Messages), res.Count)
+	}
+	// The hint says what was dropped, both ways round: previews, and messages the list leaves out.
+	if !strings.Contains(res.Hint, "Previews were dropped to fit; use mqtt_read with path or a short length.") {
+		t.Errorf("the hint does not name the dropped previews: %q", res.Hint)
+	}
+	want := fmt.Sprintf("The index lists messages 0 to %d of %d", len(res.Messages)-1, res.Count)
+	if res.Omitted > 0 {
+		want += fmt.Sprintf("; the other %d (i %d to %d) are whole in the capture too: read them with mqtt_read by i.",
+			res.Omitted, len(res.Messages), res.Count-1)
+		if len(res.Messages)+res.Omitted != res.Count {
+			t.Errorf("%d listed and %d omitted, want %d together", len(res.Messages), res.Omitted, res.Count)
+		}
+	}
+	if !strings.Contains(res.Hint, want) {
+		t.Errorf("the hint %q does not say %q", res.Hint, want)
 	}
 }
 
@@ -320,6 +346,35 @@ func TestMCPGetSamplePagesABinaryPayload(t *testing.T) {
 	if !bytes.Equal(decoded, raw) || len(text) != base64.StdEncoding.EncodedLen(len(raw)) {
 		t.Errorf("the pages decode to %d bytes, want %d", len(decoded), len(raw))
 	}
+
+	// Base64 reads in groups of 4 characters: an offset between two groups is an error that says
+	// so and names nextOffset, never a page that decodes to garbage.
+	res := mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": got.CaptureID, "i": 0, "offset": 2})
+	if text := mcpText(t, res); !res.IsError || !strings.Contains(text, "multiple of 4") || !strings.Contains(text, "nextOffset") {
+		t.Errorf("offset 2: %+v %q", res.IsError, text)
+	}
+	// A length that is not a multiple of 4 reads whole groups: 10 gives 8 characters, and 1 gives one
+	// group of 4.
+	if p := mcpReadOf(t, mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": got.CaptureID, "i": 0, "length": 10})); p.Length != 8 || p.NextOffset == nil || *p.NextOffset != 8 {
+		t.Errorf("length 10: %d characters, next %v; want 8", p.Length, p.NextOffset)
+	}
+	if p := mcpReadOf(t, mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": got.CaptureID, "i": 0, "length": 1})); p.Length != 4 {
+		t.Errorf("length 1: %d characters, want 4", p.Length)
+	}
+	// Every page at length 10 joins back into the same bytes.
+	var joined strings.Builder
+	for offset := 0; ; {
+		p := mcpReadOf(t, mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": got.CaptureID, "i": 0, "offset": offset, "length": 10}))
+		joined.WriteString(p.Data)
+		if p.NextOffset == nil {
+			break
+		}
+		offset = *p.NextOffset
+	}
+	all, err := base64.StdEncoding.DecodeString(joined.String())
+	if err != nil || !bytes.Equal(all, raw) {
+		t.Errorf("the 10-character pages decode to %d bytes (%v), want %d", len(all), err, len(raw))
+	}
 }
 
 func TestMCPGetSampleKinds(t *testing.T) {
@@ -385,11 +440,8 @@ func TestMCPGetSampleIndexStaysBounded(t *testing.T) {
 	if len(res.Messages)+res.Omitted != 200 {
 		t.Errorf("%d listed and %d omitted, want 200 together", len(res.Messages), res.Omitted)
 	}
-	// The index the agent sees, with mcpResult's indentation, still fits the result cap without the
-	// truncation marker.
-	if text := mcpText(t, mcpResult(marshalRaw(res))); strings.Contains(text, mcpCutMarker) {
-		t.Errorf("the index was cut by mcpResult: %d bytes", len(text))
-	}
+	// The index the agent sees, with mcpResult's indentation, still fits the result cap whole.
+	mcpAssertWhole(t, mcpText(t, mcpResult(marshalRaw(res))), "captureId", "messages", "hint")
 }
 
 // mcpSpilledJSON is a server whose one message is payload, spilled to a capture: its id and client.
@@ -709,11 +761,7 @@ func TestMCPGetSampleResultsFitTheCap(t *testing.T) {
 				t.Fatalf("%s", mcpText(t, res))
 			}
 			text := mcpText(t, res)
-			var v any
-			err := json.Unmarshal([]byte(text), &v)
-			if strings.Contains(text, mcpCutMarker) || err != nil {
-				t.Errorf("%d bytes, JSON error %v: the result was cut", len(text), err)
-			}
+			mcpAssertWhole(t, text, "count", "totalBytes")
 		})
 	}
 }
@@ -759,15 +807,27 @@ func TestCaptureStoreModes(t *testing.T) {
 	}
 }
 
+// The store counts the files it writes, not the payload bytes they carry: a base64 payload is a
+// third larger than its bytes, and every line has its index fields either side of it. Two captures
+// whose decoded payloads fit the cap still pass it on disk, and the oldest goes.
 func TestCaptureStoreEvictsTheOldestPastTheCap(t *testing.T) {
 	old := mcpCaptureStoreMax
 	mcpCaptureStoreMax = 3000
 	t.Cleanup(func() { mcpCaptureStoreMax = old })
 	dir := t.TempDir()
 	store := newCaptureStore(dir)
+	// 1600 base64 characters are 1200 decoded bytes: two of them are 2400 bytes of payload, under
+	// the cap, and about 2 × 1622 bytes of file, over it.
+	base64Lines := func(w *bufio.Writer) (int, int, error) {
+		text := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42, 0x00, 0xff}, 533))[:1599] + "A"
+		if _, err := fmt.Fprintf(w, "{\"i\":0,\"encoding\":\"base64\",\"payload\":%q}\n", text); err != nil {
+			return 0, 0, err
+		}
+		return 1, len(text) / 4 * 3, nil
+	}
 	var ids []string
-	for i := 0; i < 3; i++ {
-		id, _, err := store.writeCapture(captureStoreLines(1, 1000))
+	for i := 0; i < 2; i++ {
+		id, _, err := store.writeCapture(base64Lines)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -775,34 +835,44 @@ func TestCaptureStoreEvictsTheOldestPastTheCap(t *testing.T) {
 		time.Sleep(2 * time.Millisecond) // created order
 	}
 	store.mu.Lock()
-	n := len(store.caps)
+	n, files := len(store.caps), 0
+	var live *mcpCapture
+	for _, c := range store.caps {
+		files += c.fileBytes
+		live = c
+	}
 	store.mu.Unlock()
-	if n != 3 {
-		t.Fatalf("%d captures, want 3: 3 KiB fits the cap", n)
+	// The two payloads fit the cap on their own; their files cannot. One capture, alone, does.
+	if n != 1 {
+		t.Fatalf("%d captures, want 1: the files passed the cap, not the payloads", n)
 	}
-	id, _, err := store.writeCapture(captureStoreLines(1, 1000))
-	if err != nil {
-		t.Fatal(err)
+	if got := live.total * 2; got > mcpCaptureStoreMax {
+		t.Fatalf("two payloads are %d bytes, over the %d cap: the fixture has to pass it on its files", got, mcpCaptureStoreMax)
 	}
-	ids = append(ids, id)
+	if got := live.fileBytes * 2; got <= mcpCaptureStoreMax {
+		t.Fatalf("two files are %d bytes, under the %d cap: nothing to evict", got, mcpCaptureStoreMax)
+	}
+	if files > mcpCaptureStoreMax {
+		t.Errorf("%d file bytes left, over the %d cap", files, mcpCaptureStoreMax)
+	}
 	if _, ok := store.get(ids[0]); ok {
 		t.Error("the oldest capture survived past the cap")
 	}
-	if _, ok := store.get(ids[3]); !ok {
+	if _, ok := store.get(ids[1]); !ok {
 		t.Error("the new capture was evicted")
 	}
-	// Its file went too, and the store's files fit the cap.
+	// Its file went too, and what is left fits the cap.
 	if _, err := os.Stat(filepath.Join(dir, ids[0]+".jsonl")); !os.IsNotExist(err) {
 		t.Errorf("the evicted capture's file is still there: %v", err)
 	}
 	store.mu.Lock()
 	total := 0
 	for _, c := range store.caps {
-		total += c.total
+		total += c.fileBytes
 	}
 	store.mu.Unlock()
 	if total > mcpCaptureStoreMax {
-		t.Errorf("%d bytes in the store, want at most %d", total, mcpCaptureStoreMax)
+		t.Errorf("%d file bytes in the store, want at most %d", total, mcpCaptureStoreMax)
 	}
 }
 
@@ -856,6 +926,39 @@ func TestCaptureStoreFailedWrite(t *testing.T) {
 	if len(entries) != 0 {
 		t.Errorf("%d files left behind: %v", len(entries), entries)
 	}
+
+	// The flush at the end fails too: the file is closed under the writer, and what lines buffered
+	// is written nowhere. The capture is an error, and no file stays behind.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldOpen := mcpCaptureOpenFile
+	mcpCaptureOpenFile = func(name string) (*os.File, error) {
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		_ = f.Close() // the writer holds a file whose descriptor is already shut
+		return f, nil
+	}
+	t.Cleanup(func() { mcpCaptureOpenFile = oldOpen })
+	_, _, err = store.writeCapture(func(w *bufio.Writer) (int, int, error) {
+		// Small enough that the write itself buffers: the failure is the flush.
+		if _, werr := w.WriteString("{\"i\":0}\n"); werr != nil {
+			return 0, 0, werr
+		}
+		return 1, 8, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "could not keep the capture") {
+		t.Fatalf("%v, want the failed flush", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("%d files left behind by the failed flush: %v", len(entries), entries)
+	}
+	mcpCaptureOpenFile = oldOpen
 
 	// A write error inside lines counts too.
 	_, _, err = store.writeCapture(func(w *bufio.Writer) (int, int, error) {
@@ -981,4 +1084,459 @@ func TestMCPMqttSampleSaysWhenItCut(t *testing.T) {
 			t.Errorf("totalBytes %d, want the %d kept messages' %d", got.TotalBytes, len(got.Messages), want)
 		}
 	})
+}
+
+// ---------- the capture directory ----------
+
+// A capture directory the world can read is set back to 0700 before anything is written in it.
+func TestCaptureStorePrivateDirMode(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "captures")
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil { // MkdirAll is under the umask
+		t.Fatal(err)
+	}
+	store := newCaptureStore(dir)
+	if _, _, err := store.writeCapture(captureStoreLines(1, 10)); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o700 {
+		t.Errorf("dir mode %o, want 0700", perm)
+	}
+}
+
+// A capture directory that is a symlink is refused: the target is not tnctl's to write captures
+// into, whoever put the link there.
+func TestCaptureStoreRefusesSymlinkDir(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "elsewhere")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "captures")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	store := newCaptureStore(link)
+	_, _, err := store.writeCapture(captureStoreLines(1, 10))
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("%v, want a refusal of the link", err)
+	}
+	entries, _ := os.ReadDir(target)
+	if len(entries) != 0 {
+		t.Errorf("%d files were written through the link: %v", len(entries), entries)
+	}
+}
+
+// A capture directory that holds a file instead of being one is refused too.
+func TestCaptureStoreRefusesNonDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "captures")
+	if err := os.WriteFile(path, []byte("not a dir\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := newCaptureStore(path)
+	if _, _, err := store.writeCapture(captureStoreLines(1, 10)); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("%v, want a refusal", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "not a dir\n" {
+		t.Errorf("the file changed: %q", b)
+	}
+}
+
+// A dir that cannot be had is the dir's error, not the sample's: no "use a smaller max", which
+// would send the caller after the wrong thing.
+func TestCaptureStoreDirErrorHasNoSizeSuffix(t *testing.T) {
+	store := newCaptureStore(filepath.Join(t.TempDir(), "captures"))
+	if err := os.MkdirAll(filepath.Join(store.dir, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A file where the directory should be is refused before any write.
+	if err := os.RemoveAll(store.dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.dir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := store.writeCapture(captureStoreLines(1, 10))
+	if err == nil || strings.Contains(err.Error(), "use a smaller max") {
+		t.Fatalf("%v, want the dir's own error", err)
+	}
+}
+
+// ---------- the store's life ----------
+
+// removeAll deletes every capture with its file: the session that owned them has ended.
+func TestCaptureStoreRemoveAll(t *testing.T) {
+	dir := t.TempDir()
+	store := newCaptureStore(dir)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id, _, err := store.writeCapture(captureStoreLines(1, 10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	store.removeAll()
+	for _, id := range ids {
+		if _, ok := store.get(id); ok {
+			t.Errorf("capture %s survived removeAll", id)
+		}
+		if _, err := os.Stat(filepath.Join(dir, id+".jsonl")); !os.IsNotExist(err) {
+			t.Errorf("capture %s's file is still there: %v", id, err)
+		}
+	}
+}
+
+// forget drops one capture: a file that went from under it will not be read again.
+func TestCaptureStoreForget(t *testing.T) {
+	dir := t.TempDir()
+	store := newCaptureStore(dir)
+	id, _, err := store.writeCapture(captureStoreLines(1, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.forget(id)
+	if _, ok := store.get(id); ok {
+		t.Error("the forgotten capture answered")
+	}
+	if _, err := os.Stat(filepath.Join(dir, id+".jsonl")); !os.IsNotExist(err) {
+		t.Errorf("the forgotten capture's file is still there: %v", err)
+	}
+}
+
+// A capture whose file went away from outside answers as an unknown one, and is forgotten: the next
+// call does not read the file again.
+func TestMCPReadCaptureFileRemoved(t *testing.T) {
+	mcpCaptureFast(t)
+	cs, id := mcpSpilledJSON(t, strings.Repeat(`{"a":"`+strings.Repeat("v", 200)+`"}`, 100))
+	matches, err := filepath.Glob(filepath.Join(mcpStdioCaptureDir(), id+".jsonl"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("the capture file: %v %v", matches, err)
+	}
+	if err := os.Remove(matches[0]); err != nil {
+		t.Fatal(err)
+	}
+	res := mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": id, "i": 0})
+	if text := mcpText(t, res); !res.IsError || !strings.Contains(text, "unknown or expired") {
+		t.Errorf("%+v %q, want the unknown-or-expired error", res.IsError, text)
+	}
+	// And the same answer the second time: the capture is gone from the store, not only its file.
+	if res := mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": id, "i": 0}); !res.IsError || !strings.Contains(mcpText(t, res), "unknown or expired") {
+		t.Errorf("the second read: %+v %q", res.IsError, mcpText(t, res))
+	}
+}
+
+// The server deletes its captures when the session ends.
+func TestMCPEndsItsCaptures(t *testing.T) {
+	dir := t.TempDir()
+	old := mcpStdioCaptureDir
+	mcpStdioCaptureDir = func() string { return dir }
+	t.Cleanup(func() { mcpStdioCaptureDir = old })
+	noBotMode(t)
+	srv, _ := mcpSSE(t, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, mcpSSEMsg("/devices/d1/state/x", strings.Repeat("m", 20<<10)))
+	}, false)
+	e := mcpSampleEnv(t, srv)
+	ctx, cancel := context.WithCancel(context.Background())
+	st, ct := mcp.NewInMemoryTransports()
+	done := make(chan error, 1)
+	go func() { done <- runMCPWith(ctx, e, st, false) }()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(context.Background(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := mcpCall(t, cs, "mqtt_get_sample", sampleArgs(nil))
+	got, text := mcpGetSampleOf(t, res)
+	if got.CaptureID == "" {
+		t.Fatalf("not spilled: %q", text)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "*.jsonl")); len(matches) != 1 {
+		t.Fatalf("the capture's files: %v", matches)
+	}
+	cancel()
+	_ = cs.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session did not end")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "*.jsonl")); len(matches) != 0 {
+		t.Errorf("the session left %d captures behind: %v", len(matches), matches)
+	}
+}
+
+// ---------- escaping and page bounds ----------
+
+// mcpSpillEnv is a server whose stream writes payload as the platform does: raw in the SSE data.
+func mcpSpillEnv(t *testing.T, events func(w http.ResponseWriter)) *mcp.ClientSession {
+	t.Helper()
+	mcpCaptureFast(t)
+	cs := mcpGetSampleEnv(t, events)
+	return cs
+}
+
+// A sample of payloads that JSON escapes is measured as it is sent: mcpMarshal keeps "<", ">" and
+// "&" one byte each, so a result that fits when it is checked is not cut when it goes out.
+func TestMCPGetSampleEscapesAreCountedAsSent(t *testing.T) {
+	cs := mcpSpillEnv(t, func(w http.ResponseWriter) {
+		for i := 0; i < 100; i++ {
+			_, _ = io.WriteString(w, mcpSSEMsg(fmt.Sprintf("/devices/d1/state/x%d", i), "a&b <c>"+strings.Repeat("m", 500)))
+		}
+	})
+	res := mcpCall(t, cs, "mqtt_get_sample", sampleArgs(map[string]any{"max": 100}))
+	text := mcpText(t, res)
+	var got mcpGetSampleOut
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("the result is not JSON: %v in %.200q", err, text)
+	}
+	if res.IsError {
+		t.Fatalf("%s", text)
+	}
+	mcpAssertWhole(t, text, "count", "totalBytes")
+	// The payload itself comes back as the stream sent it, one "<" a byte, and reads whole too.
+	payload := "a&b <c>" + strings.Repeat("m", 500)
+	page := mcpReadOf(t, mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": got.CaptureID, "i": 0}))
+	if page.Data != payload {
+		t.Errorf("the payload reads back as %q, want %q", page.Data, payload)
+	}
+
+	// The worst of it: a sample of about 12000 "&" fits the inline limit when it is measured the way
+	// it is sent, and would be 72000 bytes — a cut result that does not parse — escaped the other way.
+	cs = mcpSpillEnv(t, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, mcpSSEEvent("message", map[string]any{
+			"topic": "/devices/d1/state/x", "payload": strings.Repeat("&", 12000)}))
+	})
+	res = mcpCall(t, cs, "mqtt_get_sample", sampleArgs(nil))
+	text = mcpText(t, res)
+	var inline struct {
+		CaptureID string            `json:"captureId"`
+		Messages  []json.RawMessage `json:"messages"`
+		Truncated bool              `json:"truncated"`
+		Count     int               `json:"count"`
+	}
+	if err := json.Unmarshal([]byte(text), &inline); err != nil || res.IsError {
+		t.Fatalf("the result is not JSON (%v): %.200q", err, text)
+	}
+	if inline.CaptureID != "" || len(inline.Messages) != 1 || inline.Count != 1 {
+		t.Errorf("a 12000-byte sample did not come back inline: %.200q", text)
+	}
+	mcpAssertWhole(t, text, "messages", "count")
+}
+
+// A text page is bounded by what it takes once escaped, so control characters and U+2028 cannot grow
+// a page past the cap; the pages still join back into the payload byte for byte.
+func TestMCPReadPagesBoundEscapedSize(t *testing.T) {
+	for _, c := range []struct{ name, unit string }{
+		{"control characters", "\x01"},
+		{"HTML characters", "<&>"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			payload := strings.Repeat(c.unit, 30000/len(c.unit))
+			cs := mcpSpillEnv(t, func(w http.ResponseWriter) {
+				_, _ = io.WriteString(w, mcpSSEEvent("message", map[string]any{
+					"topic": "/devices/d1/state/x", "payload": payload}))
+			})
+			got, _ := mcpGetSampleOf(t, mcpCall(t, cs, "mqtt_get_sample", sampleArgs(nil)))
+			if got.CaptureID == "" {
+				t.Fatalf("a %d-byte payload was not spilled", len(payload))
+			}
+			var joined strings.Builder
+			offset := 0
+			for pages := 0; ; pages++ {
+				if pages > 50 {
+					t.Fatal("the pages do not end")
+				}
+				res := mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": got.CaptureID, "i": 0, "offset": offset})
+				if res.IsError {
+					t.Fatalf("page at %d: %s", offset, mcpText(t, res))
+				}
+				text := mcpText(t, res)
+				var page mcpReadPage
+				if err := json.Unmarshal([]byte(text), &page); err != nil {
+					t.Fatalf("page at %d is not JSON: %v", offset, err)
+				}
+				mcpAssertWhole(t, text, "data", "nextOffset")
+				if page.Data == "" && page.NextOffset != nil {
+					t.Fatalf("page at %d is empty and has a nextOffset %d", offset, *page.NextOffset)
+				}
+				joined.WriteString(page.Data)
+				if page.NextOffset == nil {
+					break
+				}
+				offset = *page.NextOffset
+			}
+			if sum := sha256Hex([]byte(joined.String())); sum != sha256Hex([]byte(payload)) {
+				t.Errorf("the pages do not reassemble to the payload: %d of %d bytes", joined.Len(), len(payload))
+			}
+		})
+	}
+}
+
+// A byte that is not UTF-8 escapes to six characters, so a 12288-byte page of them would be 72 KiB:
+// the page is smaller, and the result of it whole. (It cannot come through the stream — JSON turns
+// each such byte into the replacement character before tnctl sees it — so it is paged directly.)
+func TestMCPReadPageBoundsInvalidUTF8(t *testing.T) {
+	m := sampleMsg{Topic: "/devices/d1/state/x", Encoding: "utf8", Payload: strings.Repeat("\xff", 30000)}
+	offset, pages := 0, 0
+	for {
+		if pages++; pages > 50 {
+			t.Fatal("the pages do not end")
+		}
+		p, err := mcpPage(m, mcpReadIn{Offset: offset})
+		if err != nil {
+			t.Fatalf("page at %d: %v", offset, err)
+		}
+		if p.Length == 0 || p.Length > 36<<10/6 {
+			t.Fatalf("page at %d is %d bytes: six escaped characters each pass the 36 KiB budget", offset, p.Length)
+		}
+		raw, err := mcpMarshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := mcpText(t, mcpResult(raw)); got != string(raw) && !strings.HasPrefix(got, "{") {
+			t.Fatalf("page at %d does not survive mcpResult: %.200q", offset, got)
+		}
+		if len(mcpIndented(t, string(raw))) > mcpMaxResult {
+			t.Fatalf("page at %d is over the %d cap once indented", offset, mcpMaxResult)
+		}
+		if p.NextOffset == nil {
+			if end := offset + p.Length; end != len(m.Payload) {
+				t.Errorf("the last page ends at %d, want %d", end, len(m.Payload))
+			}
+			break
+		}
+		offset = *p.NextOffset
+	}
+}
+
+// A page always holds at least the rune at its offset: a length under the rune's size is that rune,
+// not an empty page whose nextOffset is its own offset.
+func TestMCPReadNeverReturnsAnEmptyPage(t *testing.T) {
+	payload := "€abc"
+	mcpCaptureFast(t)
+	store := newCaptureStore(t.TempDir())
+	line, data := sampleMsgOf(0, &api.StreamMessage{Topic: "/devices/d1/state/x", Payload: payload})
+	if _, _, err := store.writeCapture(func(w *bufio.Writer) (int, int, error) {
+		b, err := mcpMarshal(line)
+		if err != nil {
+			return 0, 0, err
+		}
+		_, err = w.Write(append(b, '\n'))
+		return 1, len(data), err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := mcpPage(line, mcpReadIn{I: 0, Length: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Data != "€" || page.Length != 3 || page.NextOffset == nil || *page.NextOffset != 3 {
+		t.Errorf("page = %q, length %d, next %v; want the euro sign and offset 3", page.Data, page.Length, page.NextOffset)
+	}
+}
+
+// A topic over 1024 bytes is cut back to a rune start in both tools, with its whole length given,
+// and neither result is cut: a topic is a device's own string, and 50 KiB of one is not a result.
+func TestMCPLongTopicIsBounded(t *testing.T) {
+	topic := "/devices/d1/state/" + strings.Repeat("é", 25<<10)
+	cs := mcpSpillEnv(t, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, mcpSSEEvent("message", map[string]any{"topic": topic, "payload": strings.Repeat("m", 20<<10)}))
+	})
+	got, text := mcpGetSampleOf(t, mcpCall(t, cs, "mqtt_get_sample", sampleArgs(nil)))
+	mcpAssertWhole(t, text, "captureId", "messages")
+	var m mcpGetSampleMessage
+	if err := json.Unmarshal(got.Messages[0], &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Topic) > 1024 || !utf8.ValidString(m.Topic) || m.TopicBytes != len(topic) {
+		t.Errorf("the index's topic is %d bytes (valid %v), topicBytes %d; the whole is %d",
+			len(m.Topic), utf8.ValidString(m.Topic), m.TopicBytes, len(topic))
+	}
+	res := mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": got.CaptureID, "i": 0})
+	pageText := mcpText(t, res)
+	mcpAssertWhole(t, pageText, "topic", "data")
+	var page mcpReadPage
+	if err := json.Unmarshal([]byte(pageText), &page); err != nil {
+		t.Fatal(err)
+	}
+	var withBytes struct {
+		Topic      string `json:"topic"`
+		TopicBytes int    `json:"topicBytes"`
+	}
+	_ = json.Unmarshal([]byte(pageText), &withBytes)
+	if len(withBytes.Topic) > 1024 || !utf8.ValidString(withBytes.Topic) || withBytes.TopicBytes != len(topic) {
+		t.Errorf("the page's topic is %d bytes, topicBytes %d; the whole is %d", len(withBytes.Topic), withBytes.TopicBytes, len(topic))
+	}
+}
+
+// ---------- paths ----------
+
+// A key under a list index is named with its dot, so a refusal names a path the caller can fix.
+func TestMCPPathWhereNamesDottedKeysAfterAnIndex(t *testing.T) {
+	payload := string(jsonOfBytes(t, map[string]any{
+		"a":    []any{map[string]any{"b": 1}},
+		"note": strings.Repeat("x", 20<<10),
+	}))
+	cs, id := mcpSpilledJSON(t, payload)
+	res := mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": id, "i": 0, "path": "a[0].nope"})
+	if text := mcpText(t, res); !res.IsError || !strings.Contains(text, "a[0].nope") || !strings.Contains(text, `"nope" at a[0]`) {
+		t.Errorf("%+v %q, want the dot after the index", res.IsError, text)
+	}
+}
+
+// The "cannot be addressed" hint is for a key the path names and ends at, not for every key that
+// starts with the path.
+func TestMCPPathUnaddressableKeyOnlyWhenItIsMeant(t *testing.T) {
+	payload := string(jsonOfBytes(t, map[string]any{
+		"temperature.c": map[string]any{"v": 1},
+		"a.b":           float64(2),
+		"note":          strings.Repeat("x", 20<<10),
+	}))
+	cs, id := mcpSpilledJSON(t, payload)
+	// A key that merely starts with the path's text: it is missing, and the keys are listed.
+	res := mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": id, "i": 0, "path": "temp"})
+	if text := mcpText(t, res); !res.IsError || !strings.Contains(text, `there is no key "temp"`) {
+		t.Errorf("%+v %q, want a missing key", res.IsError, text)
+	}
+	// A key the path names whole: it cannot be addressed, and the error says why.
+	res = mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": id, "i": 0, "path": "a.b"})
+	if text := mcpText(t, res); !res.IsError || !strings.Contains(text, `the key "a.b"`) || !strings.Contains(text, "cannot be addressed") {
+		t.Errorf("%+v %q, want the unaddressable key", res.IsError, text)
+	}
+}
+
+// A list index that is not a whole number from 0 is a mistake to correct, not an unaddressable key.
+func TestMCPPathBadListIndex(t *testing.T) {
+	payload := string(jsonOfBytes(t, map[string]any{"a": []any{1, 2}, "note": strings.Repeat("x", 20<<10)}))
+	cs, id := mcpSpilledJSON(t, payload)
+	for _, path := range []string{"a[-1]", "a[]", "a[x]", "a[99999999999999999999]"} {
+		res := mcpCall(t, cs, "mqtt_read", map[string]any{"captureId": id, "i": 0, "path": path})
+		text := mcpText(t, res)
+		if !res.IsError || !strings.Contains(text, "is not a list index") || !strings.Contains(text, "use a whole number from 0, like items[0]") {
+			t.Errorf("%s: %+v %q", path, res.IsError, text)
+		}
+	}
+}
+
+// A base64 payload the standard decoder refuses is tried unpadded, and one neither reads is
+// counted by its text and carries no hash: never a zero-filled buffer described as its bytes.
+func TestMqttSampleUnpaddedBase64(t *testing.T) {
+	line, data := sampleMsgOf(0, &api.StreamMessage{Topic: "/devices/d1/state/x", PayloadBase64: "AAE"})
+	if line.Encoding != "base64" || line.Bytes != 2 || !bytes.Equal(data, []byte{0x00, 0x01}) {
+		t.Errorf("line %+v, data %x; want two bytes and 0001", line, data)
+	}
+	if got := sha256Hex(data); got != sha256Hex([]byte{0x00, 0x01}) {
+		t.Errorf("the hash is %s", got)
+	}
+	// Neither decoder reads it: no bytes, the text's length, and no hash.
+	line, data = sampleMsgOf(0, &api.StreamMessage{Topic: "/devices/d1/state/x", PayloadBase64: "!!!"})
+	if data != nil || line.Bytes != 3 || line.SHA256 != "" {
+		t.Errorf("line %+v, data %x; want no bytes and 3 characters", line, data)
+	}
 }

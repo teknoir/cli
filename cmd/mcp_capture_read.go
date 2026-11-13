@@ -11,7 +11,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,7 +52,7 @@ const (
 )
 
 // mcpGetSampleDescription is what the tool tells the agent.
-const mcpGetSampleDescription = "Listen to the MQTT messages of the teamspace's devices for a few seconds and return them whole: each payload as the stream sent it, unlike mqtt_sample, which cuts a long one. A sample whose payloads add up to at most 12288 bytes comes back inline; a larger one is written to a capture that lasts 30 minutes and the result is an index (kind, sha256, a preview per message), to read with mqtt_read by index, offset and length, or one JSON field with path. payloads over 256 KiB are dropped by the platform and counted in serverDropped.size. mqtt_sample is the cheaper preview when whole payloads are not needed. It stops at max messages, after seconds, when the stream ends, or when the next message would pass maxBytes; stoppedBy says which. One sample runs at a time: put every topic (up to 8) in one call instead of calling it in parallel. " + mcpUntrustedNote
+const mcpGetSampleDescription = "Listen to the MQTT messages of the teamspace's devices for a few seconds and return them whole: each payload as the stream sent it, unlike mqtt_sample, which cuts a long one. A sample whose payloads add up to at most 12288 bytes and whose answer fits comes back inline; otherwise it is written to a capture that lasts 30 minutes and the result is an index (kind, sha256, a preview per message), to read with mqtt_read by index, offset and length, or one JSON field with path. An index too long for the answer drops previews from its last message backwards (previewsOmitted: how many listed messages now show none) and then leaves messages out of its list (omitted: how many); every message is still readable by its i. Payloads over 256 KiB are dropped by the platform and counted in serverDropped.size. mqtt_sample is the cheaper preview when whole payloads are not needed. It stops at max messages, after seconds, when the stream ends, or when the next message would pass maxBytes; stoppedBy says which. One sample runs at a time: put every topic (up to 8) in one call instead of calling it in parallel. " + mcpUntrustedNote
 
 // mcpReadDescription is what mqtt_read tells the agent.
 const mcpReadDescription = "Read one message of a capture mqtt_get_sample spilled: the payload's text, or its base64 text, from offset for at most length bytes (12288 at most, about 22 reads of a 256 KiB payload), with nextOffset for the next page; or, with path, one field of a JSON payload such as detections[0].label, marshalled compactly and paged the same way. A capture lasts 30 minutes; after that, take a new sample. " + mcpUntrustedNote
@@ -78,16 +80,18 @@ type mcpReadIn struct {
 
 // mcpGetSampleMessage is one message of a spilled sample's index.
 type mcpGetSampleMessage struct {
-	I         int    `json:"i"`
-	Topic     string `json:"topic"`
-	TS        string `json:"ts"`
-	Retain    bool   `json:"retain"`
-	Bytes     int    `json:"bytes"`
-	Encoding  string `json:"encoding"`
-	SHA256    string `json:"sha256"`
-	Kind      string `json:"kind"`
-	JSONValid bool   `json:"jsonValid"`
-	Preview   string `json:"preview,omitempty"`
+	I     int    `json:"i"`
+	Topic string `json:"topic"`
+	// TopicBytes is the whole topic's length, when a topic longer than a result may carry is cut.
+	TopicBytes int    `json:"topicBytes,omitempty"`
+	TS         string `json:"ts"`
+	Retain     bool   `json:"retain"`
+	Bytes      int    `json:"bytes"`
+	Encoding   string `json:"encoding"`
+	SHA256     string `json:"sha256"`
+	Kind       string `json:"kind"`
+	JSONValid  bool   `json:"jsonValid"`
+	Preview    string `json:"preview,omitempty"`
 }
 
 // mcpGetSampleIndex is a spilled sample's result: where the capture is and what it holds.
@@ -172,14 +176,25 @@ func mcpGetSampleTool(e *cliEnv, slot *mcpSampleSlot, captures *mcpCaptureStore)
 		if err != nil {
 			return nil, nil, err
 		}
+		// Emitted as it is measured: mcpMarshal keeps "<", ">" and "&" one byte each, so a result
+		// that fits when it is checked still fits when it is sent. json.Marshal would send them
+		// escaped, up to six bytes each, past mcpMaxResult and into mcpResult's cut.
 		if res := c.inline(); c.encoded() <= mcpInlineMax && mcpFitsResult(res) {
-			return mcpResult(marshalRaw(res)), nil, nil
+			raw, err := mcpMarshal(res)
+			if err != nil {
+				return nil, nil, err
+			}
+			return mcpResult(raw), nil, nil
 		}
 		res, err := c.spill(captures)
 		if err != nil {
 			return nil, nil, err
 		}
-		return mcpResult(marshalRaw(res)), nil, nil
+		raw, err := mcpMarshal(res)
+		if err != nil {
+			return nil, nil, err
+		}
+		return mcpResult(raw), nil, nil
 	}
 }
 
@@ -217,8 +232,11 @@ func mcpCollectSample(ctx context.Context, fl *api.Fleet, req mcpSampleRequest) 
 		topics: req.topics, seconds: req.seconds, unit: mcpSampleUnit, openMax: mcpSampleOpenMax, openCode: codeError,
 	}, func(m *api.StreamMessage, _ string) (string, int, error) {
 		line, data := sampleMsgOf(len(c.messages), m)
-		sum := sha256.Sum256(data)
-		line.SHA256 = hex.EncodeToString(sum[:])
+		if data != nil {
+			// No bytes, no hash: a base64 nothing decodes is counted, never hashed as a placeholder.
+			sum := sha256.Sum256(data)
+			line.SHA256 = hex.EncodeToString(sum[:])
+		}
 		if payloadBytes+line.Bytes > req.maxBytes {
 			return "size", line.Bytes, nil
 		}
@@ -297,8 +315,9 @@ func (c *mcpCapturedSample) spill(captures *mcpCaptureStore) (*mcpGetSampleIndex
 		NextMessageBytes: c.nextMessageBytes, ServerDropped: c.dropped, Hint: mcpGetSampleHint,
 	}
 	for _, m := range c.messages {
+		topic, topicBytes := mcpTopicPage(m.line.Topic)
 		res.Messages = append(res.Messages, mcpGetSampleMessage{
-			I: m.line.I, Topic: m.line.Topic, TS: m.line.TS, Retain: m.line.Retain, Bytes: m.line.Bytes,
+			I: m.line.I, Topic: topic, TopicBytes: topicBytes, TS: m.line.TS, Retain: m.line.Retain, Bytes: m.line.Bytes,
 			Encoding: m.line.Encoding, SHA256: m.line.SHA256, Kind: m.kind, JSONValid: m.jsonOK,
 			Preview: mcpPreview(m, previewLen),
 		})
@@ -308,7 +327,6 @@ func (c *mcpCapturedSample) spill(captures *mcpCaptureStore) (*mcpGetSampleIndex
 			break
 		}
 		res.Messages[i].Preview = ""
-		res.PreviewsOmitted++
 	}
 	// A capture of 200 messages with long topics fills the cap on its own, without any preview:
 	// listing fewer of them keeps the result whole, and every message stays readable by its index i,
@@ -317,7 +335,37 @@ func (c *mcpCapturedSample) spill(captures *mcpCaptureStore) (*mcpGetSampleIndex
 		res.Messages = res.Messages[:len(res.Messages)-1]
 		res.Omitted++
 	}
+	// Counted after the loop: a preview dropped for room is one a caller may have lost, and the
+	// number says how many.
+	res.PreviewsOmitted = 0
+	for _, m := range res.Messages {
+		if m.Preview == "" && m.I < len(c.messages) && c.messages[m.I].line.Payload != "" {
+			res.PreviewsOmitted++
+		}
+	}
+	// The hint is part of the result and counts against the same cap: when it no longer fits, the
+	// last messages go, as they do above, and the hint says so.
+	res.Hint = mcpSpillHint(res)
+	for !mcpIndexFits(res) && len(res.Messages) > 1 {
+		res.Messages = res.Messages[:len(res.Messages)-1]
+		res.Omitted++
+		res.Hint = mcpSpillHint(res)
+	}
 	return res, nil
+}
+
+// mcpSpillHint is the spilled sample's hint: what to read, and what the index could not show in
+// full, so that an agent neither guesses at a missing message nor reads a preview for a payload.
+func mcpSpillHint(res *mcpGetSampleIndex) string {
+	hint := mcpGetSampleHint
+	if res.Omitted > 0 {
+		hint += fmt.Sprintf(" The index lists messages 0 to %d of %d; the other %d (i %d to %d) are whole in the capture too: read them with mqtt_read by i.",
+			len(res.Messages)-1, res.Count, res.Omitted, len(res.Messages), res.Count-1)
+	}
+	if res.PreviewsOmitted > 0 {
+		hint += " Previews were dropped to fit; use mqtt_read with path or a short length."
+	}
+	return hint
 }
 
 // mcpIndexFits reports whether a spilled sample's answer fits: under mcpIndexMax as compact JSON,
@@ -405,15 +453,26 @@ func mcpReadTool(captures *mcpCaptureStore) func(context.Context, *mcp.CallToolR
 		}
 		m, err := c.line(in.I)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// Something outside this server removed the file: the capture is gone for good.
+				captures.forget(in.CaptureID)
+				return nil, nil, mcpCaptureGone(in.CaptureID)
+			}
 			return nil, nil, newErr(codeError, "the capture could not be read: %v", err)
 		}
 		page, err := mcpPage(m, in)
 		if err != nil {
 			return nil, nil, err
 		}
-		page.CaptureID, page.I, page.Topic = in.CaptureID, in.I, m.Topic
+		page.CaptureID, page.I = in.CaptureID, in.I
+		page.Topic, page.TopicBytes = mcpTopicPage(m.Topic) // the capture keeps the whole topic
 		page.Encoding, page.SHA256 = m.Encoding, m.SHA256
-		return mcpResult(marshalRaw(page)), nil, nil
+		// mcpMarshal, not json.Marshal: the page was measured the way it is sent.
+		raw, err := mcpMarshal(page)
+		if err != nil {
+			return nil, nil, err
+		}
+		return mcpResult(raw), nil, nil
 	}
 }
 
@@ -424,9 +483,11 @@ func mcpCaptureGone(id string) error {
 
 // mcpPageResult is one page of a message's text: its payload, or one field of a JSON payload.
 type mcpPageResult struct {
-	CaptureID  string `json:"captureId"`
-	I          int    `json:"i"`
-	Topic      string `json:"topic"`
+	CaptureID string `json:"captureId"`
+	I         int    `json:"i"`
+	Topic     string `json:"topic"`
+	// TopicBytes is the whole topic's length, when the topic a page carries is a cut of it.
+	TopicBytes int    `json:"topicBytes,omitempty"`
 	Path       string `json:"path,omitempty"`
 	Offset     int    `json:"offset"`
 	Length     int    `json:"length"`
@@ -435,6 +496,29 @@ type mcpPageResult struct {
 	Encoding   string `json:"encoding"`
 	SHA256     string `json:"sha256"`
 	Data       string `json:"data"`
+}
+
+// mcpPageEscapedMax is the most a text page may take once JSON has escaped it: a control character,
+// U+2028 and an invalid byte each become six characters. It leaves room for the page's own fields
+// under mcpMaxResult.
+const mcpPageEscapedMax = 36 << 10
+
+// mcpTopicMax is the longest topic a result carries. A topic is a device's or an app's own string,
+// and the MQTT topic limit is far above any name a device has; a result that carried one whole
+// would be cut.
+const mcpTopicMax = 1024
+
+// mcpTopicPage cuts topic to mcpTopicMax bytes at a rune start, and reports its whole length when it
+// did cut it.
+func mcpTopicPage(topic string) (string, int) {
+	if len(topic) <= mcpTopicMax {
+		return topic, 0
+	}
+	cut := mcpTopicMax
+	for cut > 0 && !utf8.RuneStart(topic[cut]) {
+		cut--
+	}
+	return topic[:cut], len(topic)
 }
 
 // mcpPage cuts the page the call asks for out of the message's text: the payload's own text (UTF-8,
@@ -476,12 +560,31 @@ func mcpPage(m sampleMsg, in mcpReadIn) (*mcpPageResult, error) {
 			end = in.Offset + 4
 		}
 	default:
-		// Text pages are cut where a rune starts, or the caller gets half a character.
+		// Text pages are cut where a rune starts, or the caller gets half a character, and under a
+		// budget of the size the page takes once JSON has escaped it: a page cut by raw bytes alone
+		// could grow sixfold on the way out and be cut again as a result that does not parse.
 		if in.Offset < len(text) && !utf8.RuneStart(text[in.Offset]) {
 			return nil, usageErr("offset %d is inside a UTF-8 character; use nextOffset from the previous page", in.Offset)
 		}
-		for end > in.Offset && end < len(text) && !utf8.RuneStart(text[end]) {
-			end--
+		// end only ever moves past whole runes, so the page ends where one starts.
+		end = in.Offset
+		cost := 0
+		for end < len(text) {
+			r, size := utf8.DecodeRuneInString(text[end:])
+			c := size
+			switch {
+			case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t':
+				c = 2
+			case r < 0x20 || r == '\u2028' || r == '\u2029' || (r == utf8.RuneError && size == 1):
+				c = 6
+			}
+			// A page always holds at least one rune, whatever its size: an empty page whose
+			// nextOffset is its own offset is a page the caller can never get past.
+			if end > in.Offset && (end+size-in.Offset > length || cost+c > mcpPageEscapedMax) {
+				break
+			}
+			end += size
+			cost += c
 		}
 	}
 	if end > len(text) {
@@ -495,11 +598,13 @@ func mcpPage(m sampleMsg, in mcpReadIn) (*mcpPageResult, error) {
 	return res, nil
 }
 
-// mcpPathSeg is one step of a path: a key, a list index, or both (key[index]).
+// mcpPathSeg is one step of a path: a key, a list index, or both (key[index]). start is where the
+// step begins in the path, so that a refusal can name the text the step came from.
 type mcpPathSeg struct {
 	key     string
 	index   int
 	isIndex bool
+	start   int
 }
 
 // mcpParsePath splits a dotted path with list indexes (a.b[3].c, [0].x, items[2]) into its steps.
@@ -511,6 +616,7 @@ func mcpParsePath(path string) ([]mcpPathSeg, error) {
 	notAddressable := usageErr("path %q: a key that holds \".\", \"[\" or \"]\" cannot be addressed; there is no way to write it", path)
 	var segs []mcpPathSeg
 	rest := path
+	at := 0 // rest's offset in path
 	for rest != "" {
 		key := rest
 		if i := strings.IndexAny(rest, ".["); i >= 0 {
@@ -523,14 +629,16 @@ func mcpParsePath(path string) ([]mcpPathSeg, error) {
 			if key == "" {
 				return nil, notAddressable // ".x", or "a..b"
 			}
-			segs = append(segs, mcpPathSeg{key: key})
+			segs = append(segs, mcpPathSeg{key: key, start: at})
+			at += len(key) + 1
 			rest = rest[1:]
 			if rest == "" {
 				return nil, usageErr("path %q ends with a dot", path)
 			}
 		case strings.HasPrefix(rest, "["):
 			if key != "" {
-				segs = append(segs, mcpPathSeg{key: key})
+				segs = append(segs, mcpPathSeg{key: key, start: at})
+				at += len(key)
 			}
 			for strings.HasPrefix(rest, "[") {
 				end := strings.IndexByte(rest, ']')
@@ -539,22 +647,26 @@ func mcpParsePath(path string) ([]mcpPathSeg, error) {
 				}
 				n, err := strconv.Atoi(rest[1:end])
 				if err != nil || n < 0 {
-					return nil, notAddressable // "[x]" names no index tnctl can read
+					// A list index is a whole number from 0: anything else is a mistake to correct,
+					// not a key that cannot be written.
+					return nil, usageErr("path %q: %s is not a list index; use a whole number from 0, like items[0]", path, rest[:end+1])
 				}
-				segs = append(segs, mcpPathSeg{index: n, isIndex: true})
+				segs = append(segs, mcpPathSeg{index: n, isIndex: true, start: at})
+				at += end + 1
 				rest = rest[end+1:]
 			}
 			if rest != "" && !strings.HasPrefix(rest, ".") && !strings.HasPrefix(rest, "[") {
 				return nil, notAddressable // "items[2]x"
 			}
 			if strings.HasPrefix(rest, ".") {
+				at++
 				rest = rest[1:]
 				if rest == "" {
 					return nil, usageErr("path %q ends with a dot", path)
 				}
 			}
 		case key != "":
-			segs = append(segs, mcpPathSeg{key: key})
+			segs = append(segs, mcpPathSeg{key: key, start: at})
 		}
 		if len(segs) == 0 {
 			return nil, usageErr("path %q does not name a key", path)
@@ -595,12 +707,11 @@ func mcpJSONPath(payload []byte, path string) (any, error) {
 		}
 		v, ok := obj[seg.key]
 		if !ok {
-			// A key that holds ".", "[" or "]" reads as several steps; say why it cannot be selected
-			// rather than that it is missing.
-			for k := range obj {
-				if strings.ContainsAny(k, ".[]") && strings.HasPrefix(k, seg.key) {
-					return nil, usageErr("path %q: the key %q at %s holds \".\", \"[\" or \"]\" and cannot be addressed", path, k, where)
-				}
+			// A key that holds ".", "[" or "]" reads as several steps: when this step's text is the
+			// start of such a key and the path ends there or at the next separator, the key was
+			// meant, and saying it is missing would send the caller looking for a typo instead.
+			if k, ok := mcpUnaddressableKey(obj, path, seg.start); ok {
+				return nil, usageErr("path %q: the key %q at %s holds \".\", \"[\" or \"]\" and cannot be addressed", path, k, where)
 			}
 			return nil, usageErr("path %q: there is no key %q at %s; it has: %s", path, seg.key, where, mcpKeyList(obj))
 		}
@@ -619,13 +730,38 @@ func mcpWhere(segs []mcpPathSeg) string {
 		switch {
 		case s.isIndex:
 			fmt.Fprintf(&b, "[%d]", s.index)
-		case i > 0 && !segs[i-1].isIndex:
+		case i > 0:
+			// A dot separates two steps wherever the one before ended, an index's ] included.
 			b.WriteString("." + s.key)
 		default:
 			b.WriteString(s.key)
 		}
 	}
 	return b.String()
+}
+
+// mcpUnaddressableKey is the object's key that the path step at start names but cannot write: it
+// holds ".", "[" or "]" and the path continues into it as if it were several steps. The path has to
+// end at that key or at a separator right after it — "a.b" for the key "a.b", not for "a.bc" — and
+// the keys are walked in order so that two such keys read the same way twice.
+func mcpUnaddressableKey(obj map[string]any, path string, start int) (string, bool) {
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		if strings.ContainsAny(k, ".[]") {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !strings.HasPrefix(path[start:], k) {
+			continue
+		}
+		switch rest := path[start+len(k):]; {
+		case rest == "", rest[0] == '.', rest[0] == '[':
+			return k, true
+		}
+	}
+	return "", false
 }
 
 // mcpKeyList names the keys an object has, at most 20 of them.

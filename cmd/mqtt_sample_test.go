@@ -106,8 +106,9 @@ func TestMqttSampleStopsAtSize(t *testing.T) {
 	if n := strings.Count(out, "\n"); n != 3 {
 		t.Errorf("%d lines, want 3: %q", n, out)
 	}
-	if !strings.Contains(errs, "stopped by size") {
-		t.Errorf("stderr %q", errs)
+	// The refused message's size is what says how near the cap the capture came.
+	if want := "stopped by size (the next message has 600 bytes)"; !strings.Contains(errs, want) {
+		t.Errorf("stderr %q lacks %q", errs, want)
 	}
 
 	// --json reports the refused message's size.
@@ -343,5 +344,79 @@ func TestMqttSampleRefusesBadTopics(t *testing.T) {
 		if _, _, err := runCLI(t, e, args...); err == nil || exitCodeOf(err) != codeUsage {
 			t.Errorf("%v: %v (exit %d), want a usage error", args, err, exitCodeOf(err))
 		}
+	}
+}
+
+// The token is read inside the open bound, by the stream itself: a token answer that blocks must not
+// hold the command past the bound, or Ctrl-C cannot reach the interrupted path.
+func TestMqttSampleTokenIsInsideTheOpenBound(t *testing.T) {
+	old := mcpSampleOpenMax
+	mcpSampleOpenMax = 100 * time.Millisecond
+	t.Cleanup(func() { mcpSampleOpenMax = old })
+	noBotMode(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	e, _ := testEnv(t, newFakePlatform(t), nil)
+	e.fleet = func() (*api.Fleet, string, string, error) {
+		return &api.Fleet{Base: srv.URL + "/fleet/teknoir-demo", Token: func(ctx context.Context) (string, error) {
+			// The platform's key file read takes its time: longer than the bound.
+			select {
+			case <-time.After(2 * time.Second):
+				return "tok", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}}, "teknoir.cloud", "teknoir-demo", nil
+	}
+	start := time.Now()
+	_, _, err := runCLI(t, e, "mqtt", "sample", "/devices/+/state/#")
+	d := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "did not open the MQTT stream within") {
+		t.Fatalf("%v, want the open bound's error", err)
+	}
+	if d > 1500*time.Millisecond {
+		t.Errorf("the command took %s: the token read is outside the bound", d)
+	}
+}
+
+// --out opens its file without truncating it and without following a link: an existing empty file
+// becomes 0600, and a link to a file that holds something is refused with the target unchanged.
+func TestMqttSampleOutOpensSafely(t *testing.T) {
+	e := mqttSampleCLIEnv(t, func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, msgEvent("/devices/d1/state/a", "hello"))
+	})
+	dir := t.TempDir()
+	// An existing empty file of mode 0644 is used, and ends 0600.
+	path := filepath.Join(dir, "cam.jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runCLI(t, e, "mqtt", "sample", "/devices/+/state/#", "--out", path); err != nil {
+		t.Fatalf("%v", err)
+	}
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+		t.Errorf("mode %o (%v), want 0600", st.Mode().Perm(), err)
+	}
+
+	// A symlink to a file that holds something is refused, and its target is left alone.
+	target := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(target, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.jsonl")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := runCLI(t, e, "mqtt", "sample", "/devices/+/state/#", "--out", link)
+	if err == nil || !strings.Contains(err.Error(), "exists and is not empty") {
+		t.Fatalf("%v, want a refusal of the non-empty target", err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep me\n" {
+		t.Errorf("the refused link's target changed: %q", b)
 	}
 }

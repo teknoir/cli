@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,9 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.Setenv("HOME", home)
 	_ = os.Setenv("USERPROFILE", home)
+	// A test that spilled a sample without a directory of its own would leave its captures in the
+	// real temp dir; they go under this run's home instead, which is removed below.
+	mcpStdioCaptureDir = func() string { return filepath.Join(home, "tnctl-captures") }
 	// Nor may the developer's shell choose a test's domain, teamspace, device, hub or bot: root.go
 	// reads every TNCTL_ variable (AutomaticEnv), and the bot and agent commands read the others.
 	// A test that needs one sets it with t.Setenv.

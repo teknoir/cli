@@ -76,7 +76,12 @@ func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, n
 	if err != nil {
 		return classify(err)
 	}
-	ts, err := tools.New(ctx, newMCPServerOpts(e, mcpServerOptions{CaptureDir: filepath.Join(workDir, "captures")}))
+	// The council cuts results itself, at 16 KiB with a reference for the rest: this server must not
+	// cut in front of it, or a whole answer reaches the council as a wrapper cut twice, with counts
+	// that disagree. Its captures are its own, and go with the session.
+	captures := newCaptureStore(filepath.Join(workDir, "captures"))
+	defer captures.removeAll()
+	ts, err := tools.New(ctx, newMCPServerOpts(e, mcpServerOptions{MaxResult: mcpCouncilMaxResult, Captures: captures}))
 	if err != nil {
 		return err
 	}

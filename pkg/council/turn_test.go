@@ -2281,3 +2281,42 @@ func TestCutResultReachesTheCritic(t *testing.T) {
 		t.Errorf("the evidence %+v is not marked truncated", in.Evidence)
 	}
 }
+
+// TestLocalToolPanicIsAnErrorResult: a panic in one of the council's own tools costs the model one
+// error result, is logged with the value, and the turn answers: a bug in a tool must not take the
+// daemon and the other turns with it.
+func TestLocalToolPanicIsAnErrorResult(t *testing.T) {
+	const name = "test_panics"
+	localTools[name] = func(*turn, json.RawMessage) tools.Result {
+		panic("boom")
+	}
+	t.Cleanup(func() { delete(localTools, name) })
+	h := newHarness(t, newWork(kindAsk, "", "what is a robot?"))
+	h.model.push(roleRoute,
+		toolStep("tool_use", apiCall{id: "tu_1", name: name}),
+		textStep("a robot is an edge computer", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	if res := p.result(); res.State != stateDone || res.Final != "a robot is an edge computer" {
+		t.Fatalf("finish %q %q %q", res.State, res.Final, res.ErrCode)
+	}
+	route := h.model.requests(roleRoute)
+	if len(route) != 2 {
+		t.Fatalf("%d route requests, want the turn to go on after the panic", len(route))
+	}
+	last := toolResults(route[1].Messages[len(route[1].Messages)-1])
+	if want := "internal error in " + name + "; the council logged it"; len(last) != 1 || last[0] != want {
+		t.Errorf("the tool_result %q, want %q", last, want)
+	}
+	logged := false
+	for _, line := range h.logs.all() {
+		if strings.Contains(line, "tool="+name) && strings.Contains(line, "boom") {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Errorf("the panic is not in the log: %q", h.logs.all())
+	}
+}

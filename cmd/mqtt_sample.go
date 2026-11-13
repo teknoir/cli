@@ -168,18 +168,31 @@ type mqttSampleWriter struct {
 }
 
 // newMqttSampleWriter opens --out, refusing a file that already holds something: the capture is
-// appended to nothing.
+// appended to nothing. It never truncates and never follows a symlink of the check's: the file is
+// opened as it is, and refused unless what was opened is a regular file of size 0, so that a path
+// swapped after the check cannot make tnctl write into something of its own.
 func newMqttSampleWriter(out, errw io.Writer, f mqttSampleFlags) (*mqttSampleWriter, error) {
 	w := &mqttSampleWriter{out: out, errw: errw, json: f.json}
 	if f.out == "" {
 		return w, nil
 	}
-	if st, err := os.Stat(f.out); err == nil && st.Size() > 0 {
-		return nil, usageErr("%s exists and is not empty: give a new file, or empty this one", f.out)
-	}
-	file, err := os.OpenFile(f.out, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	file, err := os.OpenFile(f.out, os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, newErr(codeError, "%v", err)
+	}
+	st, err := file.Stat()
+	if err == nil && !st.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file", f.out)
+	}
+	if err == nil && st.Size() > 0 {
+		err = fmt.Errorf("%s exists and is not empty: give a new file, or empty this one", f.out)
+	}
+	if err == nil {
+		err = file.Chmod(0o600)
+	}
+	if err != nil {
+		_ = file.Close()
+		return nil, usageErr("%v", err)
 	}
 	w.f, w.file = file, bufio.NewWriter(file)
 	return w, nil
@@ -265,6 +278,10 @@ func (w *mqttSampleWriter) close() error {
 // stopped it, and what the platform dropped.
 func sampleSummaryLine(s mqttSampleSummary) string {
 	line := fmt.Sprintf("%d messages, %d bytes, stopped by %s", s.Messages, s.Bytes, s.StoppedBy)
+	if s.StoppedBy == "size" && s.NextMessageBytes > 0 {
+		// The message it refused is what says how near the cap it came.
+		line += fmt.Sprintf(" (the next message has %d bytes)", s.NextMessageBytes)
+	}
 	if n := s.ServerDropped.total(); n > 0 {
 		line += fmt.Sprintf("; the platform dropped %d (%s)", n, sampleDroppedReasons(s.ServerDropped))
 	}
@@ -358,10 +375,8 @@ type keepFunc func(m *api.StreamMessage, data string) (stop string, nextMessageB
 // device published nothing".
 func mqttCollect(ctx context.Context, fl *api.Fleet, o mqttCollectOpts, keep keepFunc) (mqttCollectOutcome, error) {
 	var out mqttCollectOutcome
-	// The key is read before anything is sent: a missing login answers at once.
-	if _, err := fl.Token(ctx); err != nil {
-		return out, classify(err)
-	}
+	// The key is read inside the open bound, by MqttStream itself: read here first, a token answer
+	// that blocks would keep Ctrl-C from reaching the interrupted path below.
 	// Opening the stream has a bound of its own: the platform reads the broker login, connects and
 	// subscribes before it answers, and none of that is listening time.
 	octx, ocancel := context.WithCancelCause(ctx)

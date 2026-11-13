@@ -88,7 +88,9 @@ type sampleMsg struct {
 
 // sampleMsgOf is m's line for i: the payload as the stream sent it (text, or base64 for a binary
 // one) and its decoded bytes (the text, or what the base64 holds), which the byte count and the
-// hash are taken from.
+// hash are taken from. A base64 the standard decoder refuses is tried unpadded, which some devices
+// send; one neither decoder reads has no bytes to show, so its line carries none, counts the base64
+// text as its size and leaves the hash out rather than hashing a placeholder.
 func sampleMsgOf(i int, m *api.StreamMessage) (sampleMsg, []byte) {
 	line := sampleMsg{I: i, Topic: m.Topic, TS: m.TS, Retain: m.Retain, Encoding: "utf8", Payload: m.Payload}
 	decoded := []byte(m.Payload)
@@ -96,8 +98,13 @@ func sampleMsgOf(i int, m *api.StreamMessage) (sampleMsg, []byte) {
 		line.Encoding, line.Payload = "base64", m.PayloadBase64
 		b, err := base64.StdEncoding.DecodeString(m.PayloadBase64)
 		if err != nil {
-			// Not base64 tnctl can decode: count what such text would hold.
-			b = make([]byte, base64.StdEncoding.DecodedLen(len(m.PayloadBase64)))
+			b, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(m.PayloadBase64, "="))
+		}
+		if err != nil {
+			// Not base64 tnctl can read: its size is the text's, there are no bytes to show, and
+			// nothing to hash.
+			line.Bytes = len(m.PayloadBase64)
+			return line, nil
 		}
 		decoded = b
 	}

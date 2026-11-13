@@ -253,7 +253,8 @@ func skillsDigest() string {
 // readSkill is one page of the SKILL.md of name without its frontmatter: at most 16 KiB from
 // offset, cut back to a rune start, with a line saying the offset of the next page while there is
 // more. The digest is the guide's first 200 bytes, the same on every page. A name that is not in
-// skillNames, an offset outside the guide and an offset inside a character are errors.
+// skillNames, an offset past the guide, the offset of a non-empty guide's very end and an offset
+// inside a character are errors.
 func readSkill(name string, offset int) (text, digest string, err error) {
 	skillsOnce.Do(loadSkills)
 	s, ok := skills[name]
@@ -261,10 +262,21 @@ func readSkill(name string, offset int) (text, digest string, err error) {
 		return "", "", errors.New("there is no guide named " + cutUTF8(name, 64, "…") + "; use one of the guides your instructions list")
 	}
 	body := s.text
-	if offset < 0 || offset > len(body) {
+	if offset < 0 {
 		return "", "", fmt.Errorf("offset %d is outside the guide %q: its bytes are 0..%d", offset, name, len(body))
 	}
-	if !utf8.RuneStart(body[offset]) && offset < len(body) {
+	// The range is checked before anything is read at offset: offset == len(body) is the end of the
+	// guide, not a byte that can be inspected, and reading it would panic the daemon.
+	if offset == len(body) {
+		if body == "" {
+			return "", s.digest, nil // an empty guide has one page: the empty one
+		}
+		return "", "", fmt.Errorf("offset %d is the end of the guide %q; there is no more", offset, name)
+	}
+	if offset > len(body) {
+		return "", "", fmt.Errorf("offset must be below %d: the guide %q has %d bytes", len(body), name, len(body))
+	}
+	if !utf8.RuneStart(body[offset]) {
 		return "", "", fmt.Errorf("offset %d is inside a character: use the offset a [more: ...] line gave", offset)
 	}
 	end := offset + maxSkillText

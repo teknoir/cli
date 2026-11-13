@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -225,6 +227,9 @@ type Result struct {
 	Cut resultcut.Result
 	// Hint is what an upstream cut says to do about it.
 	Hint string
+	// UpstreamTotal is how many items the whole result had, when the tool said so: the counts inside
+	// a cut wrapper are the tool's own, and the header names this one instead.
+	UpstreamTotal int
 }
 
 // Call runs one tool. A tool that is unknown, or not allowed at level, is refused without a call;
@@ -257,8 +262,8 @@ func (s *Set) Call(ctx context.Context, level, name string, input json.RawMessag
 	}
 	text := strings.Join(parts, "\n")
 	out := Result{Text: text, Full: text, IsError: res.IsError}
-	if hint, cut := upstreamCut(text); cut {
-		out.Truncated, out.Upstream, out.Hint = true, true, hint
+	if hint, total, cut := upstreamCut(text); cut {
+		out.Truncated, out.Upstream, out.Hint, out.UpstreamTotal = true, true, hint, total
 	}
 	if len(text) > maxText {
 		// 1 KiB less than the limit leaves room for the header and the wrapper.
@@ -268,21 +273,117 @@ func (s *Set) Call(ctx context.Context, level, name string, input json.RawMessag
 	return out, nil
 }
 
-// upstreamCut reports whether text is a result its tool already cut: one JSON object with a
-// top-level "truncated": true. Its hint, when it has one, is what the tool says to do about it.
-func upstreamCut(text string) (hint string, ok bool) {
+// The hints an upstream cut gets when the tool says nothing of its own.
+const (
+	hintInspectLogs = "the platform cut the log; narrow tail or since"
+	hintInspectPod  = "the platform listed only the newest events"
+)
+
+// upstreamCut reports whether text is a result its tool already cut, and what it said about it: its
+// hint (the tool's own, or one of the defaults above) and, when it named one, how many items the
+// whole result had. A tool says it cut its result in one of four ways:
+//
+//   - a top-level "truncated": true, the server's own wrapper (mcpCut) and mcp_sample's truncated;
+//   - a top-level "truncated" object with a member that is true, which is inspect_logs
+//     (api.InspectLogsResponse: "truncated": {"bytes": …, "lines": …});
+//   - a top-level "eventsTruncated": true, which is inspect_pod;
+//   - a final line that resultcut.LineCutTrailer wrote, whose totals are in its own header.
+func upstreamCut(text string) (hint string, total int, ok bool) {
+	if r, cut := resultcut.ParseLineCutTrailer(text); cut {
+		// The line is its own header: what the tool left out is already counted there.
+		return strings.TrimPrefix(resultcut.LineCutTrailer(r), "\n"), 0, true
+	}
 	var v map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(text), &v); err != nil || v == nil {
-		return "", false
+		return "", 0, false
 	}
-	if string(bytes.TrimSpace(v["truncated"])) != "true" {
-		return "", false
+	switch {
+	case rawJSONTrue(v["truncated"]):
+		return sanitizeHint(rawString(v["hint"])), rawInt(v["totalItems"]), true
+	case jsonObjectHasTrue(v["truncated"]):
+		return sanitizeHint(firstHint(rawString(v["hint"]), hintInspectLogs)), rawInt(v["totalItems"]), true
+	case rawJSONTrue(v["eventsTruncated"]):
+		return sanitizeHint(firstHint(rawString(v["hint"]), hintInspectPod)), rawInt(v["totalItems"]), true
 	}
-	var h string
-	if raw, ok := v["hint"]; ok {
-		_ = json.Unmarshal(raw, &h)
+	return "", 0, false
+}
+
+// rawJSONTrue reports whether raw is the JSON literal true.
+func rawJSONTrue(raw json.RawMessage) bool { return string(bytes.TrimSpace(raw)) == "true" }
+
+// jsonObjectHasTrue reports whether raw is a JSON object with any member that is true.
+func jsonObjectHasTrue(raw json.RawMessage) bool {
+	if len(raw) == 0 || bytes.TrimSpace(raw)[0] != '{' {
+		return false
 	}
-	return h, true
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	for _, v := range m {
+		if rawJSONTrue(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// rawString is a JSON string value, or "" when raw is not one.
+func rawString(raw json.RawMessage) string {
+	var s string
+	_ = json.Unmarshal(raw, &s)
+	return s
+}
+
+// rawInt is a JSON integer value, or 0 when raw is not one.
+func rawInt(raw json.RawMessage) int {
+	var n int
+	_ = json.Unmarshal(raw, &n)
+	return n
+}
+
+// firstHint is the tool's own hint, or the default when it gave none.
+func firstHint(hint, def string) string {
+	if strings.TrimSpace(hint) == "" {
+		return def
+	}
+	return hint
+}
+
+// The limits of a hint and a field name in the header: the header is outside the untrusted block, so
+// what a device wrote reaches it only as a short, single line.
+const (
+	maxHintHeader  = 200
+	maxFieldHeader = 64
+)
+
+// sanitizeHint makes a tool's hint safe to put in the header: control characters (a newline would
+// start a line of the council's own) and format characters (which can reverse text, or hide a tag's
+// letters) become spaces, the untrusted block's tags are escaped as they are inside the block, and
+// the result is at most maxHintHeader bytes, cut at a rune start.
+func sanitizeHint(hint string) string {
+	clean := strings.Map(func(r rune) rune {
+		if r < 0x20 || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, hint)
+	clean = untrustedTag.ReplaceAllStringFunc(clean, func(m string) string {
+		return "&lt;" + m[1:]
+	})
+	return cutUTF8(clean, maxHintHeader)
+}
+
+// cutUTF8 is s cut to at most max bytes, at a rune start.
+func cutUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	n := max
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // errorResult is a failed or refused call, as the model sees it.
@@ -334,7 +435,13 @@ func Render(name string, r Result, ref string) (text, digest string) {
 func renderHeader(r Result, ref string) string {
 	var lines []string
 	if r.Upstream {
-		line := "RESULT PARTIAL: the tool says its result is truncated."
+		line := "RESULT PARTIAL: the tool says its result is truncated"
+		if r.UpstreamTotal > 0 && r.Cut.Truncated {
+			// Both cuts: the tool's numbers inside the wrapper are its own, and the header's are the
+			// council's; a total the tool named is the only one that counts whole items.
+			line += fmt.Sprintf(" (%d items in all; the shownItems and shownBytes inside are the tool's own cut, not what you see here)", r.UpstreamTotal)
+		}
+		line += "."
 		if r.Hint != "" {
 			line += " " + r.Hint
 		}
@@ -363,20 +470,24 @@ func renderHeader(r Result, ref string) string {
 	return strings.Join(lines, "\n")
 }
 
-// fieldOf names the object key whose array was cut.
+// fieldOf names the object key whose array was cut, cut to maxFieldHeader bytes: the header it goes
+// into is outside the untrusted block.
 func fieldOf(c resultcut.Result) string {
 	if c.Field == "" {
 		return ""
 	}
-	return fmt.Sprintf(" of %q", c.Field)
+	return fmt.Sprintf(" of %q", cutUTF8(c.Field, maxFieldHeader))
 }
 
-// untrustedTag matches the block's own tags, in any case.
-var untrustedTag = regexp.MustCompile(`(?i)</?untrusted`)
+// untrustedTag matches the block's own tags, in any case, and the ways a device can space, case or
+// split one to slip past: whitespace, a NUL or a backslash between the "<" and the name, and a "/"
+// before it anywhere. Only the "<" is escaped, so the text stays readable.
+var untrustedTag = regexp.MustCompile(`(?i)<[\s\x00/\\]*untrusted`)
 
 // Untrusted is text inside the block that says where it came from: source, and the sha256 of the
-// whole text the shown part belongs to. An <untrusted or </untrusted inside the text is escaped,
-// so a payload cannot close the block and pass for the platform's own words.
+// whole text the shown part belongs to. An <untrusted or </untrusted inside the text is escaped, in
+// any case and with a "/", a backslash, a NUL or white space between the bracket and the name, so
+// that a payload cannot close the block and pass for the platform's own words.
 func Untrusted(source string, whole []byte, shown string) string {
 	sum := sha256.Sum256(whole)
 	var b strings.Builder

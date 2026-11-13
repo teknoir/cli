@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // testFacts is the facts JSON of a test bot.
@@ -236,14 +237,33 @@ func TestReadSkill(t *testing.T) {
 			t.Errorf("readSkill(%q): %v", name, err)
 		}
 	}
-	// An offset outside the guide, and one inside a character, are errors.
+	// An offset before the guide, past it, at its very end and inside a character are errors, and
+	// none of them panics: the end of a guide is not a byte to look at.
 	_, _, err = readSkill("teknoir-platform", -1)
 	if err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Errorf("offset -1: %v", err)
 	}
+	body := skills["teknoir-platform"].text
 	_, _, err = readSkill("teknoir-platform", 1<<20)
-	if err == nil || !strings.Contains(err.Error(), "outside") {
+	if err == nil || !strings.Contains(err.Error(), "offset must be below") || !strings.Contains(err.Error(), strconv.Itoa(len(body))) {
 		t.Errorf("a far offset: %v", err)
+	}
+	if page, digest, err := readSkill("teknoir-platform", len(body)); err == nil || page != "" || digest != "" ||
+		!strings.Contains(err.Error(), "is the end of the guide") || !strings.Contains(err.Error(), "there is no more") {
+		t.Errorf("offset len(body): %q, %q, %v", page, digest, err)
+	}
+	// The last character's offset still reads: the page is that character.
+	if last := len(body) - 1; utf8.RuneStart(body[last]) {
+		if page, _, err := readSkill("teknoir-platform", last); err != nil || page != body[last:] {
+			t.Errorf("the last character's offset: %q, %v", page, err)
+		}
+	}
+	// An empty guide has one page, at offset 0: reading it is not a panic either.
+	saved := skills["teknoir-platform"]
+	skills["teknoir-platform"] = skill{description: saved.description}
+	t.Cleanup(func() { skills["teknoir-platform"] = saved })
+	if page, _, err := readSkill("teknoir-platform", 0); err != nil || page != "" {
+		t.Errorf("offset 0 of an empty guide: %q, %v", page, err)
 	}
 }
 

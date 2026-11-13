@@ -141,9 +141,12 @@ preview**: a payload over 4096 bytes (a binary one over 3072) comes back cut, ma
 
 `mqtt_get_sample` takes the same `topics`, `seconds` (default 5, at most 30) and `max` (default 50,
 at most 200) plus `maxBytes` (default 2 MiB, at most 8 MiB) and returns every payload **whole**. A
-sample of at most 12288 payload bytes comes back inline. A larger one is written to a capture that
-lasts 30 minutes, and the answer is an index: one entry per message with `kind` (`json`, `text`,
-`jpeg`, `png`, `gzip`, `binary`), `sha256`, `bytes` and a `preview`, plus a `captureId`.
+sample whose payloads add up to at most 12288 bytes and whose answer fits comes back inline;
+otherwise it is written to a capture that lasts 30 minutes, and the answer is an index: one entry per
+message with `kind` (`json`, `text`, `jpeg`, `png`, `gzip`, `binary`), `sha256`, `bytes` and a
+`preview`, plus a `captureId`. An index too long for the answer drops previews from its last message
+backwards (`previewsOmitted`) and then leaves messages out of its list (`omitted`); every message is
+still readable by its `i`.
 
 Read the index first and take only what the task needs: a 256 KiB payload is about 22 pages.
 
@@ -154,8 +157,8 @@ Read the index first and take only what the task needs: a 256 KiB payload is abo
 - `mqtt_read` with `path` returns one field of a JSON payload marshalled compactly, which is far
   cheaper than paging: `path=detections[0].label`, `path=data.items[2].id`, `path=data`. A missing
   key or index names the first step that failed and the keys or length it found there.
-- A truncated (cut) answer from any tool carries `… truncated` at its end: page more, or narrow the
-  query, rather than treating the text as the whole payload.
+- A result that is cut says so (a top-level "truncated" field or a RESULT PARTIAL line before it): page
+  it (mqtt_read, read_result) or narrow the query; never treat it as the whole payload.
 
 On the command line, `tnctl mqtt sample` is the same finite capture with whole payloads, for a
 person or an agent that can run commands.

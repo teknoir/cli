@@ -8,7 +8,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -62,10 +65,10 @@ func Cut(text string, max int) Result {
 		if r, ok := cutArray(text, arr, max); ok {
 			return r
 		}
-		// Not even one element fits: the head of the text, but the counts still say how many
-		// elements the whole text has.
+		// Not even one element fits: the head of the text, but the counts still say nothing whole
+		// was shown and how many elements the whole text has.
 		r := cutLines(text, max)
-		r.TotalItems, r.Unit = len(arr.elements), "items"
+		r.ShownItems, r.TotalItems, r.Unit = 0, len(arr.elements), "items"
 		return r
 	}
 	if obj, ok := parseObject(text); ok {
@@ -325,4 +328,38 @@ func lineCount(text string) int {
 		n++
 	}
 	return n
+}
+
+// LineCutTrailer is the line a line cut ends with: how much of the text and how many of its lines
+// the model sees, and what to do about the rest. A cut at whole items says the same in the
+// caller's own wrapper; this one is for a text that has no structure to cut at.
+func LineCutTrailer(r Result) string {
+	return fmt.Sprintf("\n… truncated: shown %d of %d bytes, %d of %d %s; narrow the query",
+		r.ShownBytes, r.TotalBytes, r.ShownItems, r.TotalItems, r.Unit)
+}
+
+// lineCutTrailerRe is LineCutTrailer's line, whole.
+var lineCutTrailerRe = regexp.MustCompile(`^… truncated: shown (\d+) of (\d+) bytes, (\d+) of (\d+) (lines|items); narrow the query$`)
+
+// ParseLineCutTrailer reads a final line of text as LineCutTrailer wrote it: the bytes, the items
+// and the unit it names. A text whose last line is not that line is not a cut.
+func ParseLineCutTrailer(text string) (Result, bool) {
+	line := text[strings.LastIndexByte(text, '\n')+1:]
+	m := lineCutTrailerRe.FindStringSubmatch(line)
+	if m == nil {
+		return Result{}, false
+	}
+	// The groups are digits; a number too long for an int is not one a cut wrote.
+	n := make([]int, 4)
+	for i := range n {
+		v, err := strconv.Atoi(m[i+1])
+		if err != nil {
+			return Result{}, false
+		}
+		n[i] = v
+	}
+	return Result{
+		Truncated:  true,
+		ShownBytes: n[0], TotalBytes: n[1], ShownItems: n[2], TotalItems: n[3], Unit: m[5],
+	}, true
 }

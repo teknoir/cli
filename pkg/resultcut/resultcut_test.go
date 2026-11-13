@@ -184,6 +184,27 @@ func TestCutArrayNoElementFits(t *testing.T) {
 	if r.ContinueAt != len(r.Shown) {
 		t.Errorf("ContinueAt = %d, want %d", r.ContinueAt, len(r.Shown))
 	}
+
+	// An indented array whose first element alone is over the cap: not one whole element is shown,
+	// and the counts say 0 items rather than counting the lines of the cut.
+	keys := make([]string, 0, 400)
+	for i := 0; i < 400; i++ {
+		keys = append(keys, fmt.Sprintf(`"key%03d":%d`, i, i))
+	}
+	var ind bytes.Buffer
+	if err := json.Indent(&ind, []byte(`[{`+strings.Join(keys, ",")+`},{"a":1}]`), "", "  "); err != nil {
+		t.Fatal(err)
+	}
+	if ind.Len() <= 4096 {
+		t.Fatalf("the indented fixture is only %d bytes", ind.Len())
+	}
+	r = Cut(ind.String(), 4096)
+	if !r.Truncated || r.Unit != "items" {
+		t.Fatalf("Cut = %+v", r)
+	}
+	if r.ShownItems != 0 || r.TotalItems != 2 {
+		t.Errorf("ShownItems = %d of %d, want 0 of 2", r.ShownItems, r.TotalItems)
+	}
 }
 
 func TestCutObjectTwoArrays(t *testing.T) {
@@ -355,6 +376,31 @@ func TestCutRandomArrays(t *testing.T) {
 			if fmt.Sprint(a) != fmt.Sprint(b) {
 				t.Fatalf("round %d: element %d = %v, want %v", round, i, a, b)
 			}
+		}
+	}
+}
+
+// The trailer of a line cut reads back as the numbers the cut wrote.
+func TestLineCutTrailerRoundTrip(t *testing.T) {
+	for _, r := range []Result{
+		{Truncated: true, ShownBytes: 14798, TotalBytes: 48123, ShownItems: 12, TotalItems: 40, Unit: "items"},
+		{Truncated: true, ShownBytes: 1000, TotalBytes: 4000, ShownItems: 0, TotalItems: 2, Unit: "items"},
+		{Truncated: true, ShownBytes: 900, TotalBytes: 3000, ShownItems: 9, TotalItems: 30, Unit: "lines"},
+	} {
+		text := "the head of the text" + LineCutTrailer(r)
+		got, ok := ParseLineCutTrailer(text)
+		if !ok {
+			t.Fatalf("the trailer %q is not recognised", LineCutTrailer(r))
+		}
+		if got.ShownBytes != r.ShownBytes || got.TotalBytes != r.TotalBytes ||
+			got.ShownItems != r.ShownItems || got.TotalItems != r.TotalItems || got.Unit != r.Unit || !got.Truncated {
+			t.Errorf("parsed %+v, want %+v", got, r)
+		}
+	}
+	// A text that does not end with the trailer is not a cut.
+	for _, text := range []string{"", "shown 1 of 2 bytes", "… truncated: shown 1 of 2 bytes, 1 of 2 lines", LineCutTrailer(Result{Unit: "lines"}) + "\n"} {
+		if _, ok := ParseLineCutTrailer(text); ok {
+			t.Errorf("%q was read as a cut", text)
 		}
 	}
 }

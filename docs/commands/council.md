@@ -160,25 +160,34 @@ claim when it sets none:
 
 ## When a tool result is too long
 
-A tool result is cut to 16 KiB before a member sees it, and the tool's own server cuts at 48 KiB before
-that. Neither cut is silent: the member gets a result that says what it is missing.
+A tool result is cut to 16 KiB before a member sees it. The MCP server the council runs in-process does
+not cut in front of that — its own cap is 1 MiB, so that it only guards against a runaway answer — since a
+48 KiB cut of its own would reach the council as a wrapper it then cuts again, with counts that disagree.
+Neither cut is silent: the member gets a result that says what it is missing.
 
 - **The header.** A result a member sees only part of starts with a `RESULT PARTIAL` line:
-  `RESULT PARTIAL: shown 15360 of 48123 bytes, 12 of 40 items (ref r1). Do not infer missing items, counts
-  or absences; read_result with ref r1 and offset 15360 gives the rest, or narrow the query.` The bytes and
+  `RESULT PARTIAL: shown 14798 of 48123 bytes, 12 of 40 items (ref r1). Do not infer missing items, counts
+  or absences; read_result with ref r1 and offset 14796 gives the rest, or narrow the query.` The bytes and
   the items are counted, `of "<field>"` names the object's array that was cut, and the offset is where the
-  unseen rest starts. A tool that cut its own result (the MCP server's `{"truncated": true}` wrapper, an
-  MQTT sample) gets the first sentence instead, with its own hint.
-- **`read_result`** reads the rest: `{"ref": "r1", "offset": 15360}` gives up to 12288 bytes of the whole
-  result from that offset, after a line `PAGE: bytes 15360..27648 of 48123 (ref r1); nextOffset 27648`. A
+  unseen rest starts: in an indented array, right after the last element shown, before the comma that
+  precedes the next one (the closing bracket the cut put back is not part of the original text). A tool
+  that cut its own result (a `{"truncated": true}` wrapper, an `inspect_*` answer that says so, an MQTT
+  sample) gets a first line saying so, with its own hint and, when the tool named one, the total; when the
+  council cuts that result as well, the cut line follows it and the first line says whose numbers the
+  wrapper's are.
+- **`read_result`** reads the rest: `{"ref": "r1", "offset": 14796}` gives up to 12288 bytes of the whole
+  result from that offset, after a line `PAGE: bytes 14796..27084 of 48123 (ref r1); nextOffset 27084`. A
   page joins with what was shown into the tool's own text, byte for byte. The offset must be on a rune
   boundary; an unknown reference and an offset outside the result are error results.
 - **The untrusted tags.** Every MCP tool result, and every page, is inside
   `<untrusted source="tool:<name>" sha256="…">…</untrusted>`: the source, and the SHA-256 of the whole
-  result, so a page is recognizable as part of the result it came from. An `<untrusted` or `</untrusted`
-  in the result itself is escaped, so a device cannot close the block and pass for the platform's own
-  words. The prompts tell the members that what is inside the tags comes from the platform and its
-  devices. A refusal made by the council itself, and a guide from `read_skill`, are not wrapped.
+  result, so a page is recognizable as part of the result it came from. In the result itself, a `<` that
+  opens `untrusted` — in any case, and with any run of white space, `/`, `\` or NUL between the `<` and
+  the name, so that `</untrusted>`, `</ untrusted>`, `< /untrusted>`, `<\/untrusted>` and `<\0/untrusted>`
+  all count — is escaped to `&lt;`, and nothing else is: a device cannot close the block or open one of
+  its own, and its text stays readable. The prompts tell the members that what is inside the tags comes
+  from the platform and its devices. A refusal made by the council itself, and a guide from `read_skill`,
+  are not wrapped.
 - **The store.** A result is kept whole only when it was cut: at most 16 MiB per turn, in memory, gone
   with the turn. Past the cap the member gets no reference, and its header says `the rest is not kept`.
 - **The Critic's rule.** The Critic's input counts the evidence entries that rest on a cut result

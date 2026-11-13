@@ -1042,25 +1042,51 @@ func (t *turn) storeResult(name string, res tools.Result) string {
 }
 
 // callTool runs one tool: the council's own read_skill and read_result, or one of the MCP server's.
+// A local tool runs under a recover: a bug in one of them must cost the model one tool result, not
+// end the daemon with the turns that run in it.
 func (t *turn) callTool(ctx context.Context, level string, b toolUse) (tools.Result, error) {
-	switch b.Name {
-	case toolReadResult:
-		return t.readResult(b.Input), nil
-	case toolReadSkill:
-	default:
-		return t.d.cfg.Tools.Call(ctx, level, b.Name, b.Input)
+	if f, ok := localTools[b.Name]; ok {
+		return t.callLocalTool(b, f), nil
 	}
+	return t.d.cfg.Tools.Call(ctx, level, b.Name, b.Input)
+}
+
+// localTool is one of the council's own tools, which no MCP server provides.
+type localTool func(t *turn, input json.RawMessage) tools.Result
+
+// localTools are the council's own tools, by name. A variable so that a test can add one: a panic
+// in a tool is tested with a tool of the test's, not by breaking a real one.
+var localTools = map[string]localTool{
+	toolReadResult: func(t *turn, input json.RawMessage) tools.Result { return t.readResult(input) },
+	toolReadSkill:  runReadSkill,
+}
+
+// callLocalTool runs the council's own tool and turns its panic into an error result, which is
+// logged with the value: the turn goes on, and the operator sees what happened.
+func (t *turn) callLocalTool(b toolUse, f localTool) (res tools.Result) {
+	defer func() {
+		if v := recover(); v != nil {
+			t.d.cfg.Logf("turn=%s tool=%s panicked: %v", t.work.ID, b.Name, v)
+			msg := "internal error in " + b.Name + "; the council logged it"
+			res = tools.Result{Text: msg, Digest: msg, IsError: true}
+		}
+	}()
+	return f(t, b.Input)
+}
+
+// runReadSkill is the read_skill tool: one page of a guide.
+func runReadSkill(t *turn, input json.RawMessage) tools.Result {
 	var in struct {
 		Name   string `json:"name"`
 		Offset int    `json:"offset"`
 	}
-	_ = json.Unmarshal(b.Input, &in)
+	_ = json.Unmarshal(input, &in)
 	text, digest, err := readSkill(in.Name, in.Offset)
 	if err != nil {
 		msg := err.Error()
-		return tools.Result{Text: msg, Digest: msg, IsError: true}, nil
+		return tools.Result{Text: msg, Digest: msg, IsError: true}
 	}
-	return tools.Result{Text: text, Digest: digest}, nil
+	return tools.Result{Text: text, Digest: digest}
 }
 
 // memberResult is one member's report of the turn.
