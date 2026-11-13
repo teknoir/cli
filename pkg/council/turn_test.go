@@ -17,6 +17,7 @@ import (
 	"github.com/teknoir/cli/pkg/council/hub"
 	"github.com/teknoir/cli/pkg/council/model"
 	"github.com/teknoir/cli/pkg/council/tools"
+	"github.com/teknoir/cli/pkg/resultcut"
 )
 
 // ---------- helpers ----------
@@ -2206,5 +2207,77 @@ func TestFleetMaxTokensRetry(t *testing.T) {
 	}
 	if len(p.ofType(hub.EventToolCall)) != 0 {
 		t.Errorf("a cut-off tool call ran: %v", h.tools.called())
+	}
+}
+
+// ---------- a cut tool result, as the Critic and the events see it ----------
+
+// cutResult is a result Set cut: shown is a fake part, and the whole text is full.
+func cutResult(full, shown string) tools.Result {
+	return tools.Result{
+		Text: full, Full: full, Truncated: true,
+		Cut: resultcut.Result{Shown: shown, Truncated: true, ShownBytes: len(shown), TotalBytes: len(full),
+			ShownItems: 2, TotalItems: 9, Unit: "items", ContinueAt: len(shown)},
+	}
+}
+
+// A member's cut result: the tool_result the model sees has the header and the wrapper, the
+// transcript's event carries only the digest, and the Critic's evidence says the call was truncated
+// and how many were.
+func TestCutResultReachesTheCritic(t *testing.T) {
+	full := "[\n" + strings.Repeat("  {\"name\":\"x\"},\n", 9) + "  {\"name\":\"x\"}\n]"
+	shown := full[:20] + "\n]"
+	h := newHarness(t, newWork(kindAsk, "", "which devices are there?"))
+	h.tools.results["list_robots"] = cutResult(full, shown)
+	h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(memberFleet, "the devices", "x"))))
+	h.model.push(roleFleet,
+		toolStep("tool_use", apiCall{id: "tu_f1", name: "list_robots", input: map[string]any{}}),
+		textStep(reportJSON("nine of them, probably"), "end_turn"))
+	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
+	h.model.push(roleAnswer, textStep("the final", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	// The model's tool_result: the header, then the block.
+	fleet := h.model.requests(roleFleet)
+	results := toolResults(fleet[1].Messages[len(fleet[1].Messages)-1])
+	if len(results) != 1 {
+		t.Fatalf("%d tool results", len(results))
+	}
+	if !strings.HasPrefix(results[0], "RESULT PARTIAL: shown ") {
+		t.Errorf("the result starts %q, want the partial header", memberHeading(results[0]))
+	}
+	if !strings.Contains(results[0], "<untrusted source=\"tool:list_robots\"") {
+		t.Error("the result is not in the untrusted block")
+	}
+	if strings.Contains(results[0], "[cut]") {
+		t.Error("the result still carries [cut]")
+	}
+
+	// The event's summary is the digest: the header and the head of the shown text.
+	done := p.ofType(hub.EventToolResult)
+	if len(done) != 1 {
+		t.Fatalf("%d tool_result events", len(done))
+	}
+	if d := dataOf(t, done[0]); !strings.HasPrefix(d["summary"].(string), "RESULT PARTIAL: shown ") {
+		t.Errorf("the event's summary %q", d["summary"])
+	}
+
+	// The Critic: the call's evidence is marked truncated, and the input counts it.
+	critic := h.model.requests(roleCritic)
+	if len(critic) != 1 {
+		t.Fatalf("%d critic requests", len(critic))
+	}
+	payload := paramText(critic[0].Messages[0])
+	var in critiqueInput
+	if err := json.Unmarshal([]byte(payload), &in); err != nil {
+		t.Fatalf("the Critic's input: %v", err)
+	}
+	if in.TruncatedCalls != 1 {
+		t.Errorf("truncatedCalls = %d, want 1: %s", in.TruncatedCalls, payload)
+	}
+	if len(in.Evidence) != 1 || !in.Evidence[0].Truncated {
+		t.Errorf("the evidence %+v is not marked truncated", in.Evidence)
 	}
 }

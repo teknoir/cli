@@ -289,7 +289,7 @@ func (f *fakeTools) Call(ctx context.Context, level, name string, input json.Raw
 	if ok {
 		return res, nil
 	}
-	return tools.Result{Text: "result of " + name, Digest: "digest of " + name}, nil
+	return tools.Result{Text: "result of " + name, Full: "result of " + name, Digest: "digest of " + name}, nil
 }
 
 // called is the names of the tools called, in order.

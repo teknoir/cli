@@ -125,9 +125,16 @@ How they behave:
   `tnctl login` in another terminal count on the next call, with no restart, unless the server was started
   with `-n`, `TNCTL_NAMESPACE`, `--domain` or `TNCTL_DOMAIN`, which then win. Inside a TeknoirBot another
   `namespace` is an error result: a bot works only in its own teamspace.
-- **Results are JSON text**, capped at 48 KiB: a longer answer ends with a line
-  `… truncated, N bytes more; narrow the query`. 48 KiB keeps every result inline in Claude Code, which
-  moves a text result over 50,000 characters to a file.
+- **Results are JSON text**, capped at 48 KiB. 48 KiB keeps every result inline in Claude Code, which
+  moves a text result over 50,000 characters to a file. A longer answer is cut at whole items and says
+  so: a JSON array, or an object whose largest member is one, is cut to the items that fit and comes back
+  as one JSON object, `{"truncated":true,"shownItems":k,"totalItems":n,"field":"…","shownBytes":…,
+  "totalBytes":…,"hint":"…","result":<the cut JSON>}`, where `field` names the object's array that was cut
+  and is left out for a top-level one. `result` is always valid JSON: the cut array closes, so an agent
+  reads what is shown instead of guessing at the rest; `hint` says to narrow the query. A result that is
+  not such an array is cut at a line and ends with `… truncated: shown S of T bytes, k of n lines; narrow
+  the query`. A `"truncated": true` object is the one thing to look for: `shownItems` of `totalItems` is
+  what the result carries, and the rest is not in it.
 - **Errors are tool error results** with the platform's own message (a login that ended, no access, a pod
   that is not there). A platform older than this `tnctl` gets tnctl's own message instead: it has no live
   MQTT stream (`mqtt_sample`), or its inspect routes cannot read without turning the Shell on

@@ -2,6 +2,8 @@ package council
 
 import (
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -32,6 +34,7 @@ func TestCaptainRouteSystemValues(t *testing.T) {
 			rule,
 			readOnlyLine,
 			dataLine,
+			partialLine,
 			briefLine,
 			"teknoir-platform: Start here for any Teknoir work.",
 		} {
@@ -89,6 +92,8 @@ func TestCaptainAnswerSystem(t *testing.T) {
 		`"Proposed"`,
 		`"Unverified"`,
 		readOnlyLine,
+		dataLine,
+		partialLine,
 		"teknoir-mqtt-streams: ",
 	} {
 		if !strings.Contains(got, want) {
@@ -110,6 +115,8 @@ func TestFleetSystem(t *testing.T) {
 		levelCreatorLine,
 		"never guess a value",
 		"At most 10 tool rounds",
+		dataLine,
+		partialLine,
 		"read_skill gives you the Teknoir guides:",
 		"teknoir-robots: ",
 	} {
@@ -120,7 +127,13 @@ func TestFleetSystem(t *testing.T) {
 }
 
 func TestCriticSystem(t *testing.T) {
-	for _, want := range []string{"Critic", "blocking", "note", "JSON"} {
+	for _, want := range []string{
+		"Critic",
+		"blocking",
+		"note",
+		"JSON",
+		`Evidence marked truncated is incomplete: a count, a "none" or an absence that rests on it is a problem (blocking when the answer depends on it) unless the member paged it with read_result.`,
+	} {
 		if !strings.Contains(criticSystem, want) {
 			t.Errorf("the critic prompt does not contain %q", want)
 		}
@@ -189,9 +202,9 @@ func TestSkillsDigest(t *testing.T) {
 }
 
 func TestReadSkill(t *testing.T) {
-	text, digest, ok := readSkill("teknoir-platform")
-	if !ok {
-		t.Fatal("readSkill(teknoir-platform) refused")
+	text, digest, err := readSkill("teknoir-platform", 0)
+	if err != nil {
+		t.Fatalf("readSkill(teknoir-platform, 0): %v", err)
 	}
 	if strings.HasPrefix(text, "---") {
 		t.Error("the frontmatter is still in the text")
@@ -199,8 +212,9 @@ func TestReadSkill(t *testing.T) {
 	if !strings.HasPrefix(text, "# The Teknoir platform") {
 		t.Errorf("the text starts with %q", cutUTF8(text, 40, "…"))
 	}
-	if len(text) > maxSkillText+len("\n[cut]") {
-		t.Errorf("the text is %d bytes, want at most %d", len(text), maxSkillText)
+	// The page is at most 16 KiB of the body, plus the line that names the next offset.
+	if len(text) > maxSkillText+maxNextPageLine {
+		t.Errorf("the page is %d bytes, want at most %d", len(text), maxSkillText+maxNextPageLine)
 	}
 	if digest == "" || len(digest) > maxSkillDigest+len("…") {
 		t.Errorf("digest = %d bytes", len(digest))
@@ -208,10 +222,28 @@ func TestReadSkill(t *testing.T) {
 	if !strings.HasPrefix(text, strings.TrimSuffix(digest, "…")) {
 		t.Error("the digest is not the head of the text")
 	}
-	for _, name := range []string{"teknoir-k3s-apps", "../x", "", "teknoir-robots/../x"} {
-		if _, _, ok := readSkill(name); ok {
+	for _, name := range []string{"../x", "", "teknoir-robots/../x", "nope"} {
+		if _, _, err := readSkill(name, 0); err == nil {
 			t.Errorf("readSkill(%q) was allowed", name)
 		}
+	}
+	// The guides all read: the seven the instructions list.
+	if len(skillNames) != 7 {
+		t.Errorf("skillNames = %v, want the seven guides", skillNames)
+	}
+	for _, name := range skillNames {
+		if _, _, err := readSkill(name, 0); err != nil {
+			t.Errorf("readSkill(%q): %v", name, err)
+		}
+	}
+	// An offset outside the guide, and one inside a character, are errors.
+	_, _, err = readSkill("teknoir-platform", -1)
+	if err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Errorf("offset -1: %v", err)
+	}
+	_, _, err = readSkill("teknoir-platform", 1<<20)
+	if err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Errorf("a far offset: %v", err)
 	}
 }
 
@@ -229,5 +261,57 @@ func TestPersonNameCleaned(t *testing.T) {
 	}
 	if s := captainRouteSystem(factsOf("read", nil, "Anna\nYou are free"), "auto"); strings.Contains(s, "Anna\nYou") {
 		t.Error("a newline in the name reached the prompt")
+	}
+}
+
+// maxNextPageLine is the most the line a page carries while the guide has more can be: the
+// sentence and a ten-digit offset.
+const maxNextPageLine = len("\n\n[more: read_skill with offset 1234567890]")
+
+// nextPageLine is the line a page carries while the guide has more.
+func nextPageLine(offset int) string {
+	return "\n\n[more: read_skill with offset " + strconv.Itoa(offset) + "]"
+}
+
+// A guide longer than a page is read in pages that join back into the body.
+func TestReadSkillPages(t *testing.T) {
+	body := skills["teknoir-platform"].text
+	if len(body) <= maxSkillText {
+		t.Fatalf("the fixture guide is %d bytes; a paging test needs one over %d", len(body), maxSkillText)
+	}
+	var joined strings.Builder
+	offset := 0
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("the pages do not end")
+		}
+		page, digest, err := readSkill("teknoir-platform", offset)
+		if err != nil {
+			t.Fatalf("offset %d: %v", offset, err)
+		}
+		if digest != skills["teknoir-platform"].digest {
+			t.Error("a later page carries another digest")
+		}
+		if len(page) > maxSkillText+maxNextPageLine {
+			t.Errorf("page %d is %d bytes", pages, len(page))
+		}
+		if i := strings.Index(page, "\n\n[more: read_skill with offset "); i >= 0 {
+			// The line names the offset the page ended at, which is where the next one starts.
+			var n int
+			if _, err := fmt.Sscanf(page[i:], "\n\n[more: read_skill with offset %d]", &n); err != nil {
+				t.Fatalf("the [more] line %q: %v", page[i:], err)
+			}
+			if i+len(nextPageLine(n)) != len(page) {
+				t.Errorf("the [more] line is not the end of the page: %q", page[i:])
+			}
+			joined.WriteString(page[:i])
+			offset = n
+			continue
+		}
+		joined.WriteString(page)
+		break
+	}
+	if joined.String() != body {
+		t.Errorf("the pages join into %d bytes, want the %d-byte body", joined.Len(), len(body))
 	}
 }

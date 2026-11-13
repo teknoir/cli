@@ -20,6 +20,7 @@ import (
 
 	"github.com/teknoir/cli/pkg/api"
 	"github.com/teknoir/cli/pkg/config"
+	"github.com/teknoir/cli/pkg/resultcut"
 )
 
 // mcpInstructions is what the server tells the agent that connects to it.
@@ -120,20 +121,48 @@ func mcpResult(raw json.RawMessage) *mcp.CallToolResult {
 			text = buf.String()
 		}
 	}
-	if full := len(text); full > mcpMaxResult {
-		// Prefer the last whole line; a long log line or payload is cut where a rune starts.
-		cut := mcpMaxResult
-		if i := strings.LastIndex(text[:mcpMaxResult], "\n"); i >= 24<<10 {
-			cut = i
-		} else {
-			for cut > 0 && !utf8.RuneStart(text[cut]) {
-				cut--
-			}
-		}
-		text = text[:cut] + fmt.Sprintf("\n… truncated, %d bytes more; narrow the query", full-cut)
-	}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: mcpCut(text)}}}
 }
+
+// mcpCut is text cut to mcpMaxResult. A result that is an array, or an object whose largest member
+// is one, is cut at whole items into one JSON object that says how much is shown and carries the
+// cut JSON in "result", so an agent reads valid JSON and knows what it is missing. Anything else is
+// cut at a line and ends with a sentence saying so. The cut itself is 1 KiB short of the cap, which
+// leaves room for the wrapper.
+func mcpCut(text string) string {
+	if len(text) <= mcpMaxResult {
+		return text
+	}
+	cut := resultcut.Cut(text, mcpMaxResult-1024)
+	if cut.Unit == "items" && json.Valid([]byte(cut.Shown)) {
+		return mcpCutObject(cut)
+	}
+	return cut.Shown + fmt.Sprintf("\n… truncated: shown %d of %d bytes, %d of %d %s; narrow the query",
+		cut.ShownBytes, cut.TotalBytes, cut.ShownItems, cut.TotalItems, cut.Unit)
+}
+
+// mcpCutObject is the object a cut at whole items gives: what was cut, the hint, and the cut JSON.
+func mcpCutObject(cut resultcut.Result) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `{"truncated":true,"shownItems":%d,"totalItems":%d`, cut.ShownItems, cut.TotalItems)
+	if cut.Field != "" {
+		field, err := json.Marshal(cut.Field)
+		if err != nil {
+			field = []byte(`""`)
+		}
+		fmt.Fprintf(&b, `,"field":%s`, field)
+	}
+	hint, _ := json.Marshal(mcpCutHint)
+	fmt.Fprintf(&b, `,"shownBytes":%d,"totalBytes":%d,"hint":%s,"result":`,
+		cut.ShownBytes, cut.TotalBytes, hint)
+	b.WriteString(cut.Shown)
+	b.WriteString("}")
+	return b.String()
+}
+
+// mcpCutHint is what the wrapper tells an agent to do about a cut result: the inputs that narrow
+// these results.
+const mcpCutHint = "The result was cut at whole items to fit 48 KiB: narrow the query (labels, robot, device, tail, since) for the rest."
 
 // mcpFleet is the fleet client of one tool call: the configured teamspace, or ns when the call names
 // another (never in bot mode).

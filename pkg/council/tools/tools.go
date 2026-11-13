@@ -5,13 +5,19 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/teknoir/cli/pkg/resultcut"
 )
 
 // Tool levels. A council member is given one of them.
@@ -199,15 +205,26 @@ func stringsOf(v any) []string {
 
 // Result is what one tool call gives the model.
 type Result struct {
-	// Text is the tool's text content joined with "\n", cut to 16 KiB on a UTF-8 boundary and
-	// marked "[cut]" when it was longer.
+	// Text is the tool's text content joined with "\n"; for a refusal it is the refusal's sentence.
 	Text string
-	// Digest is the first 2 KiB of Text for the transcript, with "…" when it was cut.
+	// Digest overrides the transcript's digest when the result brings a shorter one of its own: a
+	// guide's first 200 bytes. Empty means Render cuts the text it shows.
 	Digest string
 	// IsError reports that the call failed, or was refused.
 	IsError bool
-	// Cut reports that Text is shorter than what the tool returned.
-	Cut bool
+	// Truncated reports that the model does not see the whole result: either Set cut it, or the
+	// tool said it cut it itself.
+	Truncated bool
+	// Upstream reports that the tool said its result is truncated.
+	Upstream bool
+	// Full is the whole text, for the turn's result store; the model never gets it as it is. A
+	// result that did not come from an MCP tool (a refusal, a guide, an override) leaves it empty,
+	// and Render then shows Text without the untrusted wrapper.
+	Full string
+	// Cut is the cut of Full when it is over the limit, and zero otherwise.
+	Cut resultcut.Result
+	// Hint is what an upstream cut says to do about it.
+	Hint string
 }
 
 // Call runs one tool. A tool that is unknown, or not allowed at level, is refused without a call;
@@ -238,30 +255,141 @@ func (s *Set) Call(ctx context.Context, level, name string, input json.RawMessag
 			parts = append(parts, text.Text)
 		}
 	}
-	out := result(strings.Join(parts, "\n"))
-	out.IsError = res.IsError
+	text := strings.Join(parts, "\n")
+	out := Result{Text: text, Full: text, IsError: res.IsError}
+	if hint, cut := upstreamCut(text); cut {
+		out.Truncated, out.Upstream, out.Hint = true, true, hint
+	}
+	if len(text) > maxText {
+		// 1 KiB less than the limit leaves room for the header and the wrapper.
+		out.Cut = resultcut.Cut(text, maxText-1024)
+		out.Truncated = true
+	}
 	return out, nil
 }
 
-// result cuts a tool's text for the model and its digest for the transcript.
-func result(text string) Result {
-	out := Result{Text: text}
-	if len(out.Text) > maxText {
-		out.Text = out.Text[:utf8Cut(out.Text, maxText)] + "\n[cut]"
-		out.Cut = true
+// upstreamCut reports whether text is a result its tool already cut: one JSON object with a
+// top-level "truncated": true. Its hint, when it has one, is what the tool says to do about it.
+func upstreamCut(text string) (hint string, ok bool) {
+	var v map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &v); err != nil || v == nil {
+		return "", false
 	}
-	out.Digest = out.Text
-	if len(out.Digest) > maxDigest {
-		out.Digest = out.Digest[:utf8Cut(out.Digest, maxDigest)] + "…"
+	if string(bytes.TrimSpace(v["truncated"])) != "true" {
+		return "", false
 	}
-	return out
+	var h string
+	if raw, ok := v["hint"]; ok {
+		_ = json.Unmarshal(raw, &h)
+	}
+	return h, true
 }
 
 // errorResult is a failed or refused call, as the model sees it.
 func errorResult(text string) Result {
-	out := result(text)
-	out.IsError = true
-	return out
+	return Result{Text: text, Digest: text, IsError: true}
+}
+
+// Render is what the model and the transcript get for one tool result: a header that says the
+// result is partial and how to read the rest, then the result inside the untrusted block. ref is
+// the turn's store reference for the whole text, or "" when the store could not keep it. digest is
+// the transcript's summary: the header and the head of what is shown.
+func Render(name string, r Result, ref string) (text, digest string) {
+	header := renderHeader(r, ref)
+	shown := r.Text
+	if r.Cut.Truncated {
+		shown = r.Cut.Shown
+	}
+	if shown == "" {
+		// The API refuses an empty text block in a tool_result.
+		shown = "(no output)"
+	}
+	body := shown
+	if r.Full != "" {
+		body = Untrusted("tool:"+name, []byte(r.Full), shown)
+	}
+	if header != "" {
+		text = header + "\n" + body
+	} else {
+		text = body
+	}
+	switch {
+	case r.Digest != "":
+		digest = r.Digest
+	default:
+		d := shown
+		if len(d) > maxDigest {
+			d = d[:utf8Cut(d, maxDigest)] + "…"
+		}
+		if header != "" {
+			d = header + "\n" + d
+		}
+		digest = d
+	}
+	return text, digest
+}
+
+// renderHeader is the first line of a partial result: what the tool said about its own cut, then
+// what Set cut and how to read the rest.
+func renderHeader(r Result, ref string) string {
+	var lines []string
+	if r.Upstream {
+		line := "RESULT PARTIAL: the tool says its result is truncated."
+		if r.Hint != "" {
+			line += " " + r.Hint
+		}
+		line += " Do not infer missing items, counts or absences."
+		lines = append(lines, line)
+	}
+	if r.Cut.Truncated {
+		c := r.Cut
+		counts := fmt.Sprintf("shown %d of %d bytes, %d of %d %s", c.ShownBytes, c.TotalBytes, c.ShownItems, c.TotalItems, c.Unit)
+		var line string
+		switch {
+		case ref == "":
+			line = "RESULT PARTIAL: " + counts + "; the rest is not kept." +
+				" Do not infer missing items, counts or absences; narrow the query."
+		case c.ContinueAt >= 0:
+			line = "RESULT PARTIAL: " + counts + fieldOf(c) + " (ref " + ref + ")." +
+				" Do not infer missing items, counts or absences; read_result with ref " + ref +
+				" and offset " + strconv.Itoa(c.ContinueAt) + " gives the rest, or narrow the query."
+		default:
+			line = "RESULT PARTIAL: " + counts + fieldOf(c) + " (ref " + ref + ")." +
+				" Do not infer missing items, counts or absences; read_result with ref " + ref +
+				" pages the whole result from offset 0, or narrow the query."
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fieldOf names the object key whose array was cut.
+func fieldOf(c resultcut.Result) string {
+	if c.Field == "" {
+		return ""
+	}
+	return fmt.Sprintf(" of %q", c.Field)
+}
+
+// untrustedTag matches the block's own tags, in any case.
+var untrustedTag = regexp.MustCompile(`(?i)</?untrusted`)
+
+// Untrusted is text inside the block that says where it came from: source, and the sha256 of the
+// whole text the shown part belongs to. An <untrusted or </untrusted inside the text is escaped,
+// so a payload cannot close the block and pass for the platform's own words.
+func Untrusted(source string, whole []byte, shown string) string {
+	sum := sha256.Sum256(whole)
+	var b strings.Builder
+	b.WriteString(`<untrusted source="`)
+	b.WriteString(strings.NewReplacer(`"`, "&quot;", "<", "&lt;", ">", "&gt;").Replace(source))
+	b.WriteString(`" sha256="`)
+	b.WriteString(hex.EncodeToString(sum[:]))
+	b.WriteString(`">` + "\n")
+	b.WriteString(untrustedTag.ReplaceAllStringFunc(shown, func(m string) string {
+		return "&lt;" + m[1:]
+	}))
+	b.WriteString("\n</untrusted>")
+	return b.String()
 }
 
 // utf8Cut is the largest n <= max that does not split a UTF-8 sequence of s.
