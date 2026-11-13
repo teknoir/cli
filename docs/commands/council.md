@@ -176,8 +176,8 @@ Neither cut is silent: the member gets a result that says what it is missing.
   precedes the next one (the closing bracket the cut put back is not part of the original text). A tool
   that cut its own result (a `{"truncated": true}` wrapper, an `inspect_*` answer that says so, an MQTT
   sample) gets a first line saying so, with its own hint and, when the tool named one, the total. The hint
-  is at most 200 bytes, cut after its last whole sentence that fits, or at a space with a final `…`, so no
-  word is cut; a spilled `mqtt_get_sample` index puts the messages it leaves out first in its hint. An `inspect_logs` answer counts as cut upstream only when `truncated.bytes`
+  is at most 200 bytes, cut after its last whole sentence that ends past half of that, or else at a space
+  in its second half (at a character boundary when there is none) with a final `…`; a spilled `mqtt_get_sample` index puts the messages it leaves out first in its hint. An `inspect_logs` answer counts as cut upstream only when `truncated.bytes`
   is true (the log passed the platform's 1 MiB limit): `truncated.lines` alone is the last `tail` lines the
   call asked for, and gets no header. A failed call never does, whatever its text says. When the
   council cuts that result as well, the cut line follows it and the first line says whose numbers the
@@ -191,7 +191,7 @@ Neither cut is silent: the member gets a result that says what it is missing.
   result, so a page is recognizable as part of the result it came from. In the result itself, a `<` that
   opens `untrusted` is escaped to `&lt;` (the opener itself), and nothing else is, so the text stays
   readable. That covers the name in any case and in fullwidth letters; `<` and its look-alikes (fullwidth
-  `＜`, small `﹤`, `˂`, `‹`, `〈`, `⟨`, `〈`); between the opener and the name any run of white space, Unicode
+  `＜`, small `﹤`, `˂`, `‹`, `〈` (U+3008), `⟨` (U+27E8) and U+2329, the left-pointing angle bracket); between the opener and the name any run of white space, Unicode
   separators, `/`, `\` and their look-alikes (fullwidth `／` and `＼`, `∕`, `⁄`, `⧸`); and hidden characters
   both there and between the name's letters: controls (C0, DEL, C1), format characters (zero-width
   spaces, word joiners), combining marks (variation selectors, the combining grapheme joiner) and the

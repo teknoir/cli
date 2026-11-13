@@ -269,6 +269,33 @@ func TestMCPGetSampleDescriptionBound(t *testing.T) {
 	if !strings.Contains(d, "fits under 16 KiB") || strings.Contains(d, "48 KiB") {
 		t.Errorf("council: %q", d)
 	}
+
+	// The servers register the description of their own sizes.
+	for _, c := range []struct {
+		name, want, not string
+		cs              *mcp.ClientSession
+	}{
+		{"stdio", "fits under 48 KiB", "16 KiB", mcpClient(t, newMCPServer(&cliEnv{}))},
+		{"council", "fits under 16 KiB", "48 KiB", councilSized(t, func(http.ResponseWriter) {})},
+	} {
+		tools, err := c.cs.ListTools(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, tl := range tools.Tools {
+			if tl.Name != "mqtt_get_sample" {
+				continue
+			}
+			found = true
+			if !strings.Contains(tl.Description, c.want) || strings.Contains(tl.Description, c.not) {
+				t.Errorf("%s: the registered description does not name its bound: %q", c.name, tl.Description)
+			}
+		}
+		if !found {
+			t.Errorf("%s: mqtt_get_sample is not listed", c.name)
+		}
+	}
 }
 
 // The council's store sweeps its dir when it starts: a fresh capture of an earlier process goes, a

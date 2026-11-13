@@ -598,7 +598,7 @@ type mcpPageResult struct {
 }
 
 // mcpPageEscapedMax is the most a text page may take once JSON has escaped it: a control character,
-// U+2028 and an invalid byte each become six characters. It leaves room for the page's own fields
+// U+2028 and an invalid byte each become up to six characters. It leaves room for the page's own fields
 // under mcpMaxResult.
 const mcpPageEscapedMax = 36 << 10
 
@@ -627,11 +627,13 @@ func mcpTopicPage(topic string) (string, int) {
 }
 
 // mcpEscapedCost is how many bytes rune r, size bytes long in the text, takes once JSON (mcpMarshal)
-// has escaped it: two for a quote, a backslash, \n, \r and \t, six for another control character,
-// U+2028, U+2029 and an invalid byte, and its own size otherwise.
+// has escaped it: two for a quote, a backslash, \b, \f, \n, \r and \t, six for another control
+// character, U+2028 and U+2029, and its own size otherwise. An invalid byte counts six, the most any
+// encoding/json writes for it (\ufffd; newer ones write the raw three-byte U+FFFD), so the count is
+// never below what is written.
 func mcpEscapedCost(r rune, size int) int {
 	switch {
-	case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t':
+	case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t' || r == '\b' || r == '\f':
 		return 2
 	case r < 0x20 || r == '\u2028' || r == '\u2029' || (r == utf8.RuneError && size == 1):
 		return 6

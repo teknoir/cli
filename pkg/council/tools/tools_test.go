@@ -1024,6 +1024,10 @@ func TestSanitizeHintCut(t *testing.T) {
 		{"one long word", strings.Repeat("x", 300), strings.Repeat("x", maxHintHeader-len("…")) + "…"},
 		{"words", words, strings.TrimSuffix(strings.Repeat("wordy ", 32), " ") + "…"},
 		{"runes", strings.Repeat("é", 150), strings.Repeat("é", (maxHintHeader-len("…"))/2) + "…"},
+		// A sentence end in the first half (an abbreviation, a leading ". ") would throw most of the
+		// hint away: the cut goes to a space instead.
+		{"early sentence end", "Use e.g. " + strings.Repeat("word ", 60), "Use e.g. " + strings.TrimSuffix(strings.Repeat("word ", 37), " ") + "…"},
+		{"leading period", ". " + strings.Repeat("y", 300), ". " + strings.Repeat("y", maxHintHeader-len("…")-2) + "…"},
 	} {
 		got := sanitizeHint(c.in)
 		if got != c.want {

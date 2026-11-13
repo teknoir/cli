@@ -379,8 +379,9 @@ const (
 // as they are inside the block, every hidden character (see isHidden: controls, among them a newline
 // that would start a line of the council's own, format characters, which can reverse text,
 // combining marks and the Hangul fillers) becomes a space, and the result is at most
-// maxHintHeader bytes of valid UTF-8. A longer hint is cut after its last whole sentence that fits;
-// one with no sentence end in reach is cut at a space and ends in "…", so no word is ever cut.
+// maxHintHeader bytes of valid UTF-8. A longer hint is cut after its last whole sentence that ends
+// past half the limit; one with no such sentence end is cut at its last space past half the limit,
+// or else at a rune start, and ends in "…".
 func sanitizeHint(hint string) string {
 	// The tags first: a hidden character inside the name would otherwise become a space that hides
 	// the tag from untrustedTag.
@@ -394,15 +395,17 @@ func sanitizeHint(hint string) string {
 	return cutHint(clean, maxHintHeader)
 }
 
-// cutHint is s cut to at most max bytes: after the last ". " that fits (keeping the period) or,
-// without one, at the last space past half of max, with trailing spaces and punctuation trimmed and
+// cutHint is s cut to at most max bytes: after the last ". " that fits past half of max (keeping the
+// period) or, without one, at the last space past half of max (else at a rune start), with trailing spaces and punctuation trimmed and
 // "…" appended.
 func cutHint(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	// A sentence end that fits: its period is at most at byte max-1, followed by a space.
-	if i := strings.LastIndex(s[:max+1], ". "); i >= 0 {
+	// A sentence end that fits and keeps more than half of max: its period is at most at byte max-1,
+	// followed by a space. An earlier one (an abbreviation, a leading ". ") would throw most of the
+	// hint away.
+	if i := strings.LastIndex(s[:max+1], ". "); i > max/2 {
 		return s[:i+1]
 	}
 	const ell = "…"

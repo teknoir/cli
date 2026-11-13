@@ -25,6 +25,16 @@ func TestMqttSampleOutRefusesLinks(t *testing.T) {
 		}
 		return err
 	}
+	// The link branch itself, not the generic one: ELOOP prints as "too many levels of symbolic
+	// links", so "symbolic link" alone would also match "exists and cannot be used".
+	wantLinkRefusal := func(t *testing.T, what string, err error) {
+		t.Helper()
+		if err == nil || exitCodeOf(err) != codeUsage ||
+			!strings.Contains(err.Error(), "is a symbolic link: give a new file") ||
+			strings.Contains(err.Error(), "cannot be used") {
+			t.Errorf("%s: %v (exit %d), want the symbolic-link refusal", what, err, exitCodeOf(err))
+		}
+	}
 
 	// Dangling: the target does not exist, and must not be made.
 	target := filepath.Join(dir, "victim-profile")
@@ -32,9 +42,7 @@ func TestMqttSampleOutRefusesLinks(t *testing.T) {
 	if err := os.Symlink(target, dangling); err != nil {
 		t.Fatal(err)
 	}
-	if err := open(dangling); err == nil {
-		t.Error("a dangling symlink was accepted")
-	}
+	wantLinkRefusal(t, "a dangling symlink", open(dangling))
 	if _, err := os.Lstat(target); !os.IsNotExist(err) {
 		t.Errorf("the target of the dangling link was created: %v", err)
 	}
@@ -51,9 +59,7 @@ func TestMqttSampleOutRefusesLinks(t *testing.T) {
 	if err := os.Symlink(empty, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := open(link); err == nil {
-		t.Error("a symlink to an empty file was accepted")
-	}
+	wantLinkRefusal(t, "a symlink to an empty file", open(link))
 	if st, err := os.Stat(empty); err != nil || st.Mode().Perm() != 0o644 || st.Size() != 0 {
 		t.Errorf("the target of the symlink was touched: %v %v", st, err)
 	}

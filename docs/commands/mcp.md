@@ -47,7 +47,7 @@ kit's Claude Code plugin. Codex and OpenCode list the same tools under the serve
 | `list_kinds` | | The kinds of local resources the platform accepts on a robot or device, and the ones it refuses. |
 | `prom_query` | `query`, `time` | A PromQL instant query on the teamspace's Prometheus, limited to the devices the caller may see. Device series carry `device_id` (no `device` label); `up` has none (use `device_last_seen`). `time` is RFC 3339 or Unix seconds; empty means now. |
 | `mqtt_sample` | `topics`, `seconds`, `max` | A cheap preview of what a device publishes: the MQTT messages of the teamspace's devices for a few seconds, with a long payload cut. `topics` is 1 to 8 topics, each `/devices/<device>/state/#` or `/devices/<device>/events/#` (`+` for every device) or a concrete topic below them; `seconds` is 5 by default and at most 30, `max` is 50 messages by default and at most 200. For whole payloads use `mqtt_get_sample`. |
-| `mqtt_get_sample` | `topics`, `seconds`, `max`, `maxBytes` | The same capture, with every payload whole: inline when the payload text (the base64 text for a binary payload) adds up to at most 12288 bytes and the answer fits under 48 KiB, otherwise an index of a capture that `mqtt_read` pages through. `maxBytes` is 2 MiB by default and at most 8 MiB. |
+| `mqtt_get_sample` | `topics`, `seconds`, `max`, `maxBytes` | The same capture, with every payload whole: inline when the payload text (the base64 text for a binary payload) adds up to at most 12288 bytes and the answer fits under 48 KiB (16 KiB in a TeknoirBot's council), otherwise an index of a capture that `mqtt_read` pages through. `maxBytes` is 2 MiB by default and at most 8 MiB. |
 | `mqtt_read` | `captureId`, `i`, `offset`, `length`, `path` | One message of a spilled capture, a page at a time (12288 bytes at most), or one field of a JSON payload with `path`. |
 | `inspect_pod` | `robot`, `pod_namespace`, `pod` | A pod of a robot: phase, containers and recent events. |
 | `inspect_logs` | `robot`, `pod_namespace`, `pod`, `container`, `previous`, `tail`, `since` | The log of a pod on a robot: the last `tail` lines (200 by default, at most 2000), of one `container`, of the `previous` run, or `since` a duration such as `10m`. |
@@ -190,7 +190,7 @@ How they behave:
   error naming the first step that failed and the keys or length it found, and a key that holds `.`, `[`
   or `]` cannot be addressed. The result carries `topic`, `path` (with it), `totalBytes`, `encoding` and
   the whole payload's `sha256`, so the pages can be checked. A topic that takes over 1024 bytes once
-  JSON-escaped (a quote counts two, a control character six) is cut back before the character that would
+  JSON-escaped (a quote counts two, a control character up to six) is cut back before the character that would
   pass that, here and in an index, and its whole length given as `topicBytes`; a `path` over 512 escaped
   bytes is refused. In a TeknoirBot's council, where every result is cut at 16 KiB, a page is held to 14336
   bytes of escaped text (a page of quotes or control characters is shorter than `length`: follow
