@@ -99,6 +99,11 @@ type scriptStep struct {
 	block   chan struct{} // the call waits for it, or for its context to end
 	entered chan struct{} // closed when the call starts
 	repeat  bool          // the step answers every later call of its role
+	// build, when set, makes the answer from the request it answers: a scripted model that reads
+	// the previous answer's tool result (the eval's read_result offset). nil means the step
+	// answers as it is. build runs on the turn's goroutine, not the test's: it reports with
+	// t.Errorf and returns a terminal step, never t.Fatal or t.FailNow.
+	build func(req model.Request) *scriptStep
 }
 
 // fakeModel is a scripted Model: a queue of answers per role.
@@ -177,6 +182,12 @@ func (m *fakeModel) Stream(ctx context.Context, req model.Request, onText func(s
 	}()
 	if st == nil {
 		return nil, model.Usage{}, fmt.Errorf("fake model: no scripted %s answer", role)
+	}
+	if st.build != nil {
+		// The answer comes from the request it answers: the queue held a placeholder.
+		if built := st.build(req); built != nil {
+			st = built
+		}
 	}
 	if st.entered != nil {
 		// A send, not a close: two steps may share one channel.

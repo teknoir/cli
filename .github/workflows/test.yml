@@ -1,0 +1,71 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # 1.27.4 or newer: older 1.27 patches carry net/http, crypto/x509 and http2 fixes the
+          # council's hub and model clients need (govulncheck, 2026-11-11).
+          go-version: '1.27'
+          check-latest: true
+          cache: true
+      - name: Check the Go toolchain
+        run: |
+          v="$(go env GOVERSION)"
+          echo "building with $v"
+          case "$v" in
+            go1.27|go1.27.[0-3]|go1.27rc*) echo "::error::$v is older than go1.27.4"; exit 1 ;;
+          esac
+      # The step fails on gofmt's own exit status too (a file it cannot parse). It is the only step
+      # here that parses pkg/council/coder/proc_other_test.go (//go:build !unix): vet and test run
+      # on linux, and the cross-build compiles no test files.
+      - name: Format
+        run: |
+          out="$(gofmt -l main.go cmd pkg agentkit test)"
+          if [ -n "$out" ]; then echo "$out"; echo "::error::run gofmt -w on the files above"; exit 1; fi
+      - name: Vet
+        run: go vet ./...
+      # One target per OS goreleaser builds (.goreleaser.yaml), plus 32-bit linux/arm. No file is
+      # specific to an architecture, so darwin/amd64 and linux/arm64 would add nothing. A file only
+      # these compile breaks here and not at tag time. Build, not vet: cmd/review_fixes_test.go calls syscall.Kill untagged, so a
+      # windows vet cannot compile the tests.
+      - name: Cross-build release targets
+        run: |
+          for t in windows/amd64 windows/arm64 darwin/arm64 linux/arm; do
+            echo "building $t"
+            CGO_ENABLED=0 GOOS="${t%/*}" GOARCH="${t#*/}" go build -o /dev/null ./...
+          done
+      - name: Test
+        run: go test -race -count=1 ./...
+      # pkg/templates is its own module (go.mod replace): ./... above does not reach it.
+      - name: Templates module
+        working-directory: pkg/templates
+        run: go vet ./... && go test -race -count=1 ./...
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # 1.27.4 or newer: the same toolchain the test job checks, because the eval runs the
+          # council the release builds.
+          go-version: '1.27'
+          check-latest: true
+          cache: true
+      - name: Check the Go toolchain
+        run: |
+          v="$(go env GOVERSION)"
+          echo "building with $v"
+          case "$v" in
+            go1.27|go1.27.[0-3]|go1.27rc*) echo "::error::$v is older than go1.27.4"; exit 1 ;;
+          esac
+      - name: Council eval harness
+        run: go test -count=1 -run 'TestEval' -v ./pkg/council/
