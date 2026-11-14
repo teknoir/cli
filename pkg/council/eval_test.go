@@ -734,7 +734,7 @@ func evalInjectionPreview(t *testing.T) {
 // corpus, and then reports.
 func evalInjectionMember(t *testing.T, tool string, set func(*evalHarness, []injEntry) string, enc func(*testing.T, string) string) {
 	corpus := evalCorpus(t)
-	h := newEval(t, newWork(kindMember, memberFleet, "what do the devices publish?"), tools.LevelRead)
+	h := newEval(t, newWork(kindMember, slugFleet, "what do the devices publish?"), tools.LevelRead)
 	sent := set(h, corpus)
 
 	h.model.push(roleFleet, toolStep("tool_use", apiCall{id: "tu_sample", name: tool, input: map[string]any{}}))
@@ -888,15 +888,15 @@ func evalEscapeLinear(t *testing.T) {
 	}
 }
 
-// evalBudgetRounds: Fleet's tool rounds are maxFleetRounds; the next request offers the same tools
-// with tool_choice none, and the forced answer ends the loop even when it still asks for a tool:
-// that call is not run, and the member reports.
+// evalBudgetRounds: Fleet's tool rounds are its role's budget (standardFleetRounds in the Standard
+// council); the next request offers the same tools with tool_choice none, and the forced answer ends
+// the loop even when it still asks for a tool: that call is not run, and the member reports.
 //
 // DESIGN: a forced answer that has only tool_use blocks also ends the loop, with an empty report
 // ("**Summary.** \n\nConfidence: low.") and a calls budget event; a stricter rule would name the
 // stop in the report ("Fleet stopped: rounds.").
 func evalBudgetRounds(t *testing.T) {
-	h := newEval(t, newWork(kindMember, memberFleet, "what is the state of the devices?"), tools.LevelRead)
+	h := newEval(t, newWork(kindMember, slugFleet, "what is the state of the devices?"), tools.LevelRead)
 	h.p.devices = `[{"name":"device-00","state":"online"}]`
 
 	// One repeat step: list_devices in every answer. The forced answer is a model that ignores
@@ -916,22 +916,22 @@ func evalBudgetRounds(t *testing.T) {
 	h.stop(t)
 
 	fleet := h.model.requests(roleFleet)
-	if len(fleet) != maxFleetRounds+1 {
-		t.Fatalf("%d Fleet requests, want %d", len(fleet), maxFleetRounds+1)
+	if len(fleet) != standardFleetRounds+1 {
+		t.Fatalf("%d Fleet requests, want %d", len(fleet), standardFleetRounds+1)
 	}
 	for i, req := range fleet {
-		if want := i == maxFleetRounds; req.ToolChoiceNone != want {
+		if want := i == standardFleetRounds; req.ToolChoiceNone != want {
 			t.Errorf("Fleet request %d: tool_choice none %v, want %v", i, req.ToolChoiceNone, want)
 		}
 	}
 	// What the code does at the limit: it keeps the tools and forces the answer with tool_choice
 	// none (fleetTask's `r := req; r.ToolChoiceNone = force`), so the member still answers with the
 	// report schema rather than being left without tools.
-	if got, want := toolNames(fleet[maxFleetRounds]), toolNames(fleet[0]); !slices.Equal(got, want) {
+	if got, want := toolNames(fleet[standardFleetRounds]), toolNames(fleet[0]); !slices.Equal(got, want) {
 		t.Errorf("the forced call offers %v, want the same tools as the first %v", got, want)
 	}
-	if n := h.p.count("list_devices"); n != maxFleetRounds {
-		t.Errorf("list_devices ran %d times, want %d: the forced answer's call ran", n, maxFleetRounds)
+	if n := h.p.count("list_devices"); n != standardFleetRounds {
+		t.Errorf("list_devices ran %d times, want %d: the forced answer's call ran", n, standardFleetRounds)
 	}
 	if n := len(p.ofType(hub.EventBudget)); n != 0 {
 		t.Errorf("%d budget events: the call cap, not the round limit, ended the loop", n)
@@ -965,7 +965,7 @@ func evalBudgetTokensAt(t *testing.T, spent int64) {
 	h := newEval(t, work, tools.LevelRead)
 
 	// One route call spends the tokens.
-	route := toolStep("tool_use", conveneCall("tu_1", taskOf(memberFleet, "the facts", "find out")))
+	route := toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "find out")))
 	route.usage = model.Usage{Input: spent}
 	h.model.push(roleRoute, route)
 	h.model.push(roleFleet, textStep(reportJSON("Fleet's report"), "end_turn"))
@@ -1002,12 +1002,13 @@ func evalBudgetTokensAt(t *testing.T, spent int64) {
 	if n := len(p.ofType(hub.EventCritique)); n != 0 {
 		t.Error("the critique ran after the budget refused it")
 	}
-	// DESIGN (budget.go:41-44, budget_test.go:37): the token line stops phase calls at
-	// c.tokens-reserveTokens; the one answer call is exempt (begin(true) checks calls only) and
-	// spends the 20 000 reserve, even when the whole cap is already spent, so exactly one
-	// ToolChoiceNone answer request follows the budget event. The Stage 1 plan keeps this. A stricter
-	// rule would refuse begin(true) with "tokens" once spent >= c.tokens, so that synthesisAnswer
-	// answers with composedAnswer("budget", reports) and makes no model call.
+	// DESIGN (budget.go begin and reserveLocked; TestBudgetTokenLine): the token line stops phase
+	// calls at c.tokens minus the reserve (20 000, or a quarter of the cap when that is less); the
+	// one answer call is exempt (begin(true) checks calls only) and spends the reserve, even when
+	// the whole cap is already spent, so exactly one ToolChoiceNone answer request follows the
+	// budget event. The Stage 1 plan keeps this. A stricter rule would refuse begin(true) with
+	// "tokens" once spent >= c.tokens, so that synthesisAnswer answers with
+	// composedAnswer("budget", reports) and makes no model call.
 	if n := h.model.count(); n != 2 {
 		t.Errorf("%d model requests in all, want the route and the forced answer", n)
 	}
