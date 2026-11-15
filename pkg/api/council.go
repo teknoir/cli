@@ -24,6 +24,37 @@ type ChatInfo struct {
 	IsCreator bool         `json:"isCreator"`
 	Members   []ChatMember `json:"members"`
 	Budget    ChatBudget   `json:"budget"`
+
+	// Council is the bot's council; nil from an older platform that does not send it.
+	Council *ChatInfoCouncil `json:"council"`
+}
+
+// ChatInfoCouncil is the council as the chat's info carries it: the bot's default council, the
+// councils it may use, and which members it could use.
+type ChatInfoCouncil struct {
+	// Proto is the council protocol the bot's computer last announced, 1 or 2 (1 also for an older
+	// computer that announces none); nil when the platform has not seen it since it started.
+	Proto *int `json:"proto"`
+	// Tnctl is the tnctl version the bot's computer last reported, without the "tnctl/" prefix
+	// (ChatBot.Council keeps the header's form "tnctl/<version>"); nil when the platform has not seen
+	// it since it started or it never sent a well-formed version.
+	Tnctl *string `json:"tnctl"`
+	// Kit is the kit version the bot's computer last reported; nil when it sent no readable caps (an
+	// older computer, or see CapsError) or was not seen.
+	Kit *string `json:"kit"`
+	// CapsError is why the bot's computer could not report its tools; nil when it did.
+	CapsError *string `json:"capsError"`
+	// DefaultRoster is the default council's name.
+	DefaultRoster string          `json:"defaultRoster"`
+	CanEdit       CouncilCanEdit  `json:"canEdit"`
+	Roster        RosterView      `json:"roster"`  // the default council
+	Rosters       []RosterSummary `json:"rosters"` // every council the bot can use
+}
+
+// CouncilCanEdit is whether this person may change the bot's council, and why not.
+type CouncilCanEdit struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason"` // set when OK is false
 }
 
 // ChatBot is the bot a chat belongs to.
@@ -39,7 +70,9 @@ type ChatBot struct {
 	Online bool `json:"online"`
 	// LastSeen is when the bot was last seen, in milliseconds since the epoch; nil when never.
 	LastSeen *int64 `json:"lastSeen"`
-	// Council is the council's version; nil on a platform that does not report it.
+	// Council is the tnctl version the bot's computer last reported, in the header's form
+	// "tnctl/<version>" (ChatInfoCouncil.Tnctl drops the prefix); nil when the platform has not seen
+	// a well-formed one since it started, or does not report it.
 	Council *string `json:"council"`
 }
 
@@ -80,6 +113,29 @@ type ChatThread struct {
 	TurnCount int        `json:"turnCount"`
 	// LastTurn is the newest turn; nil for a thread with none.
 	LastTurn *ChatTurnRef `json:"lastTurn"`
+
+	// Roster is the council the thread is set to; nil when the thread follows the bot's default
+	// council (made without a roster, or patched back with a null roster), for a member thread, and
+	// when the council it named is gone. The council a thread asks is ChatThreadDetail.Council.
+	Roster *ChatThreadRoster `json:"roster"`
+	// MembersPin is the members the thread pins; null decodes to nil.
+	MembersPin []string `json:"membersPin"`
+	// MemberRole is the member a member thread is for; nil for a council thread.
+	MemberRole *ChatMemberRole `json:"memberRole"`
+}
+
+// ChatThreadRoster names the council a thread is set to.
+type ChatThreadRoster struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+}
+
+// ChatMemberRole names the member a member thread is for, and its scope.
+type ChatMemberRole struct {
+	ID    string `json:"id"`
+	Scope string `json:"scope"`
+	Name  string `json:"name"`
 }
 
 // ChatTurnRef names a turn and its state, as a thread carries it.
@@ -90,8 +146,9 @@ type ChatTurnRef struct {
 
 // ChatTurnOptions are the options a turn was asked with.
 type ChatTurnOptions struct {
-	Mode   string `json:"mode"`
-	Effort string `json:"effort"`
+	Mode     string `json:"mode"`
+	Effort   string `json:"effort"`
+	Thorough bool   `json:"thorough"`
 }
 
 // ChatError is a turn's failure.
@@ -133,6 +190,19 @@ type ChatTurn struct {
 	CreatedAt  int64      `json:"createdAt"`
 	StartedAt  *int64     `json:"startedAt"`
 	FinishedAt *int64     `json:"finishedAt"`
+
+	// Roster is the council the turn asked; nil for a member turn and when the council cannot be
+	// resolved.
+	Roster *ChatTurnRoster `json:"roster"`
+	// RosterHash is the hash of the council the claim recorded ("sha256:<64 hex>" or "legacy"); nil
+	// until the turn is claimed, and on turns from before Stage 1.
+	RosterHash *string `json:"rosterHash"`
+}
+
+// ChatTurnRoster names the council a turn asked.
+type ChatTurnRoster struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // ChatThreadDetail is the answer of GET bots/<bot>/chat/threads/<thread>.
@@ -140,6 +210,15 @@ type ChatThreadDetail struct {
 	Thread  ChatThread `json:"thread"`
 	Turns   []ChatTurn `json:"turns"`
 	LastSeq int64      `json:"lastSeq"`
+
+	// Council is the council the thread asks; nil for a member thread and when the thread's council
+	// cannot be resolved.
+	Council *ChatThreadCouncil `json:"council"`
+}
+
+// ChatThreadCouncil is the council a thread asks, as the thread's detail carries it.
+type ChatThreadCouncil struct {
+	Roster RosterSummary `json:"roster"`
 }
 
 // chatPath is the path of the chat routes below Base.
@@ -175,6 +254,10 @@ type NewChatThread struct {
 	Title  string `json:"title,omitempty"`
 	Origin string `json:"origin,omitempty"`
 	Member string `json:"member,omitempty"`
+	// MemberScope is the scope of Member: bot, teamspace or template.
+	MemberScope string `json:"memberScope,omitempty"`
+	// Roster is the council the thread asks, by name.
+	Roster string `json:"roster,omitempty"`
 }
 
 // CreateChatThread starts a thread. Origin is where it was started: web, cli or mcp.
@@ -195,14 +278,46 @@ func (f *Fleet) DeleteChatThread(ctx context.Context, bot, thread string) error 
 	return err
 }
 
+// ChatThreadCouncilPatch is the body of PATCH bots/<bot>/chat/threads/<thread>: it changes the thread's
+// council. A nil Roster is sent as null, which puts the thread back on the bot's default council.
+type ChatThreadCouncilPatch struct {
+	SetRoster bool
+	Roster    *string
+}
+
+// MarshalJSON writes the patch as {"roster":"<name>"}, or {"roster":null} when Roster is nil.
+func (p ChatThreadCouncilPatch) MarshalJSON() ([]byte, error) {
+	if p.Roster == nil {
+		return []byte(`{"roster":null}`), nil
+	}
+	return json.Marshal(struct {
+		Roster string `json:"roster"`
+	}{Roster: *p.Roster})
+}
+
+// chatThreadAnswer is the answer of PATCH bots/<bot>/chat/threads/<thread>: the thread under "thread".
+type chatThreadAnswer struct {
+	Thread ChatThread `json:"thread"`
+}
+
+// PatchChatThread changes the thread's council and returns the thread.
+func (f *Fleet) PatchChatThread(ctx context.Context, bot, thread string, p ChatThreadCouncilPatch) (*ChatThread, json.RawMessage, error) {
+	if !p.SetRoster {
+		return nil, nil, errors.New("a thread patch names a roster")
+	}
+	a, raw, err := decode[chatThreadAnswer](f.Do(ctx, "PATCH", chatThreadPath(bot, thread), nil, p))
+	return &a.Thread, raw, err
+}
+
 // NewChatTurn is the body of POST bots/<bot>/chat/threads/<thread>/turns. Empty fields are left out.
 type NewChatTurn struct {
 	Prompt string `json:"prompt,omitempty"`
-	// Mode is auto, quick or council; Member asks one member (fleet or coder) instead; Effort is
-	// low, medium or high.
-	Mode   string `json:"mode,omitempty"`
-	Member string `json:"member,omitempty"`
-	Effort string `json:"effort,omitempty"`
+	// Mode is auto, quick or council; Member asks one member (a member's slug) instead; Effort is
+	// low, medium or high; Thorough asks the council for a longer, more careful answer.
+	Mode     string `json:"mode,omitempty"`
+	Member   string `json:"member,omitempty"`
+	Effort   string `json:"effort,omitempty"`
+	Thorough bool   `json:"thorough,omitempty"`
 }
 
 // chatTurnAnswer is the answer of a turn's routes.
