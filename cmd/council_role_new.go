@@ -240,8 +240,9 @@ func newCouncilRoleArchiveCmd(e *cliEnv) *cobra.Command {
 		Use:   "archive <member>",
 		Short: "Archive a member: councils can no longer use it",
 		Long: `Archive a member that a bot or the teamspace made: councils can no longer use it. A member that
-a council still names is refused: remove it from those councils first. tnctl council role export
-still prints an archived member, and applying that YAML brings it back.
+a council still names is refused: remove it from those councils first (tnctl council roster
+remove). tnctl council role export still prints an archived member, and applying that YAML brings
+it back.
 
 <member> is a slug such as triage, or <scope>/<slug> (scope bot or teamspace). With --bot it
 archives that bot's own member; without it, the teamspace's shared member (teamspace admins
@@ -302,6 +303,9 @@ func runCouncilRoleArchive(cmd *cobra.Command, e *cliEnv, ref, bot string) error
 		case botGiven && scope == "" && councilNotFound(err):
 			return newErr(codeNotFound, "%s\nif you meant the teamspace's shared member, leave out --bot: tnctl council role archive teamspace/%s", mapped.Error(), escapeLine(slug))
 		}
+		if hint := councilInUseHint(err, slug); hint != "" {
+			return newErr(exitCodeOf(mapped), "%s\n%s", mapped.Error(), hint)
+		}
 		return mapped
 	}
 	out, errw := cmd.OutOrStdout(), cmd.ErrOrStderr()
@@ -321,4 +325,18 @@ func runCouncilRoleArchive(cmd *cobra.Command, e *cliEnv, ref, bot string) error
 		_, _ = fmt.Fprintf(errw, "· to bring it back: tnctl council role export %s > %s.yaml, then tnctl council apply -f %s.yaml\n", s, s, s)
 	}
 	return nil
+}
+
+// councilInUseHint is the command that takes a member out of the first council a role_in_use refusal
+// names; "" for any other error, or when that council or bot cannot be named on a command line.
+func councilInUseHint(err error, slug string) string {
+	ce, ok := api.CouncilErrorOf(err)
+	if !ok || ce.Code != "role_in_use" || len(ce.UsedBy) == 0 {
+		return ""
+	}
+	u := ce.UsedBy[0]
+	if !councilSlugRE.MatchString(u.Roster) || !isDNSLabel(u.Bot) {
+		return ""
+	}
+	return fmt.Sprintf("for example: tnctl council roster remove %s %s --bot %s", u.Roster, slug, u.Bot)
 }

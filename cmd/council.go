@@ -32,6 +32,9 @@ members' reports when the turn needs it, not on every turn.
 
   tnctl council role list|get|export   the members a bot's councils can use
   tnctl council role new|archive       make a member from its job in words, or archive one
+  tnctl council roster list|get|use    a bot's councils, one council's members, the default
+  tnctl council roster add|remove      change a council's members (--as saves a copy)
+  tnctl council roster delete          delete one of the bot's own councils
   tnctl council apply -f <file>        apply members and councils from YAML (an export, edited)
 
 These are a person's commands: a TeknoirBot cannot run them (it runs only tnctl council serve,
@@ -39,7 +42,7 @@ inside its computer).`,
 		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 		Args: councilGroupArgs,
 	}
-	c.AddCommand(newCouncilServeCmd(e), newCouncilRoleCmd(e), newCouncilApplyCmd(e))
+	c.AddCommand(newCouncilServeCmd(e), newCouncilRoleCmd(e), newCouncilApplyCmd(e), newCouncilRosterCmd(e))
 	return c
 }
 

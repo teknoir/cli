@@ -355,13 +355,21 @@ func TestBotModeRefusesTheCommandsItMayNotRun(t *testing.T) {
 		{"council", "role", "apply", "-f", "x.yaml"},
 		{"council", "role", "new", "Watcher", "--job", "watches", "--bot", "scout"},
 		{"council", "role", "archive", "x"},
+		{"council", "roster"},
+		{"council", "roster", "list", "--bot", "scout"},
+		{"council", "roster", "get", "ops", "--bot", "scout"},
+		{"council", "roster", "use", "ops", "--bot", "scout"},
+		{"council", "roster", "add", "ops", "triage", "--bot", "scout"},
+		{"council", "roster", "remove", "ops", "triage", "--bot", "scout"},
+		{"council", "roster", "delete", "ops", "--bot", "scout"},
+		{"council", "roster", "apply", "-f", "x.yaml"},
 	}
 	// chat's refusal names its own reason: a bot does not chat with itself.
 	ownText := map[string]string{
 		"chat": `"tnctl chat" is not available to a TeknoirBot: a bot does not use the person chat.`,
 	}
 	// The council's person commands say so too: a bot runs only "council serve".
-	for _, p := range []string{"council role", "council role list", "council role get", "council role export", "council role new", "council role archive", "council role apply", "council apply"} {
+	for _, p := range []string{"council role", "council role list", "council role get", "council role export", "council role new", "council role archive", "council role apply", "council apply", "council roster", "council roster list", "council roster get", "council roster use", "council roster add", "council roster remove", "council roster delete", "council roster apply"} {
 		ownText[p] = `"tnctl ` + p + `" is not available to a TeknoirBot: only a person reads and changes a bot's council.`
 	}
 	// The commands do more than tnctl when cobra hands them the arguments: none of them may run.

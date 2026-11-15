@@ -104,6 +104,22 @@ func TestCouncilCmdVisible(t *testing.T) {
 	if subs["apply"] == nil {
 		t.Error("council has no apply subcommand")
 	}
+	roster := subs["roster"]
+	if roster == nil {
+		t.Fatal("council has no roster subcommand")
+	}
+	gotRoster := map[string]bool{}
+	for _, c := range roster.Commands() {
+		gotRoster[c.Name()] = true
+	}
+	for _, want := range []string{"list", "get", "use", "add", "remove", "delete", "apply"} {
+		if !gotRoster[want] {
+			t.Errorf("council roster has no %s subcommand", want)
+		}
+	}
+	if want := "List, read and change a bot's councils, and pick its default"; roster.Short != want {
+		t.Errorf("council roster Short %q, want %q", roster.Short, want)
+	}
 
 	out, _, err := councilArgs(t, &cliEnv{})
 	if err != nil {
@@ -121,6 +137,9 @@ func TestCouncilCmdVisible(t *testing.T) {
 		"\n" +
 		"  tnctl council role list|get|export   the members a bot's councils can use\n" +
 		"  tnctl council role new|archive       make a member from its job in words, or archive one\n" +
+		"  tnctl council roster list|get|use    a bot's councils, one council's members, the default\n" +
+		"  tnctl council roster add|remove      change a council's members (--as saves a copy)\n" +
+		"  tnctl council roster delete          delete one of the bot's own councils\n" +
 		"  tnctl council apply -f <file>        apply members and councils from YAML (an export, edited)\n" +
 		"\n" +
 		"These are a person's commands: a TeknoirBot cannot run them (it runs only tnctl council serve,\n" +
@@ -144,6 +163,11 @@ func TestCouncilCmdVisible(t *testing.T) {
 		{[]string{"role", "lst"}, `unknown command "lst" for "tnctl council role": did you mean list or get?`},
 		{[]string{"role", "exprt"}, `unknown command "exprt" for "tnctl council role": did you mean export?`},
 		{[]string{"role", "archve"}, `unknown command "archve" for "tnctl council role": did you mean archive?`},
+		{[]string{"rster"}, `unknown command "rster" for "tnctl council": did you mean roster?`},
+		{[]string{"roser"}, `unknown command "roser" for "tnctl council": did you mean role or roster?`},
+		{[]string{"roster", "lst"}, `unknown command "lst" for "tnctl council roster": did you mean list, get or use?`},
+		{[]string{"roster", "remve"}, `unknown command "remve" for "tnctl council roster": did you mean remove?`},
+		{[]string{"roster", "delte"}, `unknown command "delte" for "tnctl council roster": did you mean delete?`},
 	} {
 		_, _, err = councilArgs(t, &cliEnv{}, c.args...)
 		if err == nil || exitCodeOf(err) != codeUsage || err.Error() != c.want {

@@ -620,7 +620,8 @@ func TestCouncilRoleArchiveInUse(t *testing.T) {
 	if err == nil {
 		t.Fatal("the member was archived")
 	}
-	want := "This member is in 3 councils: remove it from them first.\nused by scout (Ops A) and 2 more you cannot see"
+	want := "This member is in 3 councils: remove it from them first.\nused by scout (Ops A) and 2 more you cannot see\n" +
+		"for example: tnctl council roster remove ops-a triage --bot scout"
 	if err.Error() != want {
 		t.Errorf("error %q, want %q", err, want)
 	}
@@ -628,6 +629,72 @@ func TestCouncilRoleArchiveInUse(t *testing.T) {
 		t.Errorf("exit %d, want %d", code, codeRejected)
 	}
 	wantReqs(t, p, "POST /bots/scout/council/roles/triage/archive")
+}
+
+// TestCouncilRoleArchiveInUseHint names the first council a person can take a member out of.
+func TestCouncilRoleArchiveInUseHint(t *testing.T) {
+	const msg = "This member is in 1 council: remove it from it first."
+	for _, c := range []struct {
+		name  string
+		extra string
+		args  []string
+		path  string
+		want  string
+	}{
+		{"hidden only", `"usedBy":[],"hiddenCount":2`, []string{"role", "archive", "triage", "--bot", "scout"},
+			"/bots/scout/council/roles/triage/archive",
+			msg + "\nused by 2 councils you cannot see"},
+		{"roster is not a name", `"usedBy":[{"bot":"scout","roster":"Ops A","displayName":"Ops A"}],"hiddenCount":0`,
+			[]string{"role", "archive", "triage", "--bot", "scout"}, "/bots/scout/council/roles/triage/archive",
+			msg + "\nused by scout (Ops A)"},
+		{"bot is not a name", `"usedBy":[{"bot":"Scout X","roster":"ops-a","displayName":"Ops A"}],"hiddenCount":0`,
+			[]string{"role", "archive", "triage", "--bot", "scout"}, "/bots/scout/council/roles/triage/archive",
+			msg + "\nused by Scout X (Ops A)"},
+		{"first council", `"usedBy":[{"bot":"arm-2","roster":"review-x","displayName":"Review X"},{"bot":"scout","roster":"ops-a","displayName":"Ops A"}],"hiddenCount":0`,
+			[]string{"role", "archive", "triage", "--bot", "scout"}, "/bots/scout/council/roles/triage/archive",
+			msg + "\nused by arm-2 (Review X) and scout (Ops A)\nfor example: tnctl council roster remove review-x triage --bot arm-2"},
+		{"shared member", `"usedBy":[{"bot":"arm-2","roster":"review-x","displayName":"Review X"}],"hiddenCount":0`,
+			[]string{"role", "archive", "triage"}, "/council/roles/triage/archive",
+			msg + "\nused by arm-2 (Review X)\nfor example: tnctl council roster remove review-x triage --bot arm-2"},
+		{"shared member by scope", `"usedBy":[{"bot":"arm-2","roster":"review-x","displayName":"Review X"}],"hiddenCount":0`,
+			[]string{"role", "archive", "teamspace/triage"}, "/council/roles/triage/archive",
+			msg + "\nused by arm-2 (Review X)\nfor example: tnctl council roster remove review-x triage --bot arm-2"},
+		{"digit bot", `"usedBy":[{"bot":"7up","roster":"ops-a","displayName":"Ops A"}],"hiddenCount":0`,
+			[]string{"role", "archive", "triage", "--bot", "scout"}, "/bots/scout/council/roles/triage/archive",
+			msg + "\nused by 7up (Ops A)\nfor example: tnctl council roster remove ops-a triage --bot 7up"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			noBotMode(t)
+			p := newChatAPI(t)
+			p.on("POST", c.path, 409, councilErrBody("role_in_use", msg, c.extra))
+			_, _, err := councilArgs(t, p.env(t), c.args...)
+			if err == nil {
+				t.Fatal("the member was archived")
+			}
+			if err.Error() != c.want {
+				t.Errorf("error %q, want %q", err, c.want)
+			}
+			if code := exitCodeOf(err); code != codeRejected {
+				t.Errorf("exit %d, want %d", code, codeRejected)
+			}
+			wantReqs(t, p, "POST "+c.path)
+		})
+	}
+}
+
+// TestCouncilRoleArchiveLong names the councils a member is in as the next step.
+func TestCouncilRoleArchiveLong(t *testing.T) {
+	archive := councilSub(councilSub(newCouncilCmd(&cliEnv{}), "role"), "archive")
+	if archive == nil {
+		t.Fatal("council role has no archive subcommand")
+	}
+	want := "Archive a member that a bot or the teamspace made: councils can no longer use it. A member that\n" +
+		"a council still names is refused: remove it from those councils first (tnctl council roster\n" +
+		"remove). tnctl council role export still prints an archived member, and applying that YAML brings\n" +
+		"it back.\n\n"
+	if !strings.HasPrefix(archive.Long, want) {
+		t.Errorf("archive Long:\n%s", archive.Long)
+	}
 }
 
 // TestCouncilRoleArchiveRefused maps each refusal, and points a bare slug's 404 at --bot.
