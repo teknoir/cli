@@ -1484,7 +1484,12 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 					line += ": " + strings.Join(shown, ", ")
 				}
 				p.progress(strings.TrimRight(line, " "))
-				p.resetCaptainText()
+				// A council's plan comes before its members work: the lead's text so far was not the
+				// answer. A quick turn's plan comes after its answer (pkg/council askTurn), so the text
+				// streamed so far is the answer the final repeats: keep it, or the answer prints twice.
+				if d.Mode != "quick" {
+					p.resetCaptainText()
+				}
 			case "member_start":
 				var d struct {
 					Member string `json:"member"`

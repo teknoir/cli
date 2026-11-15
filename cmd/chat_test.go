@@ -193,17 +193,19 @@ const (
 	quickResumed = "Hello there, and more."
 )
 
-// quickFrames is a quick turn's events for turn trn_1: the Captain's text, the final, the usage, the
-// end.
+// quickFrames is a quick turn's events for turn trn_1, in the order the daemon and the platform send
+// them: the Captain's text, then the quick plan (pkg/council askTurn emits it after the answer), the
+// usage, the final and the end.
 func quickFrames(final string) []string {
 	return []string{
 		frame(1, "turn_queued", `"index":1,"kind":"ask","member":null`),
-		frame(2, "turn_start", `"mode":"quick"`),
+		frame(2, "turn_start", `"mode":"auto"`),
 		frame(3, "text_delta", `"member":"captain","text":"`+final[:len(final)/2]+`"`),
 		frame(4, "text_delta", `"member":"captain","text":"`+final[len(final)/2:]+`"`),
-		frame(5, "final", `"text":"`+final+`"`),
+		frame(5, "plan", `"mode":"quick","tasks":[]`),
 		frame(6, "usage", `"calls":2,"input":100,"output":40,"cacheRead":0,"cacheWrite":0,"ms":1500`),
-		frame(7, "turn_end", `"state":"done"`),
+		frame(7, "final", `"text":"`+final+`"`),
+		frame(8, "turn_end", `"state":"done"`),
 	}
 }
 
@@ -268,6 +270,35 @@ func TestChatOneShotOnATerminalPrintsDeltas(t *testing.T) {
 	}
 	if want := quickFinal + "\n"; out != want {
 		t.Errorf("stdout %q, want %q (the final printed once)", out, want)
+	}
+}
+
+// A council's plan comes before its members work, so the lead's text before it is not the answer:
+// the plan by itself starts the answer afresh (a member_done does too; this turn has none), and a
+// final that repeats only what the lead wrote after the plan is not printed a second time.
+func TestChatCouncilPlanStartsTheAnswerAfresh(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "turn_start", `"mode":"auto"`),
+			frame(2, "text_delta", `"member":"captain","text":"Asking fleet."`),
+			frame(3, "plan", `"mode":"council","tasks":[{"member":"fleet","name":"Fleet","task":"look"}]`),
+			frame(4, "text_delta", `"member":"captain","text":"`+quickFinal+`"`),
+			frame(5, "final", `"text":"`+quickFinal+`"`),
+			frame(6, "turn_end", `"state":"done"`),
+		})
+	})
+	out, _, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out, quickFinal) != 1 || !strings.HasPrefix(out, "Asking fleet.") || !strings.HasSuffix(out, quickFinal+"\n") {
+		t.Errorf("stdout %q: want the lead's first text, then the answer once", out)
 	}
 }
 
