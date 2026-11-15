@@ -1233,7 +1233,7 @@ func TestChatREPL(t *testing.T) {
 		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
 	}
 	// the bot's line, its members and the budget come first
-	if !strings.Contains(out, "scout (creator, online) — council tnctl/v0.3.0") {
+	if !strings.Contains(out, "scout (creator, online) — computer: tnctl/v0.3.0") {
 		t.Errorf("stdout %q", out)
 	}
 	if !strings.Contains(out, "tokens today: 123456 of 5000000") {
@@ -1881,7 +1881,7 @@ func TestChatInfoAndThreadIDAreCleaned(t *testing.T) {
 	if strings.ContainsAny(out, "\x1b") || strings.ContainsAny(errs, "\x1b") {
 		t.Errorf("an escape reached the terminal: stdout %q, stderr %q", out, errs)
 	}
-	if !strings.Contains(out, "scout (creator, online) — council v1") {
+	if !strings.Contains(out, "scout (creator, online) — computer: v1") {
 		t.Errorf("stdout %q", out)
 	}
 	if !strings.Contains(errs, "thread thr_") {

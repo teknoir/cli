@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -328,17 +329,201 @@ func chatCouncilName(name, displayName string) string {
 	return n
 }
 
+// chatSlugList is the members `@` can ask, from a council's member list: each slug once, in order, leaving
+// out entries that are not slugs (a member that was deleted shows as its raw id).
+func chatSlugList(members []string) []string {
+	var out []string
+	for _, s := range members {
+		if councilSlugRE.MatchString(s) && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// chatOldHubSlugs are the members an older hub (no council in the chat's info) lets `@` ask.
+func chatOldHubSlugs() []string { return []string{"fleet", "coder"} }
+
+// chatSlugsForRoster is the members of the bot's council called name, from the chat's info: what `@` asks
+// in a chat on that council. An older hub gives fleet and coder; a name the info does not list gives none.
+func chatSlugsForRoster(info *api.ChatInfo, name string) []string {
+	if info.Council == nil {
+		return chatOldHubSlugs()
+	}
+	for _, r := range info.Council.Rosters {
+		if r.Name == name {
+			return chatSlugList(r.Members)
+		}
+	}
+	return nil
+}
+
+// chatSlugsForNew is what `@` asks before the conversation's next thread exists: none for a chat with one
+// member, on any hub; otherwise fleet and coder on an older hub, else the members of the council that thread
+// will have (--roster, else the bot's default).
+func chatSlugsForNew(info *api.ChatInfo, f chatFlags) []string {
+	switch {
+	case f.memberSlug != "":
+		return nil
+	case info.Council == nil:
+		return chatOldHubSlugs()
+	case f.roster != "":
+		return chatSlugsForRoster(info, f.roster)
+	default:
+		return chatSlugList(info.Council.Roster.Members)
+	}
+}
+
+// chatSlugsForThread is what `@` asks on a thread just read: none for a chat with one member, on any hub;
+// otherwise fleet and coder on an older hub, else the thread's council's members (none for a council the
+// hub cannot find).
+func chatSlugsForThread(info *api.ChatInfo, d *api.ChatThreadDetail) []string {
+	switch {
+	case d.Thread.Member != nil:
+		return nil
+	case info.Council == nil:
+		return chatOldHubSlugs()
+	case d.Council == nil:
+		return nil
+	default:
+		return chatSlugList(d.Council.Roster.Members)
+	}
+}
+
+// chatHelpLine is the conversation's commands, and the members `@` asks in the current chat.
+func chatHelpLine(slugs []string) string {
+	var b strings.Builder
+	b.WriteString("commands: /new /cancel /quit")
+	for _, s := range slugs {
+		b.WriteString(", @" + s)
+	}
+	return b.String()
+}
+
+// chatDefaultCouncil is the bot's default council named for one line, "" when the hub names none.
+func chatDefaultCouncil(c *api.ChatInfoCouncil) string {
+	if name := chatCouncilName(c.Roster.Name, c.Roster.DisplayName); name != "" {
+		return name
+	}
+	return chatCouncilName(c.DefaultRoster, "")
+}
+
+// chatUnavailable is " — unavailable: <reasons>" for a council the hub says cannot answer, "" otherwise.
+func chatUnavailable(status string, reasons []string) string {
+	if status != "invalid" {
+		return ""
+	}
+	if r := councilReasons(reasons); r != "" {
+		return " — unavailable: " + r
+	}
+	return " — unavailable"
+}
+
+// chatRosterMissing refuses a --roster the bot's councils do not list, before the conversation prints or
+// sends anything: the hub looks a council up in exactly the councils the chat's info lists, so the person
+// need not type a prompt it would refuse. Nil on an older hub, when the info lists no council, and for a
+// listed name.
+func chatRosterMissing(bot string, info *api.ChatInfo, f chatFlags) error {
+	if f.roster == "" || info.Council == nil || len(info.Council.Rosters) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(info.Council.Rosters))
+	for _, r := range info.Council.Rosters {
+		if r.Name == f.roster {
+			return nil
+		}
+		names = append(names, escapeLine(r.Name))
+	}
+	return usageErr("There is no council '%s' for %s.\ncouncils: %s", f.roster, escapeLine(bot), strings.Join(names, ", "))
+}
+
+// chatSessionLine is said on stderr before the first prompt when the conversation is not on the bot's
+// default council: the council it asks (and why that council cannot answer), the one member it asks, or that
+// its council is gone.
+// Empty on an older hub, on the default council, and with --thread and --roster (the change's own line names
+// the council). d is the thread read at the start, nil for a conversation without --thread.
+func chatSessionLine(info *api.ChatInfo, f chatFlags, d *api.ChatThreadDetail) string {
+	if info.Council == nil {
+		return ""
+	}
+	if d != nil && d.Thread.Member == nil && f.roster == "" && d.Council == nil {
+		// A council chat whose council the hub cannot find (deleted, or the bot's default is gone): every
+		// turn is refused until the chat gets another council, one with --member included (and --roster
+		// takes no --member).
+		if f.memberSlug != "" {
+			return "· this conversation's council is gone: leave out --member and pick another with --roster"
+		}
+		return "· this conversation's council is gone: pick another with --roster"
+	}
+	member := f.memberSlug
+	if d != nil && d.Thread.Member != nil {
+		member = *d.Thread.Member
+	}
+	if member != "" {
+		line := "· this conversation asks " + escapeLine(cleanBotText(member)) + " alone"
+		if d != nil && d.Thread.Member == nil && d.Council != nil && d.Council.Roster.Status == "invalid" {
+			// --member on a council chat whose council cannot answer: say why, as for the council itself.
+			r := d.Council.Roster
+			line += ", on council " + chatCouncilName(r.Name, r.DisplayName) + chatUnavailable(r.Status, r.Reasons)
+		}
+		return line
+	}
+	var r *api.RosterSummary
+	switch {
+	case d == nil && f.roster != "":
+		for i := range info.Council.Rosters {
+			if info.Council.Rosters[i].Name == f.roster {
+				r = &info.Council.Rosters[i]
+			}
+		}
+	case d != nil && f.roster == "" && d.Council != nil:
+		r = &d.Council.Roster
+	}
+	if r == nil || r.Name == info.Council.Roster.Name {
+		return ""
+	}
+	return "· this conversation asks council " + chatCouncilName(r.Name, r.DisplayName) + chatUnavailable(r.Status, r.Reasons)
+}
+
+// chatNextChat says what the conversation's next thread asks, for the /new line: ", with council <name>" or
+// ", with <member> alone". Empty on an older hub, or when the hub names no council.
+func chatNextChat(info *api.ChatInfo, f chatFlags) string {
+	switch {
+	case info.Council == nil:
+		return ""
+	case f.memberSlug != "":
+		return ", with " + escapeLine(f.memberSlug) + " alone"
+	case f.roster != "":
+		for _, r := range info.Council.Rosters {
+			if r.Name == f.roster {
+				return ", with council " + chatCouncilName(r.Name, r.DisplayName)
+			}
+		}
+		return ", with council " + escapeLine(f.roster)
+	}
+	if name := chatDefaultCouncil(info.Council); name != "" {
+		return ", with council " + name
+	}
+	return ""
+}
+
 // chatRosterHint adds the bot's councils to an unknown_roster refusal, from the chat info already
 // read, so the person sees what to pick. mapped is err already mapped; any other refusal is returned
-// as mapped.
-func chatRosterHint(mapped, err error, info *api.ChatInfo) error {
+// as mapped. roster is the council the hub refused: the info, read before, may still list it (it was
+// deleted meanwhile), so it is left out of the list.
+func chatRosterHint(mapped, err error, info *api.ChatInfo, roster string) error {
 	ce, ok := api.CouncilErrorOf(err)
-	if !ok || ce.Code != "unknown_roster" || info == nil || info.Council == nil || len(info.Council.Rosters) == 0 {
+	if !ok || ce.Code != "unknown_roster" || info == nil || info.Council == nil {
 		return mapped
 	}
 	names := make([]string, 0, len(info.Council.Rosters))
 	for _, r := range info.Council.Rosters {
-		names = append(names, escapeLine(r.Name))
+		if r.Name != roster {
+			names = append(names, escapeLine(r.Name))
+		}
+	}
+	if len(names) == 0 {
+		return mapped
 	}
 	return newErr(exitCodeOf(mapped), "%s\ncouncils: %s", mapped.Error(), strings.Join(names, ", "))
 }
@@ -363,7 +548,7 @@ func chatPatchRoster(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot
 	name := roster
 	t, _, err := fl.PatchChatThread(ctx, bot, thread, api.ChatThreadCouncilPatch{SetRoster: true, Roster: &name})
 	if err != nil {
-		return chatRosterHint(chatPatchError(err, bot, thread, roster), err, info)
+		return chatRosterHint(chatPatchError(err, bot, thread, roster), err, info, roster)
 	}
 	if f.json {
 		return nil
@@ -409,7 +594,7 @@ func chatOnce(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, promp
 	} else {
 		t, _, err := fl.CreateChatThread(ctx, bot, chatThreadRequest(prompt, f))
 		if err != nil {
-			return chatRosterHint(councilError(err), err, info)
+			return chatRosterHint(councilError(err), err, info, f.roster)
 		}
 		threadID = t.ID
 	}
@@ -456,20 +641,15 @@ func chatFollow(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, thr
 	return chatTurnState(last.State, last.Error)
 }
 
-// chatFollowOpenTurn follows the thread's last turn when it has not ended: a conversation opened on
-// a thread picks up where the person left it. A thread whose last turn ended, or that has none, is
-// left alone. read says the thread could be read at all: one the platform will not give has nothing
-// to follow, and cannot be posted on either, so the conversation ends with that error.
-func chatFollowOpenTurn(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, thread string, f chatFlags, sigs <-chan os.Signal) (read bool, err error) {
-	d, _, err := fl.ChatThread(ctx, bot, thread)
-	if err != nil {
-		return false, classify(err)
-	}
+// chatFollowOpenTurn follows the thread's last turn when it has not ended: a conversation opened on a
+// thread picks up where the person left it. d is the thread as the conversation just read it. A thread
+// whose last turn ended, or that has none, is left alone.
+func chatFollowOpenTurn(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, thread string, d *api.ChatThreadDetail, f chatFlags, sigs <-chan os.Signal) error {
 	last := chatLastTurn(d)
 	if last == nil || (last.State != "queued" && last.State != "running") {
-		return true, nil
+		return nil
 	}
-	return true, runChatTurn(ctx, fl, bot, thread, last.ID, 0, newChatTurnPrinter(cmd, f), sigs)
+	return runChatTurn(ctx, fl, bot, thread, last.ID, 0, newChatTurnPrinter(cmd, f), sigs)
 }
 
 // chatLastTurn is the thread's newest turn: the one with the highest index, or nil for a thread
@@ -484,22 +664,88 @@ func chatLastTurn(d *api.ChatThreadDetail) *api.ChatTurn {
 	return last
 }
 
-// chatRepl talks until /quit, EOF or Ctrl-C at the prompt. Its thread is made at the first prompt.
+// chatRepl talks until /quit, EOF or Ctrl-C at the prompt. Its thread is made at the first prompt, unless
+// --thread names one: that thread is read once, checked against the flags, its open turn followed and,
+// with --roster, its council changed, all before the first prompt.
 func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string, info *api.ChatInfo, f chatFlags, sigs <-chan os.Signal) error {
 	out, errw := cmd.OutOrStdout(), cmd.ErrOrStderr()
-	printChatInfo(out, bot, info)
-	if f.thread != "" {
+	if err := chatRosterMissing(bot, info, f); err != nil {
+		return err
+	}
+	// slugs are the members `@` asks in the current chat: the members of the thread's council as last
+	// read, or of the council the next thread will have.
+	var slugs []string
+	if f.thread == "" {
+		slugs = chatSlugsForNew(info, f)
+		printChatInfo(out, bot, info, slugs)
+		if line := chatSessionLine(info, f, nil); line != "" {
+			_, _ = fmt.Fprintln(errw, line)
+		}
+	} else {
+		d, _, err := fl.ChatThread(ctx, bot, f.thread)
+		if err != nil {
+			// The thread cannot be read: no turn can be posted on it either (each one reads the thread
+			// first), so the conversation ends with the platform's error.
+			return classify(err)
+		}
+		if d.Thread.Member != nil {
+			// A chat with one member takes no other member, no --thorough and no council: say so before
+			// anything is printed (the hub would refuse the first two at every prompt, and the change).
+			tid, alone := escapeLine(cleanBotText(f.thread)), escapeLine(cleanBotText(*d.Thread.Member))
+			switch {
+			case f.memberSlug != "" && *d.Thread.Member != f.memberSlug:
+				return usageErr("thread %s is a chat with %s alone: leave out --member, or start a new chat without --thread", tid, alone)
+			case f.thorough:
+				return usageErr("thread %s is a chat with %s alone: leave out --thorough, or start a new chat without --thread", tid, alone)
+			case f.roster != "":
+				return usageErr("thread %s is a chat with %s alone: leave out --roster, or start a new chat without --thread", tid, alone)
+			}
+		}
+		if f.memberSlug != "" && d.Thread.Member == nil && info.Council != nil && d.Council != nil {
+			// A council chat asks --member alone at every prompt: one its council does not have would be
+			// refused at each one. (--member and --roster never come together.)
+			if members := chatSlugList(d.Council.Roster.Members); !slices.Contains(members, f.memberSlug) {
+				list := "none"
+				if len(members) > 0 {
+					list = strings.Join(members, ", ")
+				}
+				return usageErr("thread %s asks council %s, which has no member %s: leave out --member, or start a new chat without --thread\nmembers: %s",
+					escapeLine(cleanBotText(f.thread)), chatCouncilName(d.Council.Roster.Name, d.Council.Roster.DisplayName), escapeLine(f.memberSlug), list)
+			}
+		}
+		// With --roster, what `@` asks once the council is changed below.
+		slugs = chatSlugsForThread(info, d)
+		if f.roster != "" {
+			slugs = chatSlugsForRoster(info, f.roster)
+		}
+		printChatInfo(out, bot, info, slugs)
 		_, _ = fmt.Fprintf(errw, "thread %s\n", escapeLine(cleanBotText(f.thread)))
+		if line := chatSessionLine(info, f, d); line != "" {
+			_, _ = fmt.Fprintln(errw, line)
+		}
 		// A conversation opened on a thread with a turn still running follows it first.
-		if read, err := chatFollowOpenTurn(ctx, cmd, fl, bot, f.thread, f, sigs); err != nil {
-			if !read || errors.Is(err, errChatInterrupted) {
-				// The thread cannot be read: no turn can be posted on it either (each one reads the
-				// thread first), so the conversation ends with the platform's error.
+		if err := chatFollowOpenTurn(ctx, cmd, fl, bot, f.thread, d, f, sigs); err != nil {
+			if errors.Is(err, errChatInterrupted) || exitCodeOf(err) == codeAuth {
+				// A second Ctrl-C left the turn, or the person may no longer chat (the next turn would fail
+				// too): either ends the conversation, and its caller prints the error once.
 				return err
 			}
 			_, _ = fmt.Fprintf(errw, "Error: %v\n", err)
-			if exitCodeOf(err) == codeAuth {
-				return err // the person may no longer chat: the next turn would fail too
+		}
+		if f.roster != "" {
+			// Once, after the open turn ended (the hub refuses to change the council of a chat with a turn
+			// open). A refusal ends the conversation: asking the old council instead would be wrong.
+			if err := chatPatchRoster(ctx, cmd, fl, bot, f.thread, f.roster, info, f); err != nil {
+				return err
+			}
+			// The change, like a new thread, accepts a council that cannot answer: say why, after the
+			// change's own line.
+			if info.Council != nil {
+				for _, r := range info.Council.Rosters {
+					if r.Name == f.roster && r.Status == "invalid" {
+						_, _ = fmt.Fprintln(errw, "· council "+chatCouncilName(r.Name, r.DisplayName)+chatUnavailable(r.Status, r.Reasons))
+					}
+				}
 			}
 		}
 	}
@@ -522,7 +768,6 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 	}()
 
 	threadID, after := f.thread, int64(0)
-	fresh := threadID == ""
 	for {
 		// A Ctrl-C that arrived as the last turn ended is the turn's, not the prompt's.
 		drainSignals(sigs)
@@ -545,8 +790,9 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 				return nil
 			case line == "/new":
 				// The next thread has its own events: its sequence numbers start over at 0.
-				threadID, fresh, after = "", true, 0
-				_, _ = fmt.Fprintln(errw, "· a new thread starts at your next message")
+				threadID, after = "", 0
+				slugs = chatSlugsForNew(info, f)
+				_, _ = fmt.Fprintln(errw, "· a new thread starts at your next message"+chatNextChat(info, f))
 				continue
 			case line == "/cancel":
 				if err := chatCancelOpenTurn(ctx, errw, fl, bot, threadID); err != nil {
@@ -554,48 +800,74 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 				}
 				continue
 			case strings.HasPrefix(line, "/"):
-				_, _ = fmt.Fprintln(out, "commands: /new /cancel /quit, @fleet, @coder")
+				_, _ = fmt.Fprintln(out, chatHelpLine(slugs))
 				continue
 			}
-			member, prompt := chatMemberLine(line)
+			if threadID != "" {
+				// The thread's council decides what @ asks (it may have changed meanwhile): read the thread
+				// before the line is matched.
+				d, _, err := fl.ChatThread(ctx, bot, threadID)
+				if err != nil {
+					mapped := classify(err)
+					if exitCodeOf(mapped) == codeAuth {
+						return mapped // the person may no longer chat: the next line would fail too
+					}
+					_, _ = fmt.Fprintf(errw, "Error: %v\n", mapped)
+					continue
+				}
+				after = d.LastSeq
+				slugs = chatSlugsForThread(info, d)
+			}
+			member, prompt := chatMemberLine(line, slugs)
 			if prompt == "" {
+				_, _ = fmt.Fprintf(errw, "· type the task for @%s\n", member)
 				continue
 			}
 			if threadID == "" {
 				t, _, err := fl.CreateChatThread(ctx, bot, chatThreadRequest(prompt, f))
 				if err != nil {
-					_, _ = fmt.Fprintf(errw, "Error: %v\n", chatRosterHint(councilError(err), err, info))
+					mapped := chatRosterHint(councilError(err), err, info, f.roster)
+					if chatThreadRefusalEnds(err) || exitCodeOf(mapped) == codeAuth {
+						// The same flags would be refused at every prompt, or the person may no longer chat.
+						return mapped
+					}
+					_, _ = fmt.Fprintf(errw, "Error: %v\n", mapped)
 					continue
 				}
 				// A new thread starts before its first event: after is 0, as its ids start at 1.
-				threadID, fresh, after = t.ID, true, 0
+				threadID, after = t.ID, 0
 				_, _ = fmt.Fprintf(errw, "thread %s\n", escapeLine(cleanBotText(threadID)))
 			}
-			if !fresh {
-				d, _, err := fl.ChatThread(ctx, bot, threadID)
-				if err != nil {
-					_, _ = fmt.Fprintf(errw, "Error: %v\n", classify(err))
-					continue
-				}
-				after = d.LastSeq
-			}
-			fresh = false
 			req := chatTurnRequest(prompt, f)
 			if member != "" {
-				// @fleet and @coder ask one member alone: a mode is the council's, not the member's.
+				// @<slug> asks one member alone: a mode is the council's, not the member's.
 				req.Member, req.Mode, req.Thorough = member, "", false
 			}
 			if err := chatRunTurn(ctx, cmd, fl, bot, threadID, after, req, f, sigs); err != nil {
-				if errors.Is(err, errChatInterrupted) {
-					return err // a second Ctrl-C left the turn: it leaves the conversation too
+				if errors.Is(err, errChatInterrupted) || exitCodeOf(err) == codeAuth {
+					// A second Ctrl-C left the turn, or the person may no longer chat (the next turn would fail
+					// too): either ends the conversation, and its caller prints the error once.
+					return err
 				}
 				_, _ = fmt.Fprintf(errw, "Error: %v\n", err)
-				if exitCodeOf(err) == codeAuth {
-					return err // the person may no longer chat: the next turn would fail too
-				}
 			}
 		}
 	}
+}
+
+// chatThreadRefusalEnds says whether a refusal of a new thread comes from the conversation's own flags (an
+// unknown council, an unknown or ambiguous member, a member only the creator may use): the same flags would
+// be refused at every prompt. The hub's code decides, never the HTTP status.
+func chatThreadRefusalEnds(err error) bool {
+	ce, ok := api.CouncilErrorOf(err)
+	if !ok {
+		return false
+	}
+	switch ce.Code {
+	case "unknown_roster", "unknown_member", "ambiguous", "creator_only":
+		return true
+	}
+	return false
 }
 
 // drainSignals throws away the Ctrl-Cs already queued: one that arrived as a finished turn ended is
@@ -610,18 +882,21 @@ func drainSignals(sigs <-chan os.Signal) {
 	}
 }
 
-// chatMemberLine reads "@fleet <text>" or "@coder <text>": the member asked alone, and the text.
-func chatMemberLine(line string) (member, prompt string) {
-	for _, m := range []string{"fleet", "coder"} {
-		rest, ok := strings.CutPrefix(line, "@"+m)
-		if !ok {
-			continue
-		}
-		if rest == "" || rest[0] == ' ' || rest[0] == '\t' {
-			return m, strings.TrimSpace(rest)
-		}
+// chatMemberLine reads "@<slug> <text>" for a slug in slugs: the member asked alone, and the text. Any other
+// line, "@<word>" for a word not in slugs included, is all prompt.
+func chatMemberLine(line string, slugs []string) (member, prompt string) {
+	rest, ok := strings.CutPrefix(line, "@")
+	if !ok {
+		return "", line
 	}
-	return "", line
+	token, text := rest, ""
+	if i := strings.IndexAny(rest, " \t"); i >= 0 {
+		token, text = rest[:i], rest[i:]
+	}
+	if token == "" || !slices.Contains(slugs, token) {
+		return "", line
+	}
+	return token, strings.TrimSpace(text)
 }
 
 // chatCancelOpenTurn cancels the thread's open turn, if it has one.
@@ -649,8 +924,10 @@ func chatCancelOpenTurn(ctx context.Context, errw io.Writer, fl *api.Fleet, bot,
 	return nil
 }
 
-// printChatInfo is what the conversation says about the bot before the first prompt.
-func printChatInfo(w io.Writer, bot string, info *api.ChatInfo) {
+// printChatInfo is what the conversation says about the bot before the first prompt: the version of its
+// computer, its default council (and why that council cannot answer, when it cannot), and the members of
+// that council with each one's part. slugs are the members the conversation's `@` asks.
+func printChatInfo(w io.Writer, bot string, info *api.ChatInfo, slugs []string) {
 	online := "offline"
 	if info.Bot.Online {
 		online = "online"
@@ -659,19 +936,57 @@ func printChatInfo(w io.Writer, bot string, info *api.ChatInfo) {
 	if access == "" {
 		access = api.BotAccessNone
 	}
-	council := "unknown"
+	computer := "unknown"
 	if info.Bot.Council != nil && *info.Bot.Council != "" {
-		council = *info.Bot.Council
+		computer = *info.Bot.Council
 	}
-	_, _ = fmt.Fprintf(w, "%s (%s, %s) — council %s\n", bot, escapeLine(cleanBotText(access)), online, escapeLine(cleanBotText(council)))
+	_, _ = fmt.Fprintf(w, "%s (%s, %s) — computer: %s\n", bot, escapeLine(cleanBotText(access)), online, escapeLine(cleanBotText(computer)))
+	c := info.Council
+	if c != nil {
+		if name := chatDefaultCouncil(c); name != "" {
+			_, _ = fmt.Fprintln(w, "council: "+name+chatUnavailable(c.Roster.Status, c.Roster.Reasons))
+		}
+	}
 	if len(info.Members) > 0 {
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		for _, m := range info.Members {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", terminalText(cleanBotText(m.Name)), terminalText(cleanBotText(m.Model)), terminalText(cleanBotText(m.Effort)))
+		for i, m := range info.Members {
+			name, model, effort := terminalText(cleanBotText(m.Name)), terminalText(cleanBotText(m.Model)), terminalText(cleanBotText(m.Effort))
+			if c == nil {
+				// An older hub: no council to place the members in.
+				_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", name, model, effort)
+				continue
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, chatMemberPart(c.Roster, i, m.ID, slugs), model, effort)
 		}
 		_ = tw.Flush()
 	}
 	_, _ = fmt.Fprintf(w, "tokens today: %d of %d\n", info.Budget.TokensToday, info.Budget.TokensPerDay)
+}
+
+// chatMemberPart is a member's part in the default council, for one cell: leads, reviews, @<slug> when the
+// conversation's `@` asks that member, else member. The chat's members line up one to one with the council's
+// roles; where a role's slug differs (a platform that sends no roles), the council's lead and reviewer slugs
+// decide.
+func chatMemberPart(r api.RosterView, i int, id string, slugs []string) string {
+	kind := "member"
+	switch {
+	case i < len(r.Roles) && r.Roles[i].Slug == id:
+		kind = r.Roles[i].Kind
+	case id == r.Lead:
+		kind = "lead"
+	case r.Reviewer != nil && id == *r.Reviewer:
+		kind = "reviewer"
+	}
+	switch kind {
+	case "lead":
+		return "leads"
+	case "reviewer":
+		return "reviews"
+	}
+	if slices.Contains(slugs, id) {
+		return "@" + councilCell(id)
+	}
+	return "member" // `@` does not ask it here: another council, or a chat with one member
 }
 
 // printChatThreads is the threads table.

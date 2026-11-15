@@ -739,6 +739,20 @@ func TestChatHubCouncilCodes(t *testing.T) {
 			want: codeUsage, wantEx: "There is no council 'ops2' for scout.\ncouncils: standard, ops",
 		},
 		{
+			name: "a listed council deleted before the thread is made", args: []string{"--roster", "ops", "hi"},
+			route: "POST /bots/scout/chat/threads", status: 404,
+			body: councilErrBody("unknown_roster", "There is no council 'ops' for scout.", ""),
+			info: chatInfoCouncils,
+			want: codeUsage, wantEx: "There is no council 'ops' for scout.\ncouncils: standard",
+		},
+		{
+			name: "the only listed council deleted before the thread is made", args: []string{"--roster", "ops", "hi"},
+			route: "POST /bots/scout/chat/threads", status: 404,
+			body: councilErrBody("unknown_roster", "There is no council 'ops' for scout.", ""),
+			info: strings.TrimSuffix(chatInfoBody, "}") + `,"council":{"defaultRoster":"standard","rosters":[{"name":"ops"}]}}`,
+			want: codeUsage, wantEx: "There is no council 'ops' for scout.",
+		},
+		{
 			name: "a creator-level bot", args: []string{"--member", "coder", "hi"},
 			route: "POST /bots/scout/chat/threads", status: 409,
 			body: councilErrBody("creator_only", "This bot works at creator level: only its creator can start this chat.", ""),
@@ -1086,17 +1100,23 @@ func TestChatREPLBodies(t *testing.T) {
 		p.on("POST", "/bots/scout/chat/threads", 404,
 			councilErrBody("unknown_roster", "There is no council 'ops2' for scout.", ""))
 		oldIn := cliStdin
-		cliStdin = strings.NewReader("hello\n/quit\n")
+		cliStdin = strings.NewReader("hello\nagain\n/quit\n")
 		t.Cleanup(func() { cliStdin = oldIn })
 		_, errs, err := runCLI(t, p.env(t), "chat", "scout", "--roster", "ops2")
-		if err != nil {
+		if err == nil || exitCodeOf(err) != codeUsage {
 			t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
 		}
-		if !strings.Contains(errs, "Error: There is no council 'ops2' for scout.\n") {
-			t.Errorf("stderr %q lacks the hub's words", errs)
+		if want := "There is no council 'ops2' for scout."; err.Error() != want {
+			t.Errorf("error %q, want %q", err, want)
 		}
-		if strings.Contains(errs, "(HTTP") {
-			t.Errorf("stderr %q: the raw HTTP text reached the person", errs)
+		if strings.Contains(errs, "There is no council") {
+			t.Errorf("stderr %q: the REPL printed the refusal", errs)
+		}
+		if strings.Contains(errs, "Error:") {
+			t.Errorf("stderr %q: the REPL printed the refusal", errs)
+		}
+		if n := len(p.seen("POST", "/bots/scout/chat/threads")); n != 1 {
+			t.Errorf("%d threads were created, want 1 (the refusal ends the conversation)", n)
 		}
 		for _, r := range chatReqs(p) {
 			if r.Method == http.MethodPost && strings.HasSuffix(r.Path, "/turns") {
@@ -1113,14 +1133,23 @@ func TestChatREPLBodies(t *testing.T) {
 		p.on("POST", "/bots/scout/chat/threads", 404,
 			councilErrBody("unknown_roster", "There is no council 'ops2' for scout.", ""))
 		oldIn := cliStdin
-		cliStdin = strings.NewReader("hello\n/quit\n")
+		cliStdin = strings.NewReader("hello\nagain\n/quit\n")
 		t.Cleanup(func() { cliStdin = oldIn })
-		_, errs, err := runCLI(t, p.env(t), "chat", "scout", "--roster", "ops2")
-		if err != nil {
+		out, errs, err := runCLI(t, p.env(t), "chat", "scout", "--roster", "ops2")
+		if err == nil || exitCodeOf(err) != codeUsage {
 			t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
 		}
-		if want := "Error: There is no council 'ops2' for scout.\ncouncils: standard, ops\n"; !strings.Contains(errs, want) {
-			t.Errorf("stderr %q lacks %q", errs, want)
+		if want := "There is no council 'ops2' for scout.\ncouncils: standard, ops"; err.Error() != want {
+			t.Errorf("error %q, want %q", err, want)
+		}
+		if out != "" {
+			t.Errorf("stdout %q, want nothing (tnctl refused before the banner)", out)
+		}
+		if errs != "" {
+			t.Errorf("stderr %q, want nothing", errs)
+		}
+		if n := len(p.seen("POST", "/bots/scout/chat/threads")); n != 0 {
+			t.Errorf("%d threads were created, want none (tnctl refused before P3)", n)
 		}
 	})
 }
