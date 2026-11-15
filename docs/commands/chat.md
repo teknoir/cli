@@ -113,11 +113,13 @@ stderr gets one short line per event of the council, prefixed with `· `, so you
 · fleet done
 · critic: 2 issues (1 blocking)
 · budget: tokens limit 5000000
-done in 12.4s, 6 calls, 18422 tokens
+done in 12.4s, 6 calls, 18422 tokens (+96200 cached)
 ```
 
 The last line, from the turn's `usage` event, says how long it took, how many model calls it made and how many
-tokens it spent.
+tokens it spent. Those are the tokens the bot's budget and its `tokens today` count: the prompt, the cache writes
+and the answer. Tokens read from the prompt cache cost far less and count against neither; they follow in brackets
+when there are any.
 
 All text from the bot — deltas, the final, titles and messages — is untrusted: ANSI escape sequences and
 control characters are dropped before it is printed, except newlines and tabs, so it can never drive your

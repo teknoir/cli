@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -2316,6 +2317,54 @@ func TestCleanBotText(t *testing.T) {
 	for in, want := range cases {
 		if got := cleanBotText(in); got != want {
 			t.Errorf("cleanBotText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The done line counts the tokens the bot's budget and its tokens today count (input, cache writes
+// and output); the tokens read from the prompt cache follow apart, and only when there are some.
+func TestChatSummaryCountsTheBudgetsTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		u    api.ChatUsage
+		want string
+	}{
+		{"no cache", api.ChatUsage{Calls: 2, Input: 100, Output: 40, MS: 1500}, "done in 1.5s, 2 calls, 140 tokens\n"},
+		{"cache reads apart", api.ChatUsage{Calls: 8, Input: 9000, Output: 2130, CacheRead: 96200, CacheWrite: 11000, MS: 41200},
+			"done in 41.2s, 8 calls, 22130 tokens (+96200 cached)\n"},
+		{"cache writes counted", api.ChatUsage{Calls: 1, Input: 10, Output: 5, CacheWrite: 85, MS: 900}, "done in 0.9s, 1 call, 100 tokens\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var errs strings.Builder
+			p := &chatTurnPrinter{out: io.Discard, errw: &errs}
+			p.summary(&c.u)
+			if got := errs.String(); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// cutLine ends a cut line with "…" within its length, and leaves a short one whole.
+func TestChatCutLine(t *testing.T) {
+	cases := []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"short", 80, "short"},
+		{strings.Repeat("a", 80), 80, strings.Repeat("a", 80)},
+		{strings.Repeat("a", 81), 80, strings.Repeat("a", 79) + "…"},
+		{"check the pods  of amr-02", 17, "check the pods…"},
+		{"åäö" + strings.Repeat("x", 10), 5, "åäöx…"},
+	}
+	for _, c := range cases {
+		if got := cutLine(c.in, c.n); got != c.want {
+			t.Errorf("cutLine(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
+		}
+		if utf8.RuneCountInString(cutLine(c.in, c.n)) > c.n {
+			t.Errorf("cutLine(%q, %d) is longer than %d", c.in, c.n, c.n)
 		}
 	}
 }

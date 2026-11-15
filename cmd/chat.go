@@ -1077,6 +1077,15 @@ func cutRunes(s string, n int) string {
 	return string(r[:n])
 }
 
+// cutLine cuts s to n characters, counting runes, and ends a cut line with "…" (within the n), so a
+// reader can tell a cut task from a whole one.
+func cutLine(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return strings.TrimRight(cutRunes(s, n-1), " ") + "…"
+}
+
 // ---------- one turn ----------
 
 // chatItem is one read of a chat stream, tagged with the connection it came from: an event of an
@@ -1505,7 +1514,7 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 				remember(d.Member, d.Name)
 				line := who(d.Member, d.Name)
 				if text := terminalText(cleanBotText(d.Text)); text != "" {
-					line += ": " + cutRunes(text, 80)
+					line += ": " + cutLine(text, 80)
 				}
 				p.progress(line)
 			case "tool_call":
@@ -1792,7 +1801,9 @@ func (p *chatTurnPrinter) skipped(seq int64) {
 	_, _ = fmt.Fprintf(p.errw, "· skipped a malformed event (seq %d)\n", seq)
 }
 
-// summary is what the turn cost, when the stream reported it.
+// summary is what the turn cost, when the stream reported it. Its tokens are the ones the bot's
+// budget and its tokens today count (input, cache writes and output); tokens read from the prompt
+// cache are cheap and counted by neither, so they follow apart: "18422 tokens (+96200 cached)".
 func (p *chatTurnPrinter) summary(u *api.ChatUsage) {
 	if p.json || u == nil {
 		return
@@ -1802,10 +1813,13 @@ func (p *chatTurnPrinter) summary(u *api.ChatUsage) {
 		calls = "1 call"
 	}
 	secs := strconv.FormatFloat(float64(u.MS)/1000, 'f', 1, 64)
-	tokens := u.Input + u.Output + u.CacheRead + u.CacheWrite
+	tokens := fmt.Sprintf("%d tokens", u.Input+u.CacheWrite+u.Output)
+	if u.CacheRead > 0 {
+		tokens += fmt.Sprintf(" (+%d cached)", u.CacheRead)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	_, _ = fmt.Fprintf(p.errw, "done in %ss, %s, %d tokens\n", secs, calls, tokens)
+	_, _ = fmt.Fprintf(p.errw, "done in %ss, %s, %s\n", secs, calls, tokens)
 }
 
 // writeEvent prints one event of the turn as the platform sent it, with its sequence number and type

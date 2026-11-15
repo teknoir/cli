@@ -1503,3 +1503,28 @@ func TestChatProgressSlugFallback(t *testing.T) {
 		t.Errorf("progress\n%q\nwant\n%q", got, want)
 	}
 }
+
+// A member's task longer than 80 characters is cut with "…", so the progress line does not pass off
+// a cut task as the whole one; a task of 80 is printed whole.
+func TestChatProgressCutsALongTask(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, false)
+	long := "List the pods of amr-02 in the fleet namespace, then read the logs of every pod that restarted today"
+	whole := strings.Repeat("x", 80)
+	errs, err := chatOneShotFrames(t, []string{
+		frame(1, "member_start", `"member":"fleet","name":"Fleet","text":"`+long+`"`),
+		frame(2, "member_start", `"member":"triage","name":"Triage","text":"`+whole+`"`),
+		frame(3, "final", `"text":"done"`),
+		frame(4, "turn_end", `"state":"done"`),
+	})
+	if err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
+	}
+	want := []string{
+		"· Fleet: List the pods of amr-02 in the fleet namespace, then read the logs of every pod…\n",
+		"· Triage: " + whole + "\n",
+	}
+	if got := chatProgressLines(errs); !reflect.DeepEqual(got, want) {
+		t.Errorf("progress\n%q\nwant\n%q", got, want)
+	}
+}
