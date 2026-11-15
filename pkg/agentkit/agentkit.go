@@ -196,7 +196,7 @@ type op struct {
 
 func newOp(o *Options) *op {
 	if o.KitVersion == "" {
-		o.KitVersion = "0.2.0"
+		o.KitVersion = "0.3.0"
 	}
 	if o.TnctlVersion == "" {
 		o.TnctlVersion = "dev"

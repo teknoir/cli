@@ -78,7 +78,7 @@ what it wrote and uninstall removes exactly that.`,
 	f.addScopeFlags(c, true, "User scope: ~/.claude and ~/.agents (the default)")
 	c.Flags().BoolVar(&mcp, "mcp", false, "Also register the read-only teknoir MCP server (tnctl mcp)")
 	c.Flags().BoolVar(&council, "council", false,
-		"With --mcp, register tnctl mcp --council: the read tools plus the council tools that hand work to a TeknoirBot's council (they start work on the bot and use its token budget)")
+		"With --mcp, register tnctl mcp --council: the read tools plus the council tools that hand work to a TeknoirBot's council (council_ask and council_run start work on the bot and use its token budget)")
 	c.Flags().BoolVar(&hooks, "hooks", false, "Also install the guard hook (Claude Code only)")
 	c.Flags().BoolVar(&agentsMD, "agents-md", false, "Add the kit's section to ./AGENTS.md (with --project)")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "Print what would be done and write nothing")
