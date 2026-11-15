@@ -49,20 +49,29 @@ func TestCouncilServeMaxTurns(t *testing.T) {
 	}
 }
 
-// TestCouncilCmdHidden keeps the command out of the help of its parent, and gives serve its flags.
-func TestCouncilCmdHidden(t *testing.T) {
+// TestCouncilCmdVisible is a person's command group, with the bot's serve daemon hidden below it.
+func TestCouncilCmdVisible(t *testing.T) {
+	noBotMode(t)
 	root := newCouncilCmd(defaultEnv)
-	if !root.Hidden {
-		t.Error("council is not hidden")
+	if root.Hidden {
+		t.Error("council is hidden")
+	}
+	if root.RunE == nil {
+		t.Error("council is not runnable")
 	}
 	var serve *cobra.Command
+	subs := map[string]*cobra.Command{}
 	for _, c := range root.Commands() {
+		subs[c.Name()] = c
 		if c.Name() == "serve" {
 			serve = c
 		}
 	}
 	if serve == nil {
 		t.Fatal("council has no serve subcommand")
+	}
+	if !serve.Hidden {
+		t.Error("serve is not hidden")
 	}
 	if serve.Flags().Lookup("max-turns") == nil || serve.Flags().Lookup("work-dir") == nil {
 		t.Error("serve lacks --max-turns or --work-dir")
@@ -78,5 +87,60 @@ func TestCouncilCmdHidden(t *testing.T) {
 	}
 	if kit.DefValue != council.DefaultKitDir {
 		t.Errorf("--kit-dir defaults to %q, want %q", kit.DefValue, council.DefaultKitDir)
+	}
+	role := subs["role"]
+	if role == nil {
+		t.Fatal("council has no role subcommand")
+	}
+	got := map[string]bool{}
+	for _, c := range role.Commands() {
+		got[c.Name()] = true
+	}
+	for _, want := range []string{"list", "get", "export"} {
+		if !got[want] {
+			t.Errorf("council role has no %s subcommand", want)
+		}
+	}
+
+	out, _, err := councilArgs(t, &cliEnv{})
+	if err != nil {
+		t.Fatalf("council: %v", err)
+	}
+	if !strings.Contains(out, "tnctl council role") {
+		t.Errorf("council's help does not name its role commands: %q", out)
+	}
+	if want := "Read and change a TeknoirBot's council: its members and councils"; root.Short != want {
+		t.Errorf("council Short %q, want %q", root.Short, want)
+	}
+	wantLong := "A council is the set of members that answers a chat with a TeknoirBot: a lead (the Captain)\n" +
+		"plans each turn, members each do one job, and a reviewer (the Critic, or Skeptic) checks the\n" +
+		"members' reports when the turn needs it, not on every turn.\n" +
+		"\n" +
+		"  tnctl council role list|get|export   the members a bot's councils can use\n" +
+		"\n" +
+		"These are a person's commands: a TeknoirBot cannot run them (it runs only tnctl council serve,\n" +
+		"inside its computer)."
+	if root.Long != wantLong {
+		t.Errorf("council Long:\n%q\nwant:\n%q", root.Long, wantLong)
+	}
+	if want := "List and read the members a bot's councils can use"; role.Short != want {
+		t.Errorf("council role Short %q, want %q", role.Short, want)
+	}
+	// A mistyped subcommand is a usage error with cobra's suggestions; the hidden serve is never one.
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"rol"}, `unknown command "rol" for "tnctl council": did you mean role?`},
+		{[]string{"rle"}, `unknown command "rle" for "tnctl council": did you mean role?`},
+		{[]string{"serv"}, `unknown command "serv" for "tnctl council"`},
+		{[]string{"role", "lsit"}, `unknown command "lsit" for "tnctl council role": did you mean list?`},
+		{[]string{"role", "lst"}, `unknown command "lst" for "tnctl council role": did you mean list or get?`},
+		{[]string{"role", "exprt"}, `unknown command "exprt" for "tnctl council role": did you mean export?`},
+	} {
+		_, _, err = councilArgs(t, &cliEnv{}, c.args...)
+		if err == nil || exitCodeOf(err) != codeUsage || err.Error() != c.want {
+			t.Errorf("council %v: exit %d, %v; want exit 2 %q", c.args, exitCodeOf(err), err, c.want)
+		}
 	}
 }

@@ -123,7 +123,14 @@ func botRefusedError(path string) error {
 	return newErr(codeAuth, "%q is not available to a TeknoirBot: it cannot open tunnels or hold device logins. For logs use \"tnctl inspect logs\".", "tnctl "+path)
 }
 
-// botPreRun refuses the commands of botRefused in bot mode. It runs as rootCmd's PersistentPreRunE,
+// botRefusedCouncil is the refusal of a council command a TeknoirBot may not run. Every person's
+// council subcommand is refused, so a later one needs no edit here.
+func botRefusedCouncil(path string) error {
+	return newErr(codeAuth, "%q is not available to a TeknoirBot: only a person reads and changes a bot's council.", "tnctl "+path)
+}
+
+// botPreRun refuses, in bot mode, the commands of botRefused, "ns" with an argument, and every
+// council command but the group's help and "council serve". It runs as rootCmd's PersistentPreRunE,
 // so it sees the command that was found before any of it runs.
 func botPreRun(cmd *cobra.Command, args []string) error {
 	// Without its teamspace a bot cannot use the fleet, and botMode says so when a command asks for
@@ -151,6 +158,12 @@ func botPreRun(cmd *cobra.Command, args []string) error {
 		// The refusal is the whole answer: no usage text after it.
 		cmd.SilenceUsage = true
 		return botRefusedError(path)
+	}
+	// A bot runs "tnctl council serve" and nothing else of the council: the group's own help is
+	// harmless, every other subcommand is a person's.
+	if first == "council" && path != "council" && path != "council serve" {
+		cmd.SilenceUsage = true
+		return botRefusedCouncil(path)
 	}
 	return nil
 }

@@ -19,18 +19,25 @@ import (
 // councilWorkDir is where the Coder works by default.
 const councilWorkDir = "/work"
 
-// newCouncilCmd is the hidden council command of a TeknoirBot.
+// newCouncilCmd is "tnctl council": a person's commands for a TeknoirBot's council, and the daemon the
+// bot itself runs.
 func newCouncilCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
-		Use:   "council",
-		Short: "Run the council of a TeknoirBot",
-		Long: `Run the council of a TeknoirBot: the Captain, Fleet, the Coder and the Critic.
+		Use:          "council",
+		Short:        "Read and change a TeknoirBot's council: its members and councils",
+		SilenceUsage: true,
+		Long: `A council is the set of members that answers a chat with a TeknoirBot: a lead (the Captain)
+plans each turn, members each do one job, and a reviewer (the Critic, or Skeptic) checks the
+members' reports when the turn needs it, not on every turn.
 
-Inside a TeknoirBot's computer the council takes the chat turns the platform queues for it and
-answers them. It runs the bot's own key, on the bot's own computer; it is not a person's command.`,
-		Hidden: true,
+  tnctl council role list|get|export   the members a bot's councils can use
+
+These are a person's commands: a TeknoirBot cannot run them (it runs only tnctl council serve,
+inside its computer).`,
+		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+		Args: councilGroupArgs,
 	}
-	c.AddCommand(newCouncilServeCmd(e))
+	c.AddCommand(newCouncilServeCmd(e), newCouncilRoleCmd(e))
 	return c
 }
 
@@ -43,6 +50,7 @@ func newCouncilServeCmd(e *cliEnv) *cobra.Command {
 		Use:          "serve",
 		Short:        "Take chat turns from the platform and answer them",
 		Args:         cobra.NoArgs,
+		Hidden:       true,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if maxTurns < 1 || maxTurns > 2 {
