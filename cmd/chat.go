@@ -1097,6 +1097,9 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 	// them the turn is in — a backoff sleep, a Retry-After wait, a request still to be answered.
 	turnCtx, cancelTurn := context.WithCancelCause(ctx)
 	events := make(chan chatItem, 256)
+	// However the turn ends, stdout does not stay inside the Captain's text. Deferred first, so it
+	// runs last: after the watcher is done.
+	defer p.endLine()
 
 	// The signal watcher belongs to this turn alone: the turn closes done before it returns, and
 	// waits for the watcher, so a Ctrl-C at the prompt of the conversation never reaches it.
@@ -1745,6 +1748,21 @@ func (p *chatTurnPrinter) final(text string) {
 		}
 		_, _ = fmt.Fprint(p.out, sep+endWithNewline(clean))
 	}
+	// Every branch ends the line.
+	p.lastNewline = true
+}
+
+// endLine ends the line the Captain's text left open when the turn ends without a final that ends
+// it (cancelled, failed, interrupted, or its stream lost): the error and the next prompt then start
+// a line of their own.
+func (p *chatTurnPrinter) endLine() {
+	if p.json || !p.tty || !p.printedAny || p.lastNewline {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, _ = fmt.Fprint(p.out, "\n")
+	p.lastNewline = true
 }
 
 // progress is one line of what the council is doing, on stderr.

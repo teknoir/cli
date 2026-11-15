@@ -1716,6 +1716,10 @@ func TestChatREPLCtrlCCancelsTheTurnAndKeepsGoing(t *testing.T) {
 	if n := strings.Count(out, "> "); n < 3 {
 		t.Errorf("the prompt came back %d times, want at least 3 (the turn was cancelled): %q", n, out)
 	}
+	// the cancelled turn's text ends its line: the next prompt starts a line of its own
+	if !strings.Contains(out, "start\n> ") {
+		t.Errorf("stdout %q: the prompt after the cancelled turn is not on a line of its own", out)
+	}
 	turns := p.seen("POST", "/bots/scout/chat/threads/thr_new/turns")
 	if len(turns) != 2 || !strings.Contains(turns[1].Body, `"prompt":"second"`) {
 		t.Errorf("turns %+v", turns)
