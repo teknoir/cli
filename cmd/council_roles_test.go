@@ -266,7 +266,7 @@ func TestCouncilRoleListEmpty(t *testing.T) {
 	if out != "" {
 		t.Errorf("stdout %q", out)
 	}
-	if want := "· no members for scout yet (its own or the teamspace's); --templates lists the premade ones\n"; errs != want {
+	if want := "· no members for scout yet (its own or the teamspace's); --templates lists the premade ones; the bot's creator or a teamspace admin makes one with tnctl council role new <name> --job \"…\" --bot scout\n"; errs != want {
 		t.Errorf("stderr %q, want %q", errs, want)
 	}
 
@@ -978,7 +978,7 @@ func TestCouncilRoleListEmptyTeamspace(t *testing.T) {
 	if out != "" {
 		t.Errorf("stdout %q", out)
 	}
-	if want := "· no shared members in this teamspace yet; --templates lists the premade ones, --bot <bot> a bot's own\n"; errs != want {
+	if want := "· no shared members in this teamspace yet; --templates lists the premade ones, --bot <bot> a bot's own; a teamspace admin makes one with tnctl council role new <name> --job \"…\" --teamspace\n"; errs != want {
 		t.Errorf("stderr %q, want %q", errs, want)
 	}
 	out, errs, err = councilArgs(t, p.env(t), "role", "list", "--templates")

@@ -96,10 +96,13 @@ func TestCouncilCmdVisible(t *testing.T) {
 	for _, c := range role.Commands() {
 		got[c.Name()] = true
 	}
-	for _, want := range []string{"list", "get", "export"} {
+	for _, want := range []string{"list", "get", "export", "new", "archive", "apply"} {
 		if !got[want] {
 			t.Errorf("council role has no %s subcommand", want)
 		}
+	}
+	if subs["apply"] == nil {
+		t.Error("council has no apply subcommand")
 	}
 
 	out, _, err := councilArgs(t, &cliEnv{})
@@ -117,13 +120,15 @@ func TestCouncilCmdVisible(t *testing.T) {
 		"members' reports when the turn needs it, not on every turn.\n" +
 		"\n" +
 		"  tnctl council role list|get|export   the members a bot's councils can use\n" +
+		"  tnctl council role new|archive       make a member from its job in words, or archive one\n" +
+		"  tnctl council apply -f <file>        apply members and councils from YAML (an export, edited)\n" +
 		"\n" +
 		"These are a person's commands: a TeknoirBot cannot run them (it runs only tnctl council serve,\n" +
 		"inside its computer)."
 	if root.Long != wantLong {
 		t.Errorf("council Long:\n%q\nwant:\n%q", root.Long, wantLong)
 	}
-	if want := "List and read the members a bot's councils can use"; role.Short != want {
+	if want := "List, read, make and archive the members a bot's councils can use"; role.Short != want {
 		t.Errorf("council role Short %q, want %q", role.Short, want)
 	}
 	// A mistyped subcommand is a usage error with cobra's suggestions; the hidden serve is never one.
@@ -131,12 +136,14 @@ func TestCouncilCmdVisible(t *testing.T) {
 		args []string
 		want string
 	}{
+		{[]string{"aply"}, `unknown command "aply" for "tnctl council": did you mean apply?`},
 		{[]string{"rol"}, `unknown command "rol" for "tnctl council": did you mean role?`},
 		{[]string{"rle"}, `unknown command "rle" for "tnctl council": did you mean role?`},
 		{[]string{"serv"}, `unknown command "serv" for "tnctl council"`},
 		{[]string{"role", "lsit"}, `unknown command "lsit" for "tnctl council role": did you mean list?`},
 		{[]string{"role", "lst"}, `unknown command "lst" for "tnctl council role": did you mean list or get?`},
 		{[]string{"role", "exprt"}, `unknown command "exprt" for "tnctl council role": did you mean export?`},
+		{[]string{"role", "archve"}, `unknown command "archve" for "tnctl council role": did you mean archive?`},
 	} {
 		_, _, err = councilArgs(t, &cliEnv{}, c.args...)
 		if err == nil || exitCodeOf(err) != codeUsage || err.Error() != c.want {

@@ -351,13 +351,17 @@ func TestBotModeRefusesTheCommandsItMayNotRun(t *testing.T) {
 		{"council", "role", "list"},
 		{"council", "role", "get", "x"},
 		{"council", "role", "export", "x"},
+		{"council", "apply", "-f", "x.yaml"},
+		{"council", "role", "apply", "-f", "x.yaml"},
+		{"council", "role", "new", "Watcher", "--job", "watches", "--bot", "scout"},
+		{"council", "role", "archive", "x"},
 	}
 	// chat's refusal names its own reason: a bot does not chat with itself.
 	ownText := map[string]string{
 		"chat": `"tnctl chat" is not available to a TeknoirBot: a bot does not use the person chat.`,
 	}
 	// The council's person commands say so too: a bot runs only "council serve".
-	for _, p := range []string{"council role", "council role list", "council role get", "council role export"} {
+	for _, p := range []string{"council role", "council role list", "council role get", "council role export", "council role new", "council role archive", "council role apply", "council apply"} {
 		ownText[p] = `"tnctl ` + p + `" is not available to a TeknoirBot: only a person reads and changes a bot's council.`
 	}
 	// The commands do more than tnctl when cobra hands them the arguments: none of them may run.
@@ -392,8 +396,11 @@ func TestBotModeRefusesTheCommandsItMayNotRun(t *testing.T) {
 				path = "add domain"
 			}
 			if args[0] == "council" {
-				// The group and the subcommand, without the member the command would read.
-				n := min(3, len(args))
+				// The group and the subcommand, without the member or the flags the command would read.
+				n := 0
+				for n < min(3, len(args)) && !strings.HasPrefix(args[n], "-") {
+					n++
+				}
 				path = strings.Join(args[:n], " ")
 			}
 			want := `"tnctl ` + path + `" is not available to a TeknoirBot: it cannot open tunnels or hold device logins. For logs use "tnctl inspect logs".`

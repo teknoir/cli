@@ -210,12 +210,12 @@ func councilGroupArgs(cmd *cobra.Command, args []string) error {
 func newCouncilRoleCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
 		Use:          "role",
-		Short:        "List and read the members a bot's councils can use",
+		Short:        "List, read, make and archive the members a bot's councils can use",
 		SilenceUsage: true,
 		RunE:         func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 		Args:         councilGroupArgs,
 	}
-	c.AddCommand(newCouncilRoleListCmd(e), newCouncilRoleGetCmd(e), newCouncilRoleExportCmd(e))
+	c.AddCommand(newCouncilRoleListCmd(e), newCouncilRoleGetCmd(e), newCouncilRoleExportCmd(e), newCouncilRoleNewCmd(e), newCouncilRoleArchiveCmd(e), newCouncilApplyCmd(e))
 	return c
 }
 
@@ -333,9 +333,9 @@ func printCouncilRows(out, errw io.Writer, rows []councilRow, bot string, templa
 		case templates:
 			_, _ = fmt.Fprintf(errw, "· no members\n")
 		case bot == "":
-			_, _ = fmt.Fprintf(errw, "· no shared members in this teamspace yet; --templates lists the premade ones, --bot <bot> a bot's own\n")
+			_, _ = fmt.Fprintf(errw, "· no shared members in this teamspace yet; --templates lists the premade ones, --bot <bot> a bot's own; a teamspace admin makes one with tnctl council role new <name> --job \"…\" --teamspace\n")
 		default:
-			_, _ = fmt.Fprintf(errw, "· no members for %s yet (its own or the teamspace's); --templates lists the premade ones\n", escapeLine(bot))
+			_, _ = fmt.Fprintf(errw, "· no members for %s yet (its own or the teamspace's); --templates lists the premade ones; the bot's creator or a teamspace admin makes one with tnctl council role new <name> --job \"…\" --bot %s\n", escapeLine(bot), escapeLine(bot))
 		}
 		return nil
 	}

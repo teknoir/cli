@@ -31,13 +31,15 @@ plans each turn, members each do one job, and a reviewer (the Critic, or Skeptic
 members' reports when the turn needs it, not on every turn.
 
   tnctl council role list|get|export   the members a bot's councils can use
+  tnctl council role new|archive       make a member from its job in words, or archive one
+  tnctl council apply -f <file>        apply members and councils from YAML (an export, edited)
 
 These are a person's commands: a TeknoirBot cannot run them (it runs only tnctl council serve,
 inside its computer).`,
 		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 		Args: councilGroupArgs,
 	}
-	c.AddCommand(newCouncilServeCmd(e), newCouncilRoleCmd(e))
+	c.AddCommand(newCouncilServeCmd(e), newCouncilRoleCmd(e), newCouncilApplyCmd(e))
 	return c
 }
 
