@@ -1196,6 +1196,7 @@ func TestChatHelpTexts(t *testing.T) {
 		"the council's reviewer, when it has one, checks their reports when the turn needs it",
 		"@<member> <text> asks one member of the chat's council alone",
 		"tnctl council role list --bot <bot> --templates lists each",
+		"tnctl council roster list --bot <bot> lists the\ncouncils, and tnctl council roster use <council> --bot <bot> makes another one the default.",
 	} {
 		if !strings.Contains(c.Long, want) {
 			t.Errorf("Long lacks %q:\n%s", want, c.Long)

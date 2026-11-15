@@ -1635,7 +1635,17 @@ func TestCouncilRosterAsTaken(t *testing.T) {
 		{[]string{"roster", "add", "ops-a", "triage", "--bot", "scout", "--as", "standard"},
 			"there is a council 'standard' for scout already: pick another name with --as, such as scout-council"},
 		{[]string{"roster", "add", "standard", "triage", "--bot", "scout", "--as", "ops-a"},
-			"there is a council 'ops-a' for scout already: pick another name with --as, such as scout-council"},
+			"there is a council 'ops-a' for scout already: to change it, tnctl council roster add ops-a triage --bot scout; to save another copy, pick another name with --as, such as scout-council"},
+		{[]string{"roster", "remove", "standard", "fleet", "--bot", "scout", "--scope", "template", "--as", "ops-a"},
+			"there is a council 'ops-a' for scout already: to change it, tnctl council roster remove ops-a template/fleet --bot scout; to save another copy, pick another name with --as, such as scout-council"},
+		{[]string{"roster", "add", "ops-a", "teamspace/triage", "--bot", "scout", "--as", "ops-a"},
+			"--as ops-a names the council you are changing: leave out --as to change it (tnctl council roster add ops-a teamspace/triage --bot scout), or give the copy a new name, such as scout-council"},
+		{[]string{"roster", "add", "ops-a", "triage", "--scope", "teamspace", "--bot", "scout", "--as", "ops-a"},
+			"--as ops-a names the council you are changing: leave out --as to change it (tnctl council roster add ops-a teamspace/triage --bot scout), or give the copy a new name, such as scout-council"},
+		{[]string{"roster", "remove", "ops-a", "helper", "--bot", "scout", "--as", "ops-a"},
+			"--as ops-a names the council you are changing: leave out --as to change it (tnctl council roster remove ops-a helper --bot scout), or give the copy a new name, such as scout-council"},
+		{[]string{"roster", "add", "standard", "triage", "--bot", "scout", "--as", "standard"},
+			"'standard' is a premade council and cannot be changed: use --as scout-council to save a copy"},
 	} {
 		noBotMode(t)
 		p := newChatAPI(t)
@@ -1661,7 +1671,7 @@ func TestCouncilRosterAsTaken(t *testing.T) {
 		if err == nil {
 			t.Fatal("a taken name was accepted")
 		}
-		want := "there is a council 'scout-council' for scout already: pick another name with --as, such as scout-council-2"
+		want := "there is a council 'scout-council' for scout already: to change it, tnctl council roster add scout-council triage --bot scout; to save another copy, pick another name with --as, such as scout-council-2"
 		if err.Error() != want {
 			t.Errorf("error %q, want %q", err, want)
 		}

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestMain points HOME at a directory of this run's own, so no test can read or write the config
@@ -31,6 +32,10 @@ func TestMain(m *testing.M) {
 	for _, k := range []string{"TEKNOIR_DOMAIN", "CODEX_HOME", "CLAUDE_CONFIG_DIR"} {
 		_ = os.Unsetenv(k)
 	}
+	// One time zone for every test, set before any goroutine runs: no test may change time.Local
+	// (a write races with any goroutine that still calls time.Now, such as the stream transport's
+	// connection readers), and one east of UTC shows a time formatted in local time by mistake.
+	time.Local = time.FixedZone("CET", 3600)
 	code := m.Run()
 	_ = os.RemoveAll(home)
 	os.Exit(code)

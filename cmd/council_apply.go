@@ -140,9 +140,9 @@ func newCouncilApplyCmd(e *cliEnv) *cobra.Command {
 		Use:   "apply -f <file|->",
 		Short: "Apply members and councils from a YAML file",
 		Long: `Apply a council file: members (kind CouncilRole) and councils (kind CouncilRoster), one or more
-documents separated by ---, as tnctl council role export prints them. The platform checks every
-document and applies all of them or none; tnctl sends the file as it is. A file holds at most
-20 documents and 64 KiB.
+documents separated by ---, as tnctl council role export <member> and tnctl council roster get
+<name> --bot <bot> -o yaml print them. The platform checks every document and applies all of them
+or none; tnctl sends the file as it is. A file holds at most 20 documents and 64 KiB.
 
 A member that can read pods and logs (tool group inspect), or that may act with the bot's full
 access (accessCeiling: creator), needs your confirmation. tnctl asks on a terminal; --yes gives it
@@ -160,6 +160,8 @@ changed meanwhile: run it again.`,
 		Example: `  tnctl council role export triage --bot scout > triage.yaml
   tnctl council apply -f triage.yaml --dry-run
   tnctl council apply -f triage.yaml
+  tnctl council roster get ops-scout --bot scout -o yaml > ops-scout.yaml
+  tnctl council apply -f ops-scout.yaml
   cat council.yaml | tnctl council apply -f - --yes`,
 		SilenceUsage: true,
 		Args: func(cmd *cobra.Command, args []string) error {

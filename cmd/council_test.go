@@ -132,8 +132,8 @@ func TestCouncilCmdVisible(t *testing.T) {
 		t.Errorf("council Short %q, want %q", root.Short, want)
 	}
 	wantLong := "A council is the set of members that answers a chat with a TeknoirBot: a lead (the Captain)\n" +
-		"plans each turn, members each do one job, and a reviewer (the Critic, or Skeptic) checks the\n" +
-		"members' reports when the turn needs it, not on every turn.\n" +
+		"plans each turn, members each do one job, and a reviewer (the Critic, or Skeptic), when the\n" +
+		"council has one, checks the members' reports when the turn needs it, not on every turn.\n" +
 		"\n" +
 		"  tnctl council role list|get|export   the members a bot's councils can use\n" +
 		"  tnctl council role new|archive       make a member from its job in words, or archive one\n" +

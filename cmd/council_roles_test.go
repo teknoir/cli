@@ -402,7 +402,7 @@ func TestCouncilRoleGetUsageErrors(t *testing.T) {
 		{[]string{"export", "triage", "-o", "json"}, "council role export prints YAML; use council role get -o json"},
 		{[]string{"list", "--bot", ".."}, `".." is not a bot name: use the bot's name, such as scout`},
 		{[]string{"list", "--bot", ""}, `"" is not a bot name: use the bot's name, such as scout`},
-		{[]string{"list", "x"}, "council role list takes no arguments"},
+		{[]string{"list", "scout"}, "council role list takes no arguments; name a bot with --bot, for example: tnctl council role list --bot scout"},
 		{[]string{"get"}, "council role get needs a member, for example: tnctl council role get triage --bot scout"},
 		{[]string{"export"}, "council role export needs a member, for example: tnctl council role export triage --bot scout"},
 	}
@@ -1286,6 +1286,9 @@ func TestCouncilRoleShowHelp(t *testing.T) {
 		"print an older version (with -o yaml)",
 		"Show one member a bot's councils can use: its part, model, tools, access, status and description,\n",
 		"(for a shared member) the councils that use it.\n",
+		"a bot's own member needs --bot <bot>.\n\n" +
+			"-o json prints the member as the platform sent it. -o yaml prints it as YAML, byte for byte as\n" +
+			"the platform exports it (as tnctl council role export does); --version N then prints an older version.\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("get --help lacks %q:\n%s", want, out)
@@ -1353,11 +1356,12 @@ func TestParseMemberRef(t *testing.T) {
 	}
 }
 
-// TestCouncilTime formats a hub time in UTC, whatever the host's zone.
+// TestCouncilTime formats a hub time in UTC, whatever the host's zone. TestMain runs every test in
+// CET, so a time formatted in local time would read 01:00 and 14:30.
 func TestCouncilTime(t *testing.T) {
-	old := time.Local
-	time.Local = time.FixedZone("CET", 3600)
-	t.Cleanup(func() { time.Local = old })
+	if _, off := time.Now().Zone(); off == 0 {
+		t.Fatal("TestMain must set a time zone other than UTC")
+	}
 	for _, c := range []struct {
 		ms   int64
 		want string
@@ -1517,4 +1521,45 @@ func TestCouncilRoleGetAccessWithoutBot(t *testing.T) {
 		}
 	}
 	wantReqs(t, p, "GET /council/roles/audit", "GET /council/roles/notes", "GET /bots/scout/council/roles/audit")
+}
+
+// TestCouncilRoleListHelp pins role list's help: what it lists with and without --bot, the premade
+// rows, the SCOPE and STATUS words and the flag texts.
+func TestCouncilRoleListHelp(t *testing.T) {
+	noBotMode(t)
+	list := councilSub(councilSub(newCouncilCmd(&cliEnv{}), "role"), "list")
+	if list == nil {
+		t.Fatal("council role has no list subcommand")
+	}
+	if list.Use != "list" || list.Short != "List the members a bot's councils can use" {
+		t.Errorf("Use %q, Short %q", list.Use, list.Short)
+	}
+	wantLong := "List the members a bot's councils can use: with --bot, the bot's own members and the teamspace's\n" +
+		"shared ones; without it, only the teamspace's shared members. --templates lists the premade\n" +
+		"members too, first. SCOPE is bot, teamspace or template (a member's <scope>/<slug>). STATUS is ok,\n" +
+		"unavailable (the reasons follow on stderr) or not checked. --json prints the members as the\n" +
+		"platform sent them."
+	if list.Long != wantLong {
+		t.Errorf("list Long:\n%s", list.Long)
+	}
+	wantExample := "  tnctl council role list --bot scout\n" +
+		"  tnctl council role list --bot scout --templates\n" +
+		"  tnctl council role list --templates --json"
+	if list.Example != wantExample {
+		t.Errorf("list Example:\n%s", list.Example)
+	}
+	for name, want := range map[string]string{
+		"bot":       "the TeknoirBot whose members to list",
+		"templates": "list the premade members too",
+		"json":      "print the members as the platform sent them, as JSON",
+	} {
+		f := list.Flags().Lookup(name)
+		if f == nil {
+			t.Errorf("list has no --%s", name)
+			continue
+		}
+		if f.Usage != want {
+			t.Errorf("--%s usage %q, want %q", name, f.Usage, want)
+		}
+	}
 }

@@ -54,3 +54,19 @@ func TestDefaultConfigIsTheConfigFlag(t *testing.T) {
 		t.Errorf("the first run with --config created ~/.tnctl.yaml (%v)", err)
 	}
 }
+
+// TestRootOutputFlagHelp: the global -o help covers the commands that support it, says the others ignore
+// it, and names the commands that take --json instead (spec 12: C3a2 review ruling 7, C3a6 brief rulings
+// 7 and 12, C3a range review ruling 7).
+func TestRootOutputFlagHelp(t *testing.T) {
+	const want = "Output format of the commands that support it: table, json or yaml (default table); other " +
+		"commands ignore it. council role export prints YAML only; chat, chat threads, council role list, " +
+		"council roster list and mqtt stream|sample take --json instead. Data goes to stdout, progress to stderr"
+	f := rootCmd.PersistentFlags().Lookup("output")
+	if f == nil {
+		t.Fatal("no persistent -o/--output flag")
+	}
+	if f.Usage != want {
+		t.Errorf("-o usage\n%q\nwant\n%q", f.Usage, want)
+	}
+}

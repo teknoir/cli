@@ -5,12 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
 	"github.com/teknoir/cli/pkg/api"
 )
+
+// councilHowMax is the platform's limit on a member's instructions, in characters, counted as the
+// platform counts them: CRLF as one line break, without the whitespace around the text.
+const councilHowMax = 4000
 
 // councilRoleNewFlags are role new's flags.
 type councilRoleNewFlags struct {
@@ -107,6 +113,12 @@ func runCouncilRoleNew(cmd *cobra.Command, e *cliEnv, name string, f *councilRol
 		}
 		how = text
 	}
+	// The platform's own text and exit code, before any upload: text far over the limit would otherwise
+	// get the body limits' answers instead (413 too_large, or a code-less 413 over 100 KB, exit 1).
+	trimmed := strings.TrimFunc(strings.ReplaceAll(how, "\r\n", "\n"), func(r rune) bool { return unicode.IsSpace(r) || r == '\uFEFF' })
+	if utf8.RuneCountInString(trimmed) > councilHowMax {
+		return newErr(codeRejected, "how: instructions are at most %d characters", councilHowMax)
+	}
 	fl, _, ns, err := e.targetClient()
 	if err != nil {
 		return err
@@ -193,8 +205,10 @@ func runCouncilRoleNew(cmd *cobra.Command, e *cliEnv, name string, f *councilRol
 	}
 	if botGiven {
 		_, _ = fmt.Fprintf(errw, "· try it: tnctl chat %s --member %s \"…\"\n", escapeLine(f.bot), escapeLine(d.Slug))
+		_, _ = fmt.Fprintf(errw, "· add it to a council: tnctl council roster add <council> %s --bot %s (tnctl council roster list --bot %s lists them)\n", escapeLine(d.Slug), escapeLine(f.bot), escapeLine(f.bot))
 	} else {
 		_, _ = fmt.Fprintf(errw, "· try it: tnctl chat <bot> --member teamspace/%s \"…\"\n", escapeLine(d.Slug))
+		_, _ = fmt.Fprintf(errw, "· add it to a bot's council: tnctl council roster add <council> teamspace/%s --bot <bot>\n", escapeLine(d.Slug))
 	}
 	return nil
 }

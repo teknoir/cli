@@ -56,8 +56,8 @@ func councilStatus(s string) string {
 	return escapeLine(s)
 }
 
-// councilBot checks a --bot value before any request: the hub's bot-name rule (isDNSLabel in
-// cmd/robot_add.go). A mismatch is a usage error.
+// councilBot checks a bot name (--bot, or tnctl chat's <bot>) before any request: the hub's bot-name
+// rule (isDNSLabel in cmd/robot_add.go). A mismatch is a usage error.
 func councilBot(bot string) error {
 	if !isDNSLabel(bot) {
 		return usageErr("%q is not a bot name: use the bot's name, such as scout", bot)
@@ -233,12 +233,20 @@ func newCouncilRoleListCmd(e *cliEnv) *cobra.Command {
 	var templates bool
 	var asJSON bool
 	c := &cobra.Command{
-		Use:          "list",
-		Short:        "List the members a bot's councils can use",
+		Use:   "list",
+		Short: "List the members a bot's councils can use",
+		Long: `List the members a bot's councils can use: with --bot, the bot's own members and the teamspace's
+shared ones; without it, only the teamspace's shared members. --templates lists the premade
+members too, first. SCOPE is bot, teamspace or template (a member's <scope>/<slug>). STATUS is ok,
+unavailable (the reasons follow on stderr) or not checked. --json prints the members as the
+platform sent them.`,
+		Example: "  tnctl council role list --bot scout\n" +
+			"  tnctl council role list --bot scout --templates\n" +
+			"  tnctl council role list --templates --json",
 		SilenceUsage: true,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				return usageErr("council role list takes no arguments")
+				return usageErr("council role list takes no arguments; name a bot with --bot, for example: tnctl council role list --bot scout")
 			}
 			return nil
 		},
@@ -436,7 +444,9 @@ func newCouncilRoleShowCmd(e *cliEnv, export bool) *cobra.Command {
 		"and, when you may read all of it, its instructions and (for a shared member) the councils that use it.\n\n" +
 		"<member> is a slug such as triage, or <scope>/<slug> (scope bot, teamspace or template) when\n" +
 		"more than one member has that slug. Without --bot it reads the teamspace's shared member, or the\n" +
-		"premade one when there is no shared member of that name; a bot's own member needs --bot <bot>."
+		"premade one when there is no shared member of that name; a bot's own member needs --bot <bot>.\n\n" +
+		"-o json prints the member as the platform sent it. -o yaml prints it as YAML, byte for byte as\n" +
+		"the platform exports it (as tnctl council role export does); --version N then prints an older version."
 	example := `  tnctl council role get triage --bot scout
   tnctl council role get captain --template -o yaml
   tnctl council role get bot/triage --bot scout`

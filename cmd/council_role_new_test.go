@@ -57,7 +57,8 @@ func TestCouncilRoleNewBot(t *testing.T) {
 		t.Errorf("stdout:\n%q\nwant:\n%q", out, want)
 	}
 	wantErr := "warning: spec.effort: Effort lowered to medium: the platform allows at most medium.\n" +
-		"· try it: tnctl chat scout --member stream-watcher \"…\"\n"
+		"· try it: tnctl chat scout --member stream-watcher \"…\"\n" +
+		"· add it to a council: tnctl council roster add <council> stream-watcher --bot scout (tnctl council roster list --bot scout lists them)\n"
 	if errs != wantErr {
 		t.Errorf("stderr:\n%q\nwant:\n%q", errs, wantErr)
 	}
@@ -104,7 +105,8 @@ func TestCouncilRoleNewTeamspace(t *testing.T) {
 	if !strings.HasSuffix(out, want) {
 		t.Errorf("stdout:\n%q\nwant it to end with %q", out, want)
 	}
-	if wantErr := "· try it: tnctl chat <bot> --member teamspace/stream-watcher \"…\"\n"; !strings.HasSuffix(errs, wantErr) {
+	if wantErr := "· try it: tnctl chat <bot> --member teamspace/stream-watcher \"…\"\n" +
+		"· add it to a bot's council: tnctl council roster add <council> teamspace/stream-watcher --bot <bot>\n"; !strings.HasSuffix(errs, wantErr) {
 		t.Errorf("stderr %q, want it to end with %q", errs, wantErr)
 	}
 }
@@ -831,7 +833,8 @@ func TestCouncilRoleNewWarnings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, errs)
 	}
-	want := "warning: no path here\nwarning: spec.a\\nb: lowered\n· try it: tnctl chat scout --member stream-watcher \"…\"\n"
+	want := "warning: no path here\nwarning: spec.a\\nb: lowered\n· try it: tnctl chat scout --member stream-watcher \"…\"\n" +
+		"· add it to a council: tnctl council roster add <council> stream-watcher --bot scout (tnctl council roster list --bot scout lists them)\n"
 	if errs != want {
 		t.Errorf("stderr:\n%q\nwant:\n%q", errs, want)
 	}
@@ -866,4 +869,46 @@ func TestCouncilRoleNewDraftLinesSafe(t *testing.T) {
 			wantReqs(t, p, "POST /council/roles/draft")
 		})
 	}
+}
+
+// TestCouncilRoleNewHowLimit refuses instructions over the platform's 4000 characters before any
+// request, whatever their size, with the platform's text and exit code; 4000 characters pass, and
+// --how is sent unchanged.
+func TestCouncilRoleNewHowLimit(t *testing.T) {
+	noBotMode(t)
+	const want = "how: instructions are at most 4000 characters"
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"a file over the body limits", []string{"--how-file", councilFile(t, strings.Repeat("a", 200*1024))}},
+		{"4001 characters of two bytes", []string{"--how", strings.Repeat("é", 4001)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setTTY(t, false, false)
+			p := newChatAPI(t)
+			_, _, err := councilArgs(t, p.env(t), newArgsWith(append([]string{"--bot", "scout"}, c.args...)...)...)
+			if err == nil || err.Error() != want {
+				t.Fatalf("error %v, want %q", err, want)
+			}
+			if code := exitCodeOf(err); code != codeRejected {
+				t.Errorf("exit %d, want %d", code, codeRejected)
+			}
+			wantReqs(t, p)
+		})
+	}
+	t.Run("4000 characters and line breaks around them", func(t *testing.T) {
+		setTTY(t, false, false)
+		p := newChatAPI(t)
+		draftRoute(p, draftAnswer("null"))
+		p.on("PUT", "/bots/scout/council/roles/stream-watcher", 200, putOK)
+		how := "\r\n  " + strings.Repeat("é", 4000) + "\r\n  "
+		if _, errs, err := councilArgs(t, p.env(t), newArgsWith("--bot", "scout", "--how", how)...); err != nil {
+			t.Fatalf("%v\n%s", err, errs)
+		}
+		posts := p.seen("POST", "/council/roles/draft")
+		if len(posts) != 1 || bodyString(t, posts[0].Body, "how") != how {
+			t.Fatalf("the draft did not carry --how unchanged")
+		}
+	})
 }

@@ -27,8 +27,8 @@ func newCouncilCmd(e *cliEnv) *cobra.Command {
 		Short:        "Read and change a TeknoirBot's council: its members and councils",
 		SilenceUsage: true,
 		Long: `A council is the set of members that answers a chat with a TeknoirBot: a lead (the Captain)
-plans each turn, members each do one job, and a reviewer (the Critic, or Skeptic) checks the
-members' reports when the turn needs it, not on every turn.
+plans each turn, members each do one job, and a reviewer (the Critic, or Skeptic), when the
+council has one, checks the members' reports when the turn needs it, not on every turn.
 
   tnctl council role list|get|export   the members a bot's councils can use
   tnctl council role new|archive       make a member from its job in words, or archive one

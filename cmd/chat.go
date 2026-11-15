@@ -51,6 +51,11 @@ var (
 // conversation compares it and leaves too.
 var errChatInterrupted = newErr(codeError, "interrupted")
 
+// errChatNothingAsked is what a Ctrl-C during the requests before a turn leaves (the council's change,
+// the thread's read, the new thread): no turn is posted, so none is cancelled. It is a sentinel: the
+// conversation says so on one line and goes on.
+var errChatNothingAsked = newErr(codeError, "interrupted: nothing was asked")
+
 // errChatCancelTimeout is what a turn returns when it did not end within chatCancelGrace of the
 // first Ctrl-C. The conversation shows it and goes on: the person asked to stop the turn, not to
 // leave.
@@ -95,10 +100,11 @@ The council's lead takes each turn: it answers a simple question itself or conve
 the council's reviewer, when it has one, checks their reports when the turn needs it. --thorough
 has the lead convene the members and the reviewer check every report: slower, and several times
 the tokens. --roster picks the council: standard, ops, review or one of the bot's own; a new chat
-without it gets the bot's default council. --member asks one member alone, without a council: its
-slug, or <scope>/<slug> when more than one member has that slug. With --thread, --member names a
-member of that chat by its slug alone. tnctl council role list --bot <bot> --templates lists each
-member's slug and scope.
+without it gets the bot's default council. tnctl council roster list --bot <bot> lists the
+councils, and tnctl council roster use <council> --bot <bot> makes another one the default.
+--member asks one member alone, without a council: its slug, or <scope>/<slug> when more than one
+member has that slug. With --thread, --member names a member of that chat by its slug alone.
+tnctl council role list --bot <bot> --templates lists each member's slug and scope.
 
 With a prompt the command runs one turn and prints the answer: stdout gets the answer (as it is
 written when stdout is a terminal, at the end otherwise) and stderr the progress of the council.
@@ -126,6 +132,9 @@ picking up the answer where it is when that turn still runs, and printing it whe
 				return err
 			}
 			bot := args[0]
+			if err := councilBot(bot); err != nil {
+				return err
+			}
 			prompt := strings.Join(args[1:], " ")
 			// --follow asks nothing, so it never reads stdin: through ssh or inside a while-read loop
 			// stdin is an open pipe that would block it, or swallow the loop's own input.
@@ -205,6 +214,9 @@ tnctl chat <bot> --thread <id>.`,
   tnctl chat threads scout --json`,
 		Args: argsRange(1, 1, "chat threads needs a bot, for example: tnctl chat threads scout"),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := councilBot(args[0]); err != nil {
+				return err
+			}
 			fl, _, _, err := e.targetClient()
 			if err != nil {
 				return err
@@ -267,6 +279,9 @@ func chatValidate(f *chatFlags) error {
 	if f.newThread && f.thread != "" {
 		return usageErr("--new and --thread cannot be used together")
 	}
+	if f.thread == "." || f.thread == ".." {
+		return usageErr("--thread %q is not a thread id: use an id that tnctl chat threads <bot> lists", f.thread)
+	}
 	if f.follow && f.thread == "" {
 		return usageErr("--follow needs --thread")
 	}
@@ -279,14 +294,15 @@ func chatValidate(f *chatFlags) error {
 	return nil
 }
 
-// chatInfoError names the two answers of the chat's own routes (info and threads): the chat being
-// off on the platform, and a bot that is not there, which classify covers.
+// chatInfoError maps a refusal of the chat's own reads (P1 info and P2 threads): the chat being off
+// on the platform gets tnctl's sentence; any other refusal goes through councilError (the hub's
+// words, the code's exit), and a code-less answer such as TeknoirBots being off keeps classify.
 func chatInfoError(err error) error {
 	var ae *api.Error
 	if errors.As(err, &ae) && ae.Status == http.StatusNotFound && ae.Code == "council_off" {
 		return newErr(codeError, "the TeknoirBot chat is turned off on this platform")
 	}
-	return classify(err)
+	return councilError(err)
 }
 
 // chatTurnError maps a refusal of a turn (P6), and of the thread PATCH (P9) once chatPatchError has
@@ -581,7 +597,7 @@ func chatOnce(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, promp
 		}
 		d, _, err := fl.ChatThread(ctx, bot, threadID)
 		if err != nil {
-			return classify(err)
+			return councilError(err)
 		}
 		if f.memberSlug != "" && d.Thread.Member != nil && *d.Thread.Member != f.memberSlug {
 			return usageErr("thread %s is a chat with %s alone: leave out --member, or start a new chat without --thread", escapeLine(cleanBotText(threadID)), escapeLine(cleanBotText(*d.Thread.Member)))
@@ -604,8 +620,15 @@ func chatOnce(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, promp
 	return chatRunTurn(ctx, cmd, fl, bot, threadID, after, chatTurnRequest(prompt, f), f, sigs)
 }
 
-// chatRunTurn posts one turn and follows it. A turn that fails is an error with its exit code.
+// chatRunTurn posts one turn and follows it. A turn that fails is an error with its exit code. A
+// Ctrl-C during the requests before it (P9, P4, P3) waits in sigs: it is taken here, once and without
+// waiting, so the turn is not posted only for its watcher to cancel it.
 func chatRunTurn(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, thread string, after int64, req api.NewChatTurn, f chatFlags, sigs <-chan os.Signal) error {
+	select {
+	case <-sigs:
+		return errChatNothingAsked
+	default:
+	}
 	turn, _, err := fl.PostChatTurn(ctx, bot, thread, req)
 	if err != nil {
 		return chatTurnError(err, bot, thread)
@@ -624,7 +647,7 @@ func newChatTurnPrinter(cmd *cobra.Command, f chatFlags) *chatTurnPrinter {
 func chatFollow(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, thread string, f chatFlags, sigs <-chan os.Signal) error {
 	d, _, err := fl.ChatThread(ctx, bot, thread)
 	if err != nil {
-		return classify(err)
+		return councilError(err)
 	}
 	last := chatLastTurn(d)
 	if last == nil {
@@ -686,7 +709,7 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 		if err != nil {
 			// The thread cannot be read: no turn can be posted on it either (each one reads the thread
 			// first), so the conversation ends with the platform's error.
-			return classify(err)
+			return councilError(err)
 		}
 		if d.Thread.Member != nil {
 			// A chat with one member takes no other member, no --thorough and no council: say so before
@@ -723,6 +746,13 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 		if line := chatSessionLine(info, f, d); line != "" {
 			_, _ = fmt.Fprintln(errw, line)
 		}
+		// A Ctrl-C during the thread's read ends the conversation before it follows (and so cancels), changes
+		// or asks anything.
+		select {
+		case <-sigs:
+			return errChatNothingAsked
+		default:
+		}
 		// A conversation opened on a thread with a turn still running follows it first.
 		if err := chatFollowOpenTurn(ctx, cmd, fl, bot, f.thread, d, f, sigs); err != nil {
 			if errors.Is(err, errChatInterrupted) || exitCodeOf(err) == codeAuth {
@@ -735,6 +765,8 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 		if f.roster != "" {
 			// Once, after the open turn ended (the hub refuses to change the council of a chat with a turn
 			// open). A refusal ends the conversation: asking the old council instead would be wrong.
+			// A Ctrl-C that arrived as the followed turn ended is the turn's, not the change's.
+			drainSignals(sigs)
 			if err := chatPatchRoster(ctx, cmd, fl, bot, f.thread, f.roster, info, f); err != nil {
 				return err
 			}
@@ -746,6 +778,13 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 						_, _ = fmt.Fprintln(errw, "· council "+chatCouncilName(r.Name, r.DisplayName)+chatUnavailable(r.Status, r.Reasons))
 					}
 				}
+			}
+			// A Ctrl-C during the change ends the conversation before it prompts, as one during the read
+			// does; the change stays, as in the one-shot.
+			select {
+			case <-sigs:
+				return errChatNothingAsked
+			default:
 			}
 		}
 	}
@@ -808,7 +847,7 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 				// before the line is matched.
 				d, _, err := fl.ChatThread(ctx, bot, threadID)
 				if err != nil {
-					mapped := classify(err)
+					mapped := councilError(err)
 					if exitCodeOf(mapped) == codeAuth {
 						return mapped // the person may no longer chat: the next line would fail too
 					}
@@ -844,6 +883,11 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 				req.Member, req.Mode, req.Thorough = member, "", false
 			}
 			if err := chatRunTurn(ctx, cmd, fl, bot, threadID, after, req, f, sigs); err != nil {
+				if errors.Is(err, errChatNothingAsked) {
+					// Ctrl-C during the line's requests: nothing was posted; the next prompt follows.
+					_, _ = fmt.Fprintln(errw, "· interrupted: nothing was asked")
+					continue
+				}
 				if errors.Is(err, errChatInterrupted) || exitCodeOf(err) == codeAuth {
 					// A second Ctrl-C left the turn, or the person may no longer chat (the next turn would fail
 					// too): either ends the conversation, and its caller prints the error once.
@@ -907,7 +951,7 @@ func chatCancelOpenTurn(ctx context.Context, errw io.Writer, fl *api.Fleet, bot,
 	}
 	d, _, err := fl.ChatThread(ctx, bot, thread)
 	if err != nil {
-		return classify(err)
+		return councilError(err)
 	}
 	for i := len(d.Turns) - 1; i >= 0; i-- {
 		t := d.Turns[i]
@@ -915,7 +959,7 @@ func chatCancelOpenTurn(ctx context.Context, errw io.Writer, fl *api.Fleet, bot,
 			continue
 		}
 		if _, _, err := fl.CancelChatTurn(ctx, bot, thread, t.ID); err != nil {
-			return classify(err)
+			return councilError(err)
 		}
 		_, _ = fmt.Fprintf(errw, "· cancelling turn %s\n", escapeLine(cleanBotText(t.ID)))
 		return nil
@@ -1097,7 +1141,7 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 				go func() {
 					defer watchers.Done()
 					if _, _, err := fl.CancelChatTurn(turnCtx, bot, thread, turnID); err != nil && turnCtx.Err() == nil {
-						p.progress("cancel failed: " + escapeLine(cleanBotText(err.Error())))
+						p.progress("cancel failed: " + escapeLine(cleanBotText(councilError(err).Error())))
 					}
 				}()
 				grace = time.NewTimer(chatCancelGrace)
@@ -1259,7 +1303,9 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 						continue
 					}
 					if ae.IsAuth() || ae.Status == http.StatusNotFound || ae.Status == http.StatusBadRequest {
-						return classify(err)
+						// The stream's refusal is a council route's: the hub's code decides the exit and its
+						// words are printed as P6's are (a code-less gateway answer keeps classify).
+						return councilError(err)
 					}
 				}
 				if e := backoff(); e != nil {

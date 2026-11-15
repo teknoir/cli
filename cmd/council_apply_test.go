@@ -939,3 +939,35 @@ func TestCouncilApplyArgEscaped(t *testing.T) {
 	}
 	wantReqs(t, p)
 }
+
+// TestCouncilApplyHelp pins where apply's help says both kinds of council file come from, on the three
+// paths that share its constructor (C3a6 brief ruling 12).
+func TestCouncilApplyHelp(t *testing.T) {
+	noBotMode(t)
+	root := newCouncilCmd(&cliEnv{})
+	role, roster := councilSub(root, "role"), councilSub(root, "roster")
+	if role == nil || roster == nil {
+		t.Fatal("council lacks role or roster")
+	}
+	first := "Apply a council file: members (kind CouncilRole) and councils (kind CouncilRoster), one or more\n" +
+		"documents separated by ---, as tnctl council role export <member> and tnctl council roster get\n" +
+		"<name> --bot <bot> -o yaml print them. The platform checks every document and applies all of them\n" +
+		"or none; tnctl sends the file as it is. A file holds at most 20 documents and 64 KiB.\n\n"
+	example := "  tnctl council role export triage --bot scout > triage.yaml\n" +
+		"  tnctl council apply -f triage.yaml --dry-run\n" +
+		"  tnctl council apply -f triage.yaml\n" +
+		"  tnctl council roster get ops-scout --bot scout -o yaml > ops-scout.yaml\n" +
+		"  tnctl council apply -f ops-scout.yaml\n" +
+		"  cat council.yaml | tnctl council apply -f - --yes"
+	for _, c := range []*cobra.Command{councilSub(root, "apply"), councilSub(role, "apply"), councilSub(roster, "apply")} {
+		if c == nil {
+			t.Fatal("an apply alias is missing")
+		}
+		if !strings.HasPrefix(c.Long, first) {
+			t.Errorf("%s Long:\n%s", c.CommandPath(), c.Long)
+		}
+		if c.Example != example {
+			t.Errorf("%s Example:\n%s", c.CommandPath(), c.Example)
+		}
+	}
+}

@@ -659,8 +659,10 @@ func runRosterChange(cmd *cobra.Command, e *cliEnv, ch rosterChange) error {
 	if src.Scope == "template" && ch.as == "" {
 		return usageErr("'%s' is a premade council and cannot be changed: use --as %s to save a copy", ch.name, deriveRosterName(ch.bot, c.taken()))
 	}
-	if ch.as != "" && c.taken()[ch.as] {
-		return usageErr("there is a council '%s' for %s already: pick another name with --as, such as %s", ch.as, bot, deriveRosterName(ch.bot, c.taken()))
+	if ch.as != "" {
+		if err := rosterAsTaken(ch, c, src); err != nil {
+			return err
+		}
 	}
 	if src.Refs != nil {
 		if part, f := rosterGoneRef(ch, src); f != nil {
@@ -942,4 +944,39 @@ func newCouncilRosterCmd(e *cliEnv) *cobra.Command {
 	c.AddCommand(newCouncilRosterListCmd(e), newCouncilRosterGetCmd(e), newCouncilRosterUseCmd(e),
 		newCouncilRosterAddCmd(e), newCouncilRosterRemoveCmd(e), newCouncilRosterDeleteCmd(e), newCouncilApplyCmd(e))
 	return c
+}
+
+// rosterMemberArg is the member as a command line names it again: the slug with its scope when one was
+// given, by the member or by --scope.
+func rosterMemberArg(ch rosterChange) string {
+	if ch.scope != "" {
+		return ch.scope + "/" + ch.slug
+	}
+	return ch.slug
+}
+
+// rosterAsTaken refuses an --as name the bot already has (exit 2, naming the derived name). --as naming
+// the council being changed, or another council of the bot's own, also names the command that changes
+// that council in place.
+func rosterAsTaken(ch rosterChange, c *rosterCouncil, src api.RosterView) error {
+	taken := c.taken()
+	if !taken[ch.as] {
+		return nil
+	}
+	bot, derived := escapeLine(ch.bot), deriveRosterName(ch.bot, taken)
+	verb := "add"
+	if !ch.add {
+		verb = "remove"
+	}
+	inPlace := fmt.Sprintf("tnctl council roster %s %s %s --bot %s", verb, ch.as, rosterMemberArg(ch), bot)
+	if ch.as == ch.name {
+		if src.Scope == "template" {
+			return usageErr("'%s' is a premade council and cannot be changed: use --as %s to save a copy", ch.name, derived)
+		}
+		return usageErr("--as %s names the council you are changing: leave out --as to change it (%s), or give the copy a new name, such as %s", ch.as, inPlace, derived)
+	}
+	if j := c.find(ch.as); j >= 0 && c.view.Rosters[j].Scope == "bot" {
+		return usageErr("there is a council '%s' for %s already: to change it, %s; to save another copy, pick another name with --as, such as %s", ch.as, bot, inPlace, derived)
+	}
+	return usageErr("there is a council '%s' for %s already: pick another name with --as, such as %s", ch.as, bot, derived)
 }
