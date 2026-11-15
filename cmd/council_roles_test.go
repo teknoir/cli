@@ -814,7 +814,7 @@ func TestCouncilErrorMapping(t *testing.T) {
 			status int
 			body   string
 		}{
-			{409, councilErrBody("bot_not_ready", "The bot is not ready.", "")},
+			{409, councilErrBody("some_new_code", "A code a newer platform sends.", "")},
 			{404, `{"message":"gone","error":{"name":"NotFoundError","message":"gone"}}`},
 		} {
 			p.on("GET", "/council/catalog", c.status, c.body)

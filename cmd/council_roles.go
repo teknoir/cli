@@ -114,6 +114,12 @@ var councilErrorCode = map[string]int{
 	"exists":    codeConflict,
 	"turn_open": codeConflict,
 
+	// The bot's state and the open-turn limit, at a turn's start: the platform's sentence says what
+	// to do, so it is printed without "(HTTP n)"; the exit codes are those of their statuses (409, 429).
+	"bot_not_ready":  codeConflict,
+	"bot_suspended":  codeConflict,
+	"too_many_turns": codeRateLimit,
+
 	"invalid":            codeRejected,
 	"bad_request":        codeRejected,
 	"template_read_only": codeRejected,

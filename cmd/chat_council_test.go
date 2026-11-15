@@ -786,7 +786,7 @@ func TestChatHubCouncilCodes(t *testing.T) {
 			name: "a bot that is not ready", args: []string{"hi"},
 			route: "POST /bots/scout/chat/threads/thr_new/turns", status: 409,
 			body: councilErrBody("bot_not_ready", "The bot is starting.", ""),
-			want: codeConflict, wantIn: []string{"The bot is starting.", "(HTTP 409)"},
+			want: codeConflict, wantEx: "The bot is starting.",
 		},
 	}
 	for _, c := range cases {

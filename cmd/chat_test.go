@@ -1191,6 +1191,38 @@ func TestChatTurnOpen(t *testing.T) {
 	}
 }
 
+// A turn the platform refuses for the bot's state or the open-turn limit prints the platform's own
+// sentence, without "(HTTP n)", with the exit code of its status.
+func TestChatTurnRefusedForTheBotsState(t *testing.T) {
+	cases := []struct {
+		code, msg string
+		status    int
+		exit      int
+	}{
+		{"bot_not_ready", "The bot is starting.", 409, codeConflict},
+		{"bot_not_ready", "The bot is being removed.", 409, codeConflict},
+		{"bot_suspended", "Resume the bot to chat.", 409, codeConflict},
+		{"too_many_turns", "Too many open turns on this bot. Wait for one to finish.", 429, codeRateLimit},
+	}
+	for _, c := range cases {
+		t.Run(c.msg, func(t *testing.T) {
+			noBotMode(t)
+			setTTY(t, false, false)
+			p := newChatAPI(t)
+			p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+			p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+			p.on("POST", "/bots/scout/chat/threads/thr_new/turns", c.status, councilErrBody(c.code, c.msg, ""))
+			_, _, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+			if err == nil || exitCodeOf(err) != c.exit {
+				t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+			}
+			if err.Error() != c.msg {
+				t.Errorf("error %q, want %q", err, c.msg)
+			}
+		})
+	}
+}
+
 // A bot's text never drives the terminal: escapes and control characters are dropped, newlines and
 // tabs kept.
 func TestChatCleansTheBotsText(t *testing.T) {
