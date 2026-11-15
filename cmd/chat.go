@@ -69,13 +69,17 @@ var chatSignals = func() (<-chan os.Signal, func()) {
 }
 
 type chatFlags struct {
-	thread    string
-	newThread bool
-	follow    bool
-	mode      string
-	member    string
-	effort    string
-	json      bool
+	thread      string
+	newThread   bool
+	follow      bool
+	mode        string
+	member      string
+	effort      string
+	json        bool
+	roster      string // --roster: the council's name
+	thorough    bool   // --thorough
+	memberScope string // set by chatValidate from --member: "", bot, teamspace or template
+	memberSlug  string // set by chatValidate from --member: the slug alone
 }
 
 func newChatCmd(e *cliEnv) *cobra.Command {
@@ -83,27 +87,41 @@ func newChatCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
 		SilenceUsage: true,
 		Use:          "chat <bot> [prompt...]",
-		Short:        "Chat with a TeknoirBot's council: the Captain, Fleet, Coder and Critic",
-		Long: `Chat with a TeknoirBot's council, and read its answer as it is written.
+		Short:        "Chat with a TeknoirBot's council, or with one of its members",
+		Long: `Chat with a TeknoirBot's council, or with one of its members, and read the answer as it is written.
+
+The council's lead takes each turn: it answers a simple question itself or convenes members, and
+the council's reviewer, when it has one, checks their reports when the turn needs it. --thorough
+has the lead convene the members and the reviewer check every report: slower, and several times
+the tokens. --roster picks the council: standard, ops, review or one of the bot's own; a new chat
+without it gets the bot's default council. --member asks one member alone, without a council: its
+slug, or <scope>/<slug> when more than one member has that slug. With --thread, --member names a
+member of that chat by its slug alone. tnctl council role list --bot <bot> --templates lists each
+member's slug and scope.
 
 With a prompt the command runs one turn and prints the answer: stdout gets the answer (as it is
 written when stdout is a terminal, at the end otherwise) and stderr the progress of the council.
 Without one, in a terminal, it starts a conversation: /new starts a new thread, /cancel cancels the
-thread's open turn, /quit ends it, and @fleet <text> or @coder <text> asks one member alone.
+thread's open turn, /quit ends it, and @<member> <text> asks one member of the chat's council alone.
 
 The chat's thread is printed on stderr when it is made, so it can be continued later with
---thread <id>. Ctrl-C cancels the running turn (a second one leaves at once).
+--thread <id>; with --roster too, that chat's council changes first. Ctrl-C cancels the running
+turn (a second one leaves at once).
 
 With --thread <id> --follow the command does not ask anything: it follows the thread's last turn,
-picking up the answer where it is when that turn still runs, and printing it when it already ended.`,
+picking up the answer where it is when that turn still runs, and printing it when it already ended.
+
+--mode and --effort are for advanced use: without them the lead decides how the council answers.`,
 		Example: `  tnctl chat scout "what is running on my robot?"
   tnctl chat scout --thread thr_123 "and the pods?"
   tnctl chat scout --thread thr_123 --follow
-  tnctl chat scout --mode quick "list the devices"
+  tnctl chat scout --roster review --thorough "is the update safe to roll out?"
+  tnctl chat scout --member triage-sre "why is arm-2 offline?"
+  tnctl chat scout --member teamspace/triage "why is arm-3 slow?"
   tnctl chat threads scout`,
 		Args: argsRange(1, -1, "chat needs a bot, for example: tnctl chat scout \"what is running?\""),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := chatValidate(f); err != nil {
+			if err := chatValidate(&f); err != nil {
 				return err
 			}
 			bot := args[0]
@@ -154,7 +172,7 @@ picking up the answer where it is when that turn still runs, and printing it whe
 				return chatFollow(ctx, cmd, fl, bot, f.thread, f, sigs)
 			}
 			if !repl {
-				return chatOnce(ctx, cmd, fl, bot, prompt, f, sigs)
+				return chatOnce(ctx, cmd, fl, bot, prompt, info, f, sigs)
 			}
 			return chatRepl(ctx, cmd, fl, bot, info, f, sigs)
 		},
@@ -162,9 +180,11 @@ picking up the answer where it is when that turn still runs, and printing it whe
 	c.Flags().StringVar(&f.thread, "thread", "", "continue this thread (the default is a new one)")
 	c.Flags().BoolVar(&f.newThread, "new", false, "start a new thread (with --thread: a usage error)")
 	c.Flags().BoolVar(&f.follow, "follow", false, "follow the thread's last turn instead of asking (needs --thread, and no prompt)")
-	c.Flags().StringVar(&f.mode, "mode", "", "how the council answers: auto, quick or council")
-	c.Flags().StringVar(&f.member, "member", "", "ask one member alone: fleet or coder")
-	c.Flags().StringVar(&f.effort, "effort", "", "how hard the members think: low, medium or high")
+	c.Flags().StringVar(&f.mode, "mode", "", "advanced: how the council answers: auto, quick or council")
+	c.Flags().StringVar(&f.member, "member", "", "ask one member alone: its slug, or <scope>/<slug> (scope bot, teamspace or template)")
+	c.Flags().StringVar(&f.roster, "roster", "", "the council that answers: standard, ops, review or one of the bot's own; with --thread it changes that chat's council first")
+	c.Flags().BoolVar(&f.thorough, "thorough", false, "have the lead convene the members and the reviewer check their reports: slower, several times the tokens (the same as --mode council)")
+	c.Flags().StringVar(&f.effort, "effort", "", "advanced: how hard the members think: low, medium or high")
 	c.Flags().BoolVar(&f.json, "json", false, "print each event of the turn as one JSON line")
 	c.AddCommand(newChatThreadsCmd(e))
 	return c
@@ -176,8 +196,10 @@ func newChatThreadsCmd(e *cliEnv) *cobra.Command {
 		SilenceUsage: true,
 		Use:          "threads <bot>",
 		Short:        "List your chat threads with a TeknoirBot, newest first",
-		Long: `List the chat threads you have with a TeknoirBot: id, title, how many turns it has, the state of
-the last turn and when it last changed. Continue one with tnctl chat <bot> --thread <id>.`,
+		Long: `List the chat threads you have with a TeknoirBot: id, title, the council that answers it
+(@<member> for a chat with one member, (default) when it follows the bot's default council), how
+many turns it has, the state of the last turn and when it last changed. Continue one with
+tnctl chat <bot> --thread <id>.`,
 		Example: `  tnctl chat threads scout
   tnctl chat threads scout --json`,
 		Args: argsRange(1, 1, "chat threads needs a bot, for example: tnctl chat threads scout"),
@@ -206,31 +228,52 @@ the last turn and when it last changed. Continue one with tnctl chat <bot> --thr
 	return c
 }
 
-// chatValidate checks the flags before anything is sent.
-func chatValidate(f chatFlags) error {
+// chatValidate checks the flags before anything is sent. It splits --member into its scope and its
+// slug, which the thread and turn requests send.
+func chatValidate(f *chatFlags) error {
 	switch f.mode {
 	case "", "auto", "quick", "council":
 	default:
 		return usageErr("--mode must be auto, quick or council, not %q", f.mode)
 	}
-	switch f.member {
-	case "", "fleet", "coder":
-	default:
-		return usageErr("--member must be fleet or coder, not %q", f.member)
+	if f.member != "" {
+		scope, slug, ok := parseMemberRef(f.member)
+		if !ok {
+			return usageErr("--member is a member's slug, such as triage, or <scope>/<slug> with scope bot, teamspace or template, not %q", f.member)
+		}
+		f.memberScope, f.memberSlug = scope, slug
 	}
 	switch f.effort {
 	case "", "low", "medium", "high":
 	default:
 		return usageErr("--effort must be low, medium or high, not %q", f.effort)
 	}
+	if f.roster != "" && !councilSlugRE.MatchString(f.roster) {
+		return usageErr("--roster is a council's name: 2 to 24 lowercase letters, digits and dashes, starting with a letter, not %q", f.roster)
+	}
 	if f.member != "" && f.mode != "" {
 		return usageErr("--member and --mode cannot be used together: a member answers alone")
+	}
+	if f.member != "" && f.roster != "" {
+		return usageErr("--member and --roster cannot be used together: a member answers alone, without a council")
+	}
+	if f.thorough && f.member != "" {
+		return usageErr("--thorough asks the whole council: it cannot be used with --member")
+	}
+	if f.thorough && f.mode != "" && f.mode != "council" {
+		return usageErr("--thorough is --mode council: it cannot be used with --mode %s", f.mode)
 	}
 	if f.newThread && f.thread != "" {
 		return usageErr("--new and --thread cannot be used together")
 	}
 	if f.follow && f.thread == "" {
 		return usageErr("--follow needs --thread")
+	}
+	if f.follow && f.roster != "" {
+		return usageErr("--follow asks nothing: --roster cannot be used with it")
+	}
+	if f.thread != "" && f.memberScope != "" {
+		return usageErr("with --thread, give --member the slug alone: the scope only picks the member of a new chat")
 	}
 	return nil
 }
@@ -245,38 +288,135 @@ func chatInfoError(err error) error {
 	return classify(err)
 }
 
-// chatTurnError names a turn that is already running: the person has to cancel it first.
+// chatTurnError maps a refusal of a turn (P6), and of the thread PATCH (P9) once chatPatchError has
+// taken the pin case: a turn already running gets tnctl's hint to follow and cancel it; any other
+// refusal goes through councilError.
 func chatTurnError(err error, bot, thread string) error {
 	var ae *api.Error
 	if errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Code == "turn_open" {
 		return newErr(codeConflict, "this chat already has a turn in progress (tnctl chat %s --thread %s --follow, then Ctrl-C cancels it)", bot, escapeLine(cleanBotText(thread)))
 	}
-	return classify(err)
+	return councilError(err)
 }
 
-// chatOnce runs one turn: it makes the thread when --thread names none, asks the council and follows
-// the answer to its end.
-func chatOnce(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, prompt string, f chatFlags, sigs <-chan os.Signal) error {
+// chatThreadRequest is the body of a new thread (P3): the member and its scope for a member chat, or
+// the council by name.
+func chatThreadRequest(prompt string, f chatFlags) api.NewChatThread {
+	return api.NewChatThread{Title: chatTitle(prompt), Origin: "cli", Member: f.memberSlug, MemberScope: f.memberScope, Roster: f.roster}
+}
+
+// chatTurnRequest is the body of a turn (P6). --thorough is mode council with thorough: only
+// thorough makes the hub record the choice.
+func chatTurnRequest(prompt string, f chatFlags) api.NewChatTurn {
+	req := api.NewChatTurn{Prompt: prompt, Mode: f.mode, Member: f.memberSlug, Effort: f.effort}
+	if f.thorough {
+		req.Mode, req.Thorough = "council", true
+	}
+	return req
+}
+
+// chatCouncilName is how a council is named on one line: "<display name> (<name>)"; the name alone
+// when the display name is empty or reads the same; the display name alone when the name is empty.
+func chatCouncilName(name, displayName string) string {
+	n, d := escapeLine(name), hubText(displayName)
+	if n == "" {
+		return d
+	}
+	if d != "" && d != hubText(name) {
+		return d + " (" + n + ")"
+	}
+	return n
+}
+
+// chatRosterHint adds the bot's councils to an unknown_roster refusal, from the chat info already
+// read, so the person sees what to pick. mapped is err already mapped; any other refusal is returned
+// as mapped.
+func chatRosterHint(mapped, err error, info *api.ChatInfo) error {
+	ce, ok := api.CouncilErrorOf(err)
+	if !ok || ce.Code != "unknown_roster" || info == nil || info.Council == nil || len(info.Council.Rosters) == 0 {
+		return mapped
+	}
+	names := make([]string, 0, len(info.Council.Rosters))
+	for _, r := range info.Council.Rosters {
+		names = append(names, escapeLine(r.Name))
+	}
+	return newErr(exitCodeOf(mapped), "%s\ncouncils: %s", mapped.Error(), strings.Join(names, ", "))
+}
+
+// chatPatchError maps a refusal of the thread PATCH: a pin that does not fit the new council gets
+// tnctl's own words (the hub's advice names API fields a person cannot send from tnctl); the rest is
+// chatTurnError's.
+func chatPatchError(err error, bot, thread, roster string) error {
+	if ce, ok := api.CouncilErrorOf(err); ok && ce.Code == "invalid" {
+		for _, f := range ce.Fields {
+			if f.Path == "membersPin" {
+				return newErr(codeRejected, "this chat's pinned members are not all in council '%s': change or clear the pin in the web chat, then run the command again", roster)
+			}
+		}
+	}
+	return chatTurnError(err, bot, thread)
+}
+
+// chatPatchRoster sets the thread's council (P9) and says so on stderr. It never sends membersPin:
+// pins are changed in the web chat only.
+func chatPatchRoster(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, thread, roster string, info *api.ChatInfo, f chatFlags) error {
+	name := roster
+	t, _, err := fl.PatchChatThread(ctx, bot, thread, api.ChatThreadCouncilPatch{SetRoster: true, Roster: &name})
+	if err != nil {
+		return chatRosterHint(chatPatchError(err, bot, thread, roster), err, info)
+	}
+	if f.json {
+		return nil
+	}
+	shown := chatCouncilName(roster, "")
+	if t != nil && t.Roster != nil {
+		n := t.Roster.Name
+		if n == "" {
+			n = roster
+		}
+		shown = chatCouncilName(n, t.Roster.DisplayName)
+	}
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "· this chat's council is now %s\n", shown)
+	return nil
+}
+
+// chatOnce runs one turn. With --thread it first sets that chat's council when --roster is given
+// (P9), reads the thread (P4) and refuses, for a chat with one member, another --member or
+// --thorough; without --thread it makes the thread (P3), with --roster in its body. It then asks
+// (P6) and follows the answer to its end.
+func chatOnce(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot, prompt string, info *api.ChatInfo, f chatFlags, sigs <-chan os.Signal) error {
 	errw := cmd.ErrOrStderr()
 	threadID := f.thread
 	var after int64
 	if threadID != "" {
+		if f.roster != "" {
+			if err := chatPatchRoster(ctx, cmd, fl, bot, threadID, f.roster, info, f); err != nil {
+				return err
+			}
+		}
 		d, _, err := fl.ChatThread(ctx, bot, threadID)
 		if err != nil {
 			return classify(err)
 		}
+		if f.memberSlug != "" && d.Thread.Member != nil && *d.Thread.Member != f.memberSlug {
+			return usageErr("thread %s is a chat with %s alone: leave out --member, or start a new chat without --thread", escapeLine(cleanBotText(threadID)), escapeLine(cleanBotText(*d.Thread.Member)))
+		}
+		if f.thorough && d.Thread.Member != nil {
+			// The hub would answer "thorough: Thorough asks the whole council, never one member." (exit 5).
+			return usageErr("thread %s is a chat with %s alone: leave out --thorough, or start a new chat without --thread", escapeLine(cleanBotText(threadID)), escapeLine(cleanBotText(*d.Thread.Member)))
+		}
 		after = d.LastSeq
 	} else {
-		t, _, err := fl.CreateChatThread(ctx, bot, api.NewChatThread{Title: chatTitle(prompt), Origin: "cli", Member: f.member})
+		t, _, err := fl.CreateChatThread(ctx, bot, chatThreadRequest(prompt, f))
 		if err != nil {
-			return classify(err)
+			return chatRosterHint(councilError(err), err, info)
 		}
 		threadID = t.ID
 	}
 	if !f.json {
 		_, _ = fmt.Fprintf(errw, "thread %s\n", escapeLine(cleanBotText(threadID)))
 	}
-	return chatRunTurn(ctx, cmd, fl, bot, threadID, after, api.NewChatTurn{Prompt: prompt, Mode: f.mode, Member: f.member, Effort: f.effort}, f, sigs)
+	return chatRunTurn(ctx, cmd, fl, bot, threadID, after, chatTurnRequest(prompt, f), f, sigs)
 }
 
 // chatRunTurn posts one turn and follows it. A turn that fails is an error with its exit code.
@@ -422,9 +562,9 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 				continue
 			}
 			if threadID == "" {
-				t, _, err := fl.CreateChatThread(ctx, bot, api.NewChatThread{Title: chatTitle(prompt), Origin: "cli", Member: f.member})
+				t, _, err := fl.CreateChatThread(ctx, bot, chatThreadRequest(prompt, f))
 				if err != nil {
-					_, _ = fmt.Fprintf(errw, "Error: %v\n", classify(err))
+					_, _ = fmt.Fprintf(errw, "Error: %v\n", chatRosterHint(councilError(err), err, info))
 					continue
 				}
 				// A new thread starts before its first event: after is 0, as its ids start at 1.
@@ -440,10 +580,10 @@ func chatRepl(ctx context.Context, cmd *cobra.Command, fl *api.Fleet, bot string
 				after = d.LastSeq
 			}
 			fresh = false
-			req := api.NewChatTurn{Prompt: prompt, Mode: f.mode, Member: f.member, Effort: f.effort}
+			req := chatTurnRequest(prompt, f)
 			if member != "" {
 				// @fleet and @coder ask one member alone: a mode is the council's, not the member's.
-				req.Member, req.Mode = member, ""
+				req.Member, req.Mode, req.Thorough = member, "", false
 			}
 			if err := chatRunTurn(ctx, cmd, fl, bot, threadID, after, req, f, sigs); err != nil {
 				if errors.Is(err, errChatInterrupted) {
@@ -537,17 +677,30 @@ func printChatInfo(w io.Writer, bot string, info *api.ChatInfo) {
 // printChatThreads is the threads table.
 func printChatThreads(w io.Writer, threads []api.ChatThread) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "ID\tTITLE\tTURNS\tLAST\tUPDATED")
+	_, _ = fmt.Fprintln(tw, "ID\tTITLE\tCOUNCIL\tTURNS\tLAST\tUPDATED")
 	for _, t := range threads {
 		last := "-"
 		if t.LastTurn != nil && t.LastTurn.State != "" {
 			last = escapeLine(t.LastTurn.State)
 		}
 		title := terminalText(cleanBotText(t.Title))
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", escapeLine(t.ID), cutRunes(title, 50), t.TurnCount, last,
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\n", escapeLine(t.ID), cutRunes(title, 50), chatThreadCouncil(t), t.TurnCount, last,
 			time.UnixMilli(t.UpdatedAt).Local().Format("2006-01-02 15:04"))
 	}
 	_ = tw.Flush()
+}
+
+// chatThreadCouncil is a thread's council for one table cell (tab-safe): @<member> for a chat with
+// one member, the council's name when the thread names one, and (default) for a thread that follows
+// the bot's default council (a council's name cannot hold parentheses, so it cannot be read as one).
+func chatThreadCouncil(t api.ChatThread) string {
+	if t.Member != nil && *t.Member != "" {
+		return "@" + councilCell(*t.Member)
+	}
+	if t.Roster != nil && t.Roster.Name != "" {
+		return councilCell(t.Roster.Name)
+	}
+	return "(default)"
 }
 
 // chatTitle is the title of a thread: the prompt's first line, cut to 60 characters.
@@ -751,6 +904,26 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 
 	var turnErr *api.ChatError
 	var usage *api.ChatUsage
+	// names are the display names the bot's computer sent this turn, by member slug: an older
+	// computer sends none, and its lines keep the slugs.
+	names := map[string]string{}
+	remember := func(member, name string) {
+		if member == "" {
+			return
+		}
+		if n := hubText(name); n != "" {
+			names[member] = n
+		}
+	}
+	who := func(member, name string) string {
+		if n := hubText(name); n != "" {
+			return n
+		}
+		if n := names[member]; n != "" {
+			return n
+		}
+		return hubText(member)
+	}
 	// cutFinal is the text of a final the platform shortened for the stream; cutPending says it is
 	// the last final seen, so the answer is not printed until the thread's own record is read.
 	var cutFinal string
@@ -915,11 +1088,25 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 					return fmt.Errorf("malformed chat event: %w", err)
 				}
 				usage = &u
+			case "turn_start":
+				var d struct {
+					Roster *struct {
+						Name        string `json:"name"`
+						DisplayName string `json:"displayName"`
+					} `json:"roster"`
+				}
+				if err := json.Unmarshal(ev.Data, &d); err != nil {
+					return fmt.Errorf("malformed chat event: %w", err)
+				}
+				if d.Roster != nil && d.Roster.Name != "" {
+					p.progress("council " + chatCouncilName(d.Roster.Name, d.Roster.DisplayName) + " answers")
+				}
 			case "plan":
 				var d struct {
 					Mode  string `json:"mode"`
 					Tasks []struct {
 						Member string `json:"member"`
+						Name   string `json:"name"`
 						Task   string `json:"task"`
 					} `json:"tasks"`
 				}
@@ -928,23 +1115,26 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 				}
 				line := d.Mode
 				if len(d.Tasks) > 0 {
-					var names []string
+					shown := make([]string, 0, len(d.Tasks))
 					for _, t := range d.Tasks {
-						names = append(names, terminalText(cleanBotText(t.Member)))
+						remember(t.Member, t.Name)
+						shown = append(shown, who(t.Member, t.Name))
 					}
-					line += ": " + strings.Join(names, ", ")
+					line += ": " + strings.Join(shown, ", ")
 				}
 				p.progress(strings.TrimRight(line, " "))
 				p.resetCaptainText()
 			case "member_start":
 				var d struct {
 					Member string `json:"member"`
+					Name   string `json:"name"`
 					Text   string `json:"text"`
 				}
 				if err := json.Unmarshal(ev.Data, &d); err != nil {
 					return fmt.Errorf("malformed chat event: %w", err)
 				}
-				line := terminalText(cleanBotText(d.Member))
+				remember(d.Member, d.Name)
+				line := who(d.Member, d.Name)
 				if text := terminalText(cleanBotText(d.Text)); text != "" {
 					line += ": " + cutRunes(text, 80)
 				}
@@ -957,7 +1147,7 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 				if err := json.Unmarshal(ev.Data, &d); err != nil {
 					return fmt.Errorf("malformed chat event: %w", err)
 				}
-				p.progress(terminalText(cleanBotText(d.Member)) + " → " + terminalText(cleanBotText(d.Tool)))
+				p.progress(who(d.Member, "") + " → " + terminalText(cleanBotText(d.Tool)))
 			case "coder_update":
 				var d struct {
 					Kind  string `json:"kind"`
@@ -974,14 +1164,18 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 			case "member_done":
 				var d struct {
 					Member string `json:"member"`
+					Name   string `json:"name"`
 				}
 				if err := json.Unmarshal(ev.Data, &d); err != nil {
 					return fmt.Errorf("malformed chat event: %w", err)
 				}
-				p.progress(terminalText(cleanBotText(d.Member)) + " done")
+				remember(d.Member, d.Name)
+				p.progress(who(d.Member, d.Name) + " done")
 				p.resetCaptainText()
 			case "critique":
 				var d struct {
+					Member string `json:"member"`
+					Name   string `json:"name"`
 					Issues []struct {
 						Severity string `json:"severity"`
 					} `json:"issues"`
@@ -989,13 +1183,18 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 				if err := json.Unmarshal(ev.Data, &d); err != nil {
 					return fmt.Errorf("malformed chat event: %w", err)
 				}
+				remember(d.Member, d.Name)
+				shown := who(d.Member, d.Name)
+				if shown == "" {
+					shown = "critic"
+				}
 				blocking := 0
 				for _, i := range d.Issues {
 					if i.Severity == "blocking" {
 						blocking++
 					}
 				}
-				p.progress(fmt.Sprintf("critic: %d issues (%d blocking)", len(d.Issues), blocking))
+				p.progress(fmt.Sprintf("%s: %d issues (%d blocking)", shown, len(d.Issues), blocking))
 				p.resetCaptainText()
 			case "budget":
 				var d struct {

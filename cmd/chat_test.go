@@ -2020,7 +2020,7 @@ func TestChatUsageErrors(t *testing.T) {
 		want string
 	}{
 		{"bad mode", []string{"chat", "scout", "--mode", "fast", "hi"}, "--mode must be auto, quick or council"},
-		{"bad member", []string{"chat", "scout", "--member", "captain", "hi"}, "--member must be fleet or coder"},
+		{"bad member", []string{"chat", "scout", "--member", "Captain", "hi"}, "--member is a member's slug, such as triage, or <scope>/<slug> with scope bot, teamspace or template, not \"Captain\""},
 		{"bad effort", []string{"chat", "scout", "--effort", "max", "hi"}, "--effort must be low, medium or high"},
 		{"member with mode", []string{"chat", "scout", "--member", "fleet", "--mode", "council", "hi"}, "--member and --mode cannot be used together"},
 		{"new with thread", []string{"chat", "scout", "--new", "--thread", "thr_1", "hi"}, "--new and --thread cannot be used together"},
