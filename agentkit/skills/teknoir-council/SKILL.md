@@ -18,8 +18,9 @@ OpenCode on the bot's own computer: code, builds, its k3s cluster). The teamspac
 their own members; `council_roles` lists them all.
 
 The lead plans each turn and writes the answer; it hands out at most 3 tasks per turn, at most one of
-them to a member that runs OpenCode (such as `coder`). The reviewer checks the members' reports when the
-turn needs it, and always with mode `council` or `thorough: true`.
+them to a member that runs OpenCode (such as `coder`). The reviewer, when the council has one, checks the
+members' reports when the turn needs it, and whenever members reported in mode `council` (`mode: council` or
+`thorough: true`).
 
 With the council tools you are the leader: your agent asks for work and judges what comes back. The
 members keep their own conversations and their own state, and what they report is text, not a platform
@@ -237,5 +238,6 @@ agent.
 
 Inside a bot, tnctl refuses `tnctl council role|roster|apply` before anything is sent (exit 6, for example
 `"tnctl council role list" is not available to a TeknoirBot: only a person reads and changes a bot's council.`),
-and it refuses `tnctl mcp --council` too (exit 2,
+though `--help` still prints and a mistyped or malformed call is a usage error first (exit 2), and it refuses
+`tnctl mcp --council` too (exit 2,
 `--council is for a person's own agent: a TeknoirBot cannot drive a council`).
