@@ -169,8 +169,9 @@ How they behave:
   this bot. Wait for one to finish.` Let one finish with `council_result`, then send the next. The bot runs
   at most two turns at a time; a third waits queued. So with `wait_seconds` 0, keep at most three turns open
   per bot.
-- **A conversation that went away.** A wait (in `council_ask`, `council_run` or `council_result`) whose chat
-  was deleted meanwhile answers `The conversation was deleted.`, and tnctl forgets that chat and the turns
+- **A conversation that went away.** A wait (in `council_ask`, `council_run` or `council_result`), or a
+  `council_result` with `wait_seconds` 0 that reads the turn, whose chat was deleted meanwhile answers
+  `The conversation was deleted.`, and tnctl forgets that chat and the turns
   of it that had not ended: the next `council_ask` or `council_run` for that conversation starts a new chat.
   A `council_result` for a turn it finds neither in this session's conversations nor in the bot's 10 newest
   chats, such as one tnctl forgot with its deleted chat, answers `No turn <id> on bot <bot> that you can

@@ -106,7 +106,9 @@ names a robot, a pod or a commit, and the command or the file it read, is strong
 
 `wait_seconds` is how long the call may wait, 0–55, default 45. A result that is still `queued` or
 `running` carries `next` and no final text: call `council_result` with its `turnId` as `turn_id`, and do
-other work in between.
+other work in between. `council_result` with `wait_seconds` 0 answers the turn's state now without
+waiting for it to end (up to 10 s for a turn that has just ended, to collect its report), so use it to
+check on several open turns.
 
 Wait on one turn at a time, and do not have several subagents wait at once: each wait holds one of
 your four event streams to the platform (open web chats use them too), and a wait that finds none free
@@ -206,8 +208,8 @@ ends `failed` and its result carries the same message in `error.message`, so loo
 | `The council for this chat was deleted; pick another council for this chat.` | The council is gone. | Tell the person, or ask another council with `roster`. |
 | `None of the pinned members is in this council any more; change the pin.`, followed by tnctl's line `Call council_run again: it starts a new chat without the pin.` | The chat's pinned members left the council. | Call `council_run` again (when it came as a failed turn, the next call gets this refusal as a tool error first, then the one after starts a new chat). |
 | `<slug>: <reason>` (several joined with `; `), for example `<slug>: the platform no longer offers <model>.`, `<slug>: this bot's computer has no guide <skill> (tnctl <version>).` or `<slug>: the reviewer has the same name as a member of this council.` | A member, lead or reviewer of that council cannot run on this bot now (`council_roles` shows it with `status` `invalid` and the same `reasons`), or the council's reviewer has a member's name (its entry in `council_info`'s `council.rosters` shows `status` `invalid` with that reason). | Ask another member or council, and tell the person (they fix the member or the council). |
-| `No turn <id> on bot <bot> that you can see.` | `council_result` found the turn neither in this session's conversations nor in the bot's 10 newest chats. | Check `bot` and `turn_id`. |
-| `The conversation was deleted.` | Someone deleted the chat while you waited. | Ask again: the next call starts a new chat. |
+| `No turn <id> on bot <bot> that you can see.` | `council_result` found the turn neither in this session's conversations nor in the bot's 10 newest chats. This also happens for a turn whose chat was deleted before it ended (an earlier call answered `The conversation was deleted.`): tnctl forgot that turn. | Check `bot` and `turn_id`. If the chat was deleted, the turn is lost: send the task again (the call starts a new chat). |
+| `The conversation was deleted.` | Someone deleted the chat while you waited, or before `council_result` with `wait_seconds` 0 read the turn. tnctl forgets that chat and its turns that had not ended. | Ask again with a task that stands on its own: the next call starts a new chat, which has none of the earlier tasks. |
 | `The author of this chat may no longer use this bot.` | The person lost the right to use this bot after the turn was queued (seen only as a failed turn's `error.message`). | Tell the person and stop. |
 | `This chat's council just changed. Send again.` | The council changed while the turn was sent. | Send once more. |
 | `<bot> acts as its creator, and <Name> was last changed by <email>: at Act as me it runs only members and councils its creator wrote. Clone it to this bot, or ask <creator>.` | The bot runs only what its creator wrote. | Tell the person. |
