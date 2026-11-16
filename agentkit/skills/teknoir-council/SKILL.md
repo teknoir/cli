@@ -57,8 +57,9 @@ council_info {bot, namespace?}
 It answers `canChat` and, when that is false, a `reason`; the bot's state; the default council's
 members; today's budget; and the bot's councils: `council.roster` is the default with its members,
 `council.rosters` lists every council by name for `council_run`'s `roster`. When `canChat` is false,
-give the person the `reason` and stop: you may chat when you may open the bot's desktop, and a bot that
-is not running has no council online.
+give the person the `reason` and stop: you may chat when you may open the bot's desktop. `canChat` does
+not say whether the bot runs: a turn on a bot that is suspended, starting, being removed or in any other
+phase than running is refused when it is sent (see Refusals).
 
 When you need a member that is not in the default council, call next:
 
