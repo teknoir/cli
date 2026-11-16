@@ -175,7 +175,8 @@ func (s *docsCmdShell) step(b byte) {
 // line ends a command, also after a backslash. The body of a here-document is data, never a command,
 // and one whose delimiter never comes is reported (docsCmdLine.unended). Once a block has shown a
 // "$ " prompt it is a console transcript: only the "$ " lines start a command, a "> " prompt is
-// dropped, and every other line is output. A block without a prompt is read like bash.
+// dropped, and every other line is output. A block without a prompt is read like bash. An indented
+// code block (no fence) is never read here: docsCmdIndentProblems reports a command in one.
 func docsCmdExtract(page, markdown string) []docsCmdLine {
 	markdown = strings.ReplaceAll(markdown, "\r\n", "\n")
 	var out []docsCmdLine
@@ -892,7 +893,7 @@ func docsCmdWalk(root *cobra.Command, c docsCmdLine, toks []string) []string {
 	badSub, anySub := false, false
 	subPh := ""      // the placeholder in a subcommand slot that stopped the walk
 	var pos []string // the positional arguments the line gives, for the too-many check
-	concrete := true // every one is one the page means: no placeholder that is no one word, no | and no unknown
+	concrete := true // the count is exact: no spaced | alternative, and every placeholder is a quoted word or a one-word <name> outside the subcommand slot
 	outVal := ""     // the value the line gives the root's -o/--output flag, "" when none
 	// unknownSub is the message for a word cur refuses: a subcommand tnctl does not have, or a
 	// positional argument on a command that takes none.
@@ -965,7 +966,12 @@ loop:
 		case !walking:
 			// A plain word after the walk left the tree is a positional argument of the command it
 			// ended on, counted for the too-many check.
-			if anySub && !badSub && docsCmdWordPlaceholder(subPh) && docsCmdSub(cur, tok) != nil {
+			// cobra's help and completion of the root are skipped, as in the default branch: cobra adds
+			// them only when a command runs, so the line must mean the same before and after a run. A
+			// placeholder that may stand for a child with that subcommand is that child's command
+			// (council <group> apply is council role apply).
+			if anySub && !badSub && docsCmdWordPlaceholder(subPh) && docsCmdSub(cur, tok) != nil &&
+				!docsCmdCobraOwn(cur, tok) && !docsCmdSlotMayNameChild(cur, subPh, tok) {
 				// A word placeholder fills the subcommand slot, so the real subcommand after it is only
 				// a positional argument, and the group refuses it (council roster <name> add).
 				badSub = true
@@ -975,7 +981,7 @@ loop:
 			flagToks = append(flagToks, docsCmdDashParts(tok)...)
 		default:
 			// A plain word while the walk is on the command tree.
-			if !cur.HasParent() && (tok == "help" || tok == "completion") {
+			if docsCmdCobraOwn(cur, tok) {
 				// cobra adds help and completion to the root only, and only when a command runs;
 				// the flags written before the word are still checked, nothing after it is.
 				break loop
@@ -1110,6 +1116,38 @@ func docsCmdWordPlaceholder(tok string) bool {
 	}
 	l := strings.ToLower(tok)
 	return !strings.Contains(l, "flag") && !strings.Contains(l, "option") && !strings.HasPrefix(l, "<-")
+}
+
+// docsCmdChildHasSub reports whether a child of c has a subcommand named word.
+func docsCmdChildHasSub(c *cobra.Command, word string) bool {
+	for _, child := range c.Commands() {
+		if docsCmdSub(child, word) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// docsCmdSlotMayNameChild reports whether the placeholder ph in c's subcommand slot may stand for a
+// child of c that has a subcommand named word: ph names such a child (<role|roster>, <role or
+// roster>) or is a generic slot (<group>, <command>, <subcommand>, <cmd>). Then the line is that
+// child's command (council <group> apply is council role apply); a <name> or a quoted word is no such
+// slot.
+func docsCmdSlotMayNameChild(c *cobra.Command, ph, word string) bool {
+	if !strings.HasPrefix(ph, "<") {
+		return false
+	}
+	parts := strings.FieldsFunc(strings.ToLower(ph), func(r rune) bool { return r < 'a' || r > 'z' })
+	for _, p := range parts {
+		switch p {
+		case "group", "command", "subcommand", "cmd":
+			return docsCmdChildHasSub(c, word)
+		}
+		if child := docsCmdSub(c, p); child != nil && docsCmdSub(child, word) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // docsCmdRefusesWord reports whether c refuses word: it is the root (cobra's legacyArgs refuses any
@@ -1261,13 +1299,20 @@ func docsCmdDashParts(tok string) []string {
 	return out
 }
 
+// docsCmdCobraOwn reports whether word names one of the commands cobra adds to the root c only when
+// a command runs, help and completion: a line must mean the same before and after a run, so the
+// rules never look them up.
+func docsCmdCobraOwn(c *cobra.Command, word string) bool {
+	return !c.HasParent() && (word == "help" || word == "completion")
+}
+
 // docsCmdSubHasFlag reports whether any descendant of c (children, grandchildren and so on) has the
 // flag tok names. cobra's help and completion commands, which it adds to the root only when a
 // command runs, are never counted: a placeholder line must mean the same before and after a run.
 // A hidden flag is no flag here either, so a page cannot name one through a placeholder.
 func docsCmdSubHasFlag(c *cobra.Command, tok string) bool {
 	for _, sub := range c.Commands() {
-		if !c.HasParent() && (sub.Name() == "help" || sub.Name() == "completion") {
+		if docsCmdCobraOwn(c, sub.Name()) {
 			continue
 		}
 		f := docsCmdFlagOf(sub, tok)
@@ -1602,15 +1647,96 @@ func TestDocsCouncilCommands(t *testing.T) {
 }
 
 // docsCmdPage reads one page and returns its commands and the messages about the page itself: a
-// fence that is wrong (docsCmdFenceProblems), and a page that yields no tnctl command at all, which
-// means its commands are written the way the parser does not read them.
+// fence that is wrong (docsCmdFenceProblems), a tnctl command in an indented code block, which MkDocs
+// shows as code but the parser never reads (docsCmdIndentProblems), and a page that yields no tnctl
+// command at all, which means its commands are written the way the parser does not read them.
 func docsCmdPage(page, markdown string) ([]docsCmdLine, []string) {
 	msgs := docsCmdFenceProblems(page, markdown)
+	msgs = append(msgs, docsCmdIndentProblems(page, markdown)...)
 	lines := docsCmdExtract(page, markdown)
 	if len(lines) == 0 {
 		msgs = append(msgs, fmt.Sprintf("%s yields no tnctl command: are its commands outside ```bash blocks?", page))
 	}
 	return lines, msgs
+}
+
+// docsCmdIndentProblems reports each tnctl command a page shows in an indented code block, which
+// MkDocs renders as code but docsCmdExtract never reads. Such a block is outside every fence (read
+// as docsCmdExtract reads them, blockquotes too), after a blank line, a heading, or another line of
+// the same block, and indented at least 4 columns past the container it is in: the page, or 4 past
+// a list item's marker or a !!!, ??? or === opener. Only a line that starts a block (after a blank)
+// leaves a container; a hanging continuation line indented 2 does not. A tab counts as 4 blanks; a
+// non-breaking space counts as none. A "$ " prompt is dropped before the line is read.
+func docsCmdIndentProblems(page, markdown string) []string {
+	var msgs []string
+	openRun, openDepth := "", 0
+	prevBlank, inCode := true, false
+	base := 0
+	for i, row := range strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n") {
+		fixed, _ := docsCmdFixOddSpaces(docsCmdShell{}, row)
+		limit := -1
+		if openRun != "" {
+			limit = openDepth
+		}
+		rest, depth := docsCmdQuote(fixed, limit)
+		if openRun != "" && depth < openDepth {
+			openRun = "" // the blockquote ended the block, as in docsCmdExtract
+			rest, depth = docsCmdQuote(fixed, -1)
+		}
+		run, info := docsCmdFence(strings.TrimLeft(rest, " \t")) // the fences as docsCmdExtract reads them
+		src, _ := docsCmdQuote(row, depth)                       // the indent as Markdown counts it: a non-breaking space is no blank
+		line := strings.ReplaceAll(src, "\t", "    ")
+		trimmed := strings.TrimLeft(line, " ")
+		indent := len(line) - len(trimmed)
+		if run != "" {
+			switch {
+			case openRun == "":
+				openRun, openDepth = run, depth
+			case run[0] == openRun[0] && len(run) >= len(openRun) && strings.TrimSpace(info) == "":
+				openRun = ""
+			}
+			prevBlank, inCode = false, false
+			continue
+		}
+		if openRun != "" {
+			continue
+		}
+		if trimmed == "" {
+			prevBlank = true
+			continue
+		}
+		if (prevBlank || inCode) && indent >= base+4 {
+			inCode, prevBlank = true, false
+			if t := strings.TrimPrefix(trimmed, "$ "); docsCmdHasCmd(t) {
+				msgs = append(msgs, fmt.Sprintf("%s:%d: an indented code block holds a tnctl command: fence it as ```bash", page, i+1))
+			}
+			continue
+		}
+		startsBlock := prevBlank
+		inCode, prevBlank = false, strings.HasPrefix(trimmed, "#") && indent < base+4 // a heading is one line: an indented line after it is code
+		switch {
+		case docsCmdListMarker(trimmed) || strings.HasPrefix(trimmed, "!!!") || strings.HasPrefix(trimmed, "???") || strings.HasPrefix(trimmed, "==="):
+			base = indent + 4
+		case startsBlock && indent < base:
+			// Only a line that starts a block leaves the list item or admonition: a hanging
+			// (lazy) continuation line indented two blanks stays in it.
+			base = indent - indent%4
+		}
+	}
+	return msgs
+}
+
+// docsCmdListMarker reports whether a trimmed line starts a list item: -, * or + and a blank, or a
+// number, a dot and a blank.
+func docsCmdListMarker(t string) bool {
+	if len(t) > 1 && strings.ContainsRune("-*+", rune(t[0])) && t[1] == ' ' {
+		return true
+	}
+	j := 0
+	for j < len(t) && t[j] >= '0' && t[j] <= '9' {
+		j++
+	}
+	return j > 0 && j+1 < len(t) && t[j] == '.' && t[j+1] == ' '
 }
 
 // TestDocsCouncilJSONOnlyCommands pins the commands that take --json instead of the root's -o: they
@@ -2798,6 +2924,12 @@ func TestDocsCouncilParser(t *testing.T) {
 			want: []string{"case.md:1: the fence never closes"},
 			cmds: 2,
 		},
+		{
+			name: "a blockquote that ends its fence leaves the text after it",
+			page: "> ```bash\n> tnctl council role list\n\n```text\ntnctl council rostr list\n```\n",
+			want: []string{"case.md:1: the fence never closes"},
+			cmds: 1,
+		},
 		// The command lines the parser cuts out of a block.
 		{
 			name: "a spaced brace alternative cuts nothing",
@@ -3109,6 +3241,30 @@ func TestDocsCouncilParser(t *testing.T) {
 			},
 		},
 		{
+			name: "a group placeholder before a subcommand its groups share",
+			page: bash("tnctl council <group> apply -f <file>\ntnctl council <role|roster> apply -f <file|->\n" +
+				"tnctl council <role or roster> apply -f <file>\ntnctl council <command> apply -f council.yaml"),
+		},
+		{
+			name: "a name placeholder before a subcommand its groups share",
+			page: bash("tnctl council <name> apply -f council.yaml\ntnctl council <council> apply -f council.yaml"),
+			want: []string{
+				`case.md:2: tnctl council: a placeholder before the subcommand "apply"`,
+				`case.md:3: tnctl council: a placeholder before the subcommand "apply"`,
+			},
+		},
+		{
+			// TestDocsCouncilPlaceholderSkipsCobraCommands pins this on a tree that has help and
+			// completion in any test order; here it holds after a test ran rootCmd.
+			name: "cobra's root-only help and completion after a placeholder",
+			page: bash("tnctl <command> help\ntnctl <command> completion"),
+		},
+		{
+			name: "a flag after cobra's help is still checked",
+			page: bash("tnctl <command> --bot -h help --no-descriptions"),
+			want: []string{`case.md:2: tnctl: unknown flag "--no-descriptions"`},
+		},
+		{
 			name: "flags, a variable or an elision before the subcommand",
 			page: bash("tnctl [flags] council role list\ntnctl council [flags] role list\ntnctl council <global-flags> role list\ntnctl council $OPTS roster list\ntnctl council \u2026 role list"),
 		},
@@ -3215,10 +3371,52 @@ func TestDocsCouncilSubHasFlagSkipsCobraCommands(t *testing.T) {
 	}
 }
 
+// TestDocsCouncilPlaceholderSkipsCobraCommands pins, on a tree of its own that already has cobra's
+// help and completion commands, that a word placeholder in the root's subcommand slot followed by
+// help or completion is no "placeholder before the subcommand": cobra adds those two to the real root
+// only when a command runs, so a check on rootCmd alone would depend on the order of the tests.
+func TestDocsCouncilPlaceholderSkipsCobraCommands(t *testing.T) {
+	root := &cobra.Command{Use: "tnctl"}
+	council := &cobra.Command{Use: "council"}
+	roster := &cobra.Command{Use: "roster"}
+	roster.AddCommand(&cobra.Command{Use: "add", Run: func(*cobra.Command, []string) {}})
+	council.AddCommand(roster, &cobra.Command{Use: "list", Run: func(*cobra.Command, []string) {}})
+	root.AddCommand(council)
+	root.InitDefaultHelpCmd()
+	root.InitDefaultCompletionCmd()
+	if docsCmdSub(root, "help") == nil || docsCmdSub(root, "completion") == nil {
+		t.Fatal("the tree has no help or completion command")
+	}
+	cases := []struct {
+		line string
+		want []string
+	}{
+		{line: "tnctl <command> help"},
+		{line: "tnctl <command> completion bash"},
+		{line: `tnctl "x" help`},
+		{line: "tnctl <command> council", want: []string{`case.md:2: tnctl: a placeholder before the subcommand "council"`}},
+		{line: "tnctl council <command> list", want: []string{`case.md:2: tnctl council: a placeholder before the subcommand "list"`}},
+		{line: "tnctl council roster <name> add", want: []string{`case.md:2: tnctl council roster: a placeholder before the subcommand "add"`}},
+	}
+	for _, tc := range cases {
+		lines, msgs := docsCmdPage("case.md", "```bash\n"+tc.line+"\n```\n")
+		got := msgs
+		for _, l := range lines {
+			got = append(got, docsCmdCheck(root, l)...)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %q, want %q", tc.line, got, tc.want)
+		}
+	}
+}
+
 // TestDocsCouncilPageProblems checks docsCmdPage on synthetic pages: a page in the docs must show its
 // commands the way the parser reads them, so a page that yields none, or whose fence is wrong, is a
 // finding even when nothing in it would be refused.
 func TestDocsCouncilPageProblems(t *testing.T) {
+	const indentMsg = ": an indented code block holds a tnctl command: fence it as ```bash"
+	const noneMsg = "case.md yields no tnctl command: are its commands outside ```bash blocks?"
+	const tail = "\n```bash\ntnctl council role list\n```\n" // a block that yields a command
 	cases := []struct {
 		name string
 		page string
@@ -3250,6 +3448,110 @@ func TestDocsCouncilPageProblems(t *testing.T) {
 			name: "a page whose fence never closes",
 			page: "```bash\ntnctl council role list\n",
 			want: []string{"case.md:1: the fence never closes"},
+		},
+		// Indented code blocks: MkDocs shows them as code, the parser never reads them.
+		{
+			name: "an indented code block",
+			page: "Run:\n\n    tnctl council rolee list\n",
+			want: []string{"case.md:3" + indentMsg, noneMsg},
+		},
+		{
+			name: "a list item's indented block",
+			page: "- Read it:\n\n        tnctl council rolee get stream-watcher --bot scout\n",
+			want: []string{"case.md:3" + indentMsg, noneMsg},
+		},
+		{
+			name: "an admonition's indented block",
+			page: "!!! note\n    Run:\n\n        tnctl council roster list --bot scout\n",
+			want: []string{"case.md:4" + indentMsg, noneMsg},
+		},
+		{
+			name: "every line of an indented block",
+			page: "Run:\n\n    tnctl council role list\n    tnctl council rolee list\n" + tail,
+			want: []string{"case.md:3" + indentMsg, "case.md:4" + indentMsg},
+		},
+		{
+			name: "a tab-indented block",
+			page: "Run:\n\n\ttnctl council role list\n",
+			want: []string{"case.md:3" + indentMsg, noneMsg},
+		},
+		{
+			name: "a prompt in an indented block",
+			page: "1. Export it:\n\n        $ tnctl council role export stream-watcher --bot scout > stream-watcher.yaml\n\n2. Apply it.\n\n" +
+				"```bash\ntnctl council apply -f stream-watcher.yaml\n```\n",
+			want: []string{"case.md:3" + indentMsg},
+		},
+		{
+			name: "an admonition's prose",
+			page: "!!! note\n\n    tnctl asks on a terminal; --yes gives it up front.\n" + tail,
+		},
+		{
+			name: "a list item's paragraph",
+			page: "- Read it:\n\n    tnctl council role get x is the command.\n" + tail,
+		},
+		{
+			name: "an indented output block",
+			page: "Output:\n\n    SLUG  NAME\n" + tail,
+		},
+		{
+			name: "a lazy continuation",
+			page: "Run\n    tnctl council rolee list\n" + tail,
+		},
+		{
+			name: "a fenced block in a list item",
+			page: "1. Export it:\n\n    ```bash\n    tnctl council role export stream-watcher --bot scout\n    ```\n",
+		},
+		{
+			name: "a hanging list item's 4-space paragraph",
+			page: "- Without --yes nothing is removed, and the\n  command exits 0.\n\n    tnctl prints what it would do on stderr.\n" + tail,
+		},
+		{
+			name: "a hanging list item's 8-space block",
+			page: "- Read it, the\n  command is:\n\n        tnctl council rolee list\n" + tail,
+			want: []string{"case.md:4" + indentMsg},
+		},
+		{
+			name: "a top-level paragraph after a list, then a block",
+			page: "- a\n\n  b\n\n    tnctl council rolee list\n" + tail,
+			want: []string{"case.md:5" + indentMsg},
+		},
+		{
+			name: "a blockquote's indented block",
+			page: "> Run:\n>\n>     tnctl council rolee list\n" + tail,
+			want: []string{"case.md:3" + indentMsg},
+		},
+		{
+			name: "a block right after a heading",
+			page: "## Run\n    tnctl council rolee list\n" + tail,
+			want: []string{"case.md:2" + indentMsg},
+		},
+		{
+			name: "a tab's indented block",
+			page: "=== \"bot\"\n\n    Run:\n\n        tnctl council rolee list\n" + tail,
+			want: []string{"case.md:5" + indentMsg},
+		},
+		{
+			name: "a list item's text after its block",
+			page: "1. Export it:\n\n        tnctl council role list\n\n    Then apply it.\n\n2. Next.\n" + tail,
+			want: []string{"case.md:3" + indentMsg},
+		},
+		{
+			name: "a non-breaking-space indent is a paragraph",
+			page: "Run:\n\n\u00a0\u00a0\u00a0\u00a0tnctl council rolee list\n" + tail,
+		},
+		{
+			name: "a quoted fence",
+			page: "> ```bash\n> tnctl council role list\n> ```\n\nok\n",
+		},
+		{
+			name: "an indented block after a blockquote ended its fence",
+			page: "> ```bash\n> tnctl council role list\n\nRun:\n\n    tnctl council rolee list\n",
+			want: []string{"case.md:1: the fence never closes", "case.md:6" + indentMsg},
+		},
+		{
+			name: "an indented block with CRLF line endings",
+			page: "Run:\r\n\r\n    tnctl council rolee list\r\n" + tail,
+			want: []string{"case.md:3" + indentMsg},
 		},
 	}
 	for _, tc := range cases {
