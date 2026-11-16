@@ -117,9 +117,10 @@ reads the turn's record instead. A turn that ends during such a wait has no `rep
 council_result {bot, turn_id, wait_seconds?, namespace?}
 ```
 
-A turn of one conversation must end before the next is sent; tnctl does not send the next one and
-answers with one of these two texts, where `<who>` is the member's name, `The member <ref>` (before its
-name is known) or `The council`:
+A turn of one conversation must end before the next is sent, and tnctl must have seen it end (in a wait,
+or in a `council_result` for it): until then tnctl does not send the next one and answers with one of
+these two texts, where `<who>` is the member's name, `The member <ref>` (before its name is known) or
+`The council`:
 
 ```text
 <who> is still working on turn <id> in this conversation: call council_result with turn_id <id>.
@@ -196,7 +197,7 @@ ends `failed` and its result carries the same message in `error.message`, so loo
 | `Resume the bot to chat.` | The bot is suspended. | A person resumes the bot. |
 | `The bot is starting.`, `The bot is being removed.`, or `The bot is <phase>.` (the bot's phase lower-cased, for example `The bot is pending.`) | The bot cannot run a turn now. | Wait, then call `council_info` again; if it stays that way (for example `failed`), tell the person. |
 | `Too many open turns on this bot. Wait for one to finish.` | You already have three turns `queued` or `running` on this bot, or six wait in its queue. | Let one finish with `council_result`, then send the next. |
-| `<who> is still working on turn <id> in this conversation: call council_result with turn_id <id>.`, or `<who> is still working on a turn in this conversation: wait for it, then ask again.` | tnctl's own busy check: that conversation still has a turn running, so the next one is not sent. | With a turn id, call `council_result` with that `turn_id`; without one, wait for that turn, then ask again. Or ask another member or council meanwhile. |
+| `<who> is still working on turn <id> in this conversation: call council_result with turn_id <id>.`, or `<who> is still working on a turn in this conversation: wait for it, then ask again.` | tnctl's own busy check: that conversation has a turn whose end tnctl has not seen, so the next one is not sent. | With a turn id, call `council_result` with that `turn_id`; without one, wait for that turn, then ask again. Or ask another member or council meanwhile. |
 | `the TeknoirBot chat is turned off on this platform` | The chat is not enabled in this environment. | Tell the person; nothing you do turns it on. |
 | `'<slug>' is not a member of this council. Members: <slugs>.` or `The <lead> leads every turn: ask without @.` | That slug is not a member you can ask. | Pick a member whose kind is `member` from `council_roles`; a lead or a reviewer cannot be asked alone. |
 | `More than one member is called '<slug>' (<scopes>): name the scope.` | Two members share the slug. | Ask `<scope>/<slug>`. |
