@@ -1,15 +1,33 @@
 # `tnctl council`
 
-Run the council of a TeknoirBot: the Captain, Fleet, the Coder and the Critic. This is the process of the
-bot's council image, not a person's command. It takes the chat turns the platform queues for the bot and
-answers them, with the bot's own key, on the bot's own computer.
+`tnctl council` is a person's group: `council role list|get|export|new|archive` (the members, on
+[council-roles.md](council-roles.md)), `council roster list|get|use|add|remove|delete` (the councils, on
+[council-roster.md](council-roster.md)) and `council apply -f <file>` (`council role apply` and
+`council roster apply` are the same command). Only `council serve` is the bot's own: the process of the bot's
+council image, hidden and bot-only. The rest of this page is about `serve`.
 
 ```bash
+tnctl council role list
+tnctl council role get <member>
+tnctl council role export <member>
+tnctl council role new <name> --job <text> [--bot <bot> | --teamspace]
+tnctl council role archive <member>
+tnctl council roster list --bot <bot>
+tnctl council roster get <name> --bot <bot>
+tnctl council roster use <name> --bot <bot>
+tnctl council roster add <name> <member> --bot <bot>
+tnctl council roster remove <name> <member> --bot <bot>
+tnctl council roster delete <name> --bot <bot>
+tnctl council apply -f <file|->
 tnctl council serve [--max-turns 1|2] [--work-dir /work]
 ```
 
-The command is hidden: it is not in `tnctl --help`. It runs only in bot mode; anywhere else it is a usage
-error (exit 2): `tnctl council serve runs only inside a TeknoirBot`.
+`serve` is hidden: it is not among the commands `tnctl council --help` lists. It runs only in bot mode;
+anywhere else it is a usage error (exit 2): `tnctl council serve runs only inside a TeknoirBot`. Inside a bot,
+`council role …`, `council roster …` and `council apply` are refused with exit 6, for example
+`"tnctl council role list" is not available to a TeknoirBot: only a person reads and changes a bot's council.`
+Their `--help` still prints, and a mistyped subcommand, a missing or extra argument or an unknown flag is a
+usage error first (exit 2; [Bot mode](../bot-mode.md)).
 
 ## What it does
 
@@ -25,7 +43,12 @@ The council image starts it as `tini -- tnctl council serve --work-dir /work`. F
    `refused`, `transport` and `http`. A missing key waits 60 s, and says where the key file is. Any `404`
    waits 60 s too, not only `council_off`: a 404 is the platform having no council API there, which is the
    council being off, and it is logged at the first 404 of a run and every tenth one after that, rather
-   than every 60 s.
+   than every 60 s. Each poll announces the council protocol, the kit version, and the tools and guides
+   the computer has (the `X-Teknoir-Council-*` headers). On a computer whose polls carry none of these
+   headers (an older tnctl), or headers the platform cannot read, only the Standard council and the premade
+   `fleet` and `coder` run, and the platform refuses a turn it cannot run there with `council_outdated`
+   ([council-roster.md](council-roster.md)). The guides come from `/etc/teknoirbot/kit`, with the ones built
+   into tnctl as the fallback.
 2. **Runs the turn.** Which phases run depends on the turn's `kind` and `mode`; see [Turn modes](#turn-modes).
    Every model call goes through the bot API's model proxy, with the bot's key.
 3. **Posts its progress and its outcome.** Events as they happen — `turn_start`, `plan`, `member_start`,
@@ -44,8 +67,11 @@ the finish with the turn's own outcome, whose resends get a failure window of th
 (`turn_closed`, `claim_mismatch`), a `404` and any other refusal are not resent.
 
 A turn ends `done` with its answer, or `failed` with a code: `bad_turn` (a kind or a member the bot does not
-know), `turn_closed`, `events_lost`, `events_rejected` (the platform dropped the turn or refused its
-progress), `bot_restarting`, `platform_unavailable`, `no_access` (a Fleet turn at access level `none`),
+know, or a council the platform sent with the turn that the daemon refuses:
+`The council for this turn is not valid: <reason>.`), `turn_closed`, `events_lost`, `events_rejected` (the
+platform dropped the turn or refused its progress), `bot_restarting`, `platform_unavailable`, `no_access` (a
+member turn of a member that reads the platform, when it runs at `none`: the lower of its access ceiling and
+the bot's access),
 `model_error` (the model could not be reached), `model_refused` (the model declined),
 `model_unavailable` (the platform has no model for the bot), `model_budget` (the bot used its tokens for
 today), `model_busy` (too many model calls at once), `model_rejected` (the platform refused the request).
@@ -73,20 +99,31 @@ With either of the first two unset or empty the command is not in bot mode, and 
 `the bot API base must be https (or http on a loopback address)`. A request the platform refuses later does
 not end the process: the poll is logged with the status and code it got, and asked again.
 
-## The members
+## The Standard council
+
+A council has a lead and 1 to 5 members; the reviewer is required when the Coder is a member, and optional
+otherwise. The premade councils are `standard`, `ops` and `review`: [council-roster.md](council-roster.md) has
+them, and [council-roles.md](council-roles.md) the 13 premade members a council may use. Their lead is the
+Captain, and this page calls any council's lead by that name; their reviewer is the Critic (in `review`, the
+Skeptic).
 
 Only two models are used, both through the platform's proxy: `claude-sonnet-5-5` and `claude-haiku-5-5`.
 Effort is `low`, `medium` or `high`; the proxy allows nothing above `high`, and neither does the council. A
-turn's `effort` sets how hard the members think; when it gives none each member is at its own default.
+turn's `effort` is a ceiling: the lead, a member or the reviewer whose own effort is lower keeps its own, and when
+the turn gives none each one thinks at its own effort. The Coder, in a thread it already worked in, keeps the
+effort its OpenCode session started with.
+
+The Standard council is:
 
 | Member | Model | Effort | What it does |
 | --- | --- | --- | --- |
 | Captain | `claude-sonnet-5-5` | `high` | Plans the turn, hands the parts to the others, and writes the answer. |
 | Fleet | `claude-haiku-5-5` | `medium` | Reads the teamspace with the read tools: robots, devices, configuration, problems, metrics, MQTT samples, pods and logs. |
 | Coder | `claude-sonnet-5-5`, through OpenCode | `high` | Works on the bot's computer: code, builds, its k3s cluster. |
-| Critic | `claude-sonnet-5-5` | `medium` | Reads the members' reports and their tool digests and lists the problems: claims without evidence, wrong numbers, risky changes, code claimed to work but not run. |
+| Critic | `claude-sonnet-5-5` | `medium` | Reads the members' reports and their tool digests when the turn needs it, and whenever members reported in mode `council` (`chat --thorough`), and lists the problems: claims without evidence, wrong numbers, risky changes, code claimed to work but not run. |
 
-What the platform's tools give a member follows the bot's access level, and so does what it may change:
+For Fleet, the Captain and the Coder, whose access ceiling is `creator`, what the platform's tools give them
+follows the bot's access level, and so does what they may change:
 
 | Bot access | Fleet | Captain | Coder |
 | --- | --- | --- | --- |
@@ -94,45 +131,51 @@ What the platform's tools give a member follows the bot's access level, and so d
 | `read` (Read only) | every read tool but `inspect_*` | the same | its own computer, and `tnctl` as the bot at `read` |
 | `creator` (Act as me) | every tool, `inspect_*` included | the same | its own computer, and `tnctl` as the bot at `creator` |
 
-The Critic gets no tool at all. The Captain and Fleet also get `read_skill`, which reads one of the kit's
-seven guides (`teknoir-platform`, `teknoir-robots`, `teknoir-config`, `teknoir-debug`, `teknoir-mqtt-streams`,
-`teknoir-k3s-apps`, `teknoir-council`) a page at a time, and `read_result`, which pages the rest of a cut tool
-result; the Captain gets `convene_council`: 1 to 3 tasks for `fleet` and `coder`, at most one of them a Coder task, a
-task of at most 4000 characters and a reason of at most 1000. It is not offered in a quick turn, and at
-access level `none` a `fleet` task is refused.
+A member's platform tools are its tool groups, cut to the lower of its access ceiling and the bot's access,
+and to the tools the bot's computer has ([council-roles.md](council-roles.md)). The Coder holds no tool
+group: it works on the bot's computer through OpenCode.
+
+The Critic, like any reviewer, gets no tool at all. The Captain and Fleet also get `read_skill`, which reads
+one of the kit's seven guides (`teknoir-platform`, `teknoir-robots`, `teknoir-config`, `teknoir-debug`,
+`teknoir-mqtt-streams`, `teknoir-k3s-apps`, `teknoir-council`) a page at a time, and `read_result`, which pages
+the rest of a cut tool result; the Captain gets `convene_council`: 1 to 3 tasks, each naming a member of the
+turn's council, at most one of them the Coder, a task of at most 4000 characters and a reason of at most 1000.
+It is not offered in a quick turn, and a member that reads the platform is convened only when it runs at `read`
+or `creator` (the lower of its access ceiling and the bot's access).
 
 ## Turn modes
 
-A turn arrives with a `kind` — `ask` (a person asks the council, or one member) or `member` (a person's
-turn in a conversation with one member: a thread made with `tnctl chat --member` or `council_ask`) — and,
-for an ask, a `mode`:
+A turn arrives with a `kind` — `ask` (a person asks the council) or `member` (a person's
+turn with one member: a thread made with `tnctl chat --member` or `council_ask`, or an `@<member>` line in a
+conversation) — and, for an ask, a `mode`:
 
 | Mode | What runs |
 | --- | --- |
 | `quick` | The Captain answers alone: six tool rounds at most, then one answer call with the tools off. `convene_council` is not offered. |
-| `council` | The Captain always convenes. When it answers without a convene call, the daemon builds the plan itself: Fleet with the person's question, and the Coder too when the question asks for code. |
+| `council` | The Captain is told to convene before it answers. If it answers without a convene call, the daemon builds the plan itself: the members it may convene, in the council's order, each with the person's question, and the Coder last when the question asks for code (a word such as code, script, app, dashboard or deploy; after platform data, see below); 3 tasks at most in all. If that plan is empty (at `none`, the Standard council's is, unless the Coder is asked for), or the Captain's six tool rounds, the budget or the time run out first, its own answer stands: no member or reviewer runs. |
 | `auto` (the default, and anything empty or unknown) | The Captain decides. The turn starts on the quick budget and is upgraded to the council budget when it convenes. |
-| a member turn (`member` `fleet` or `coder`) | That member alone, with the thread's earlier question and answer pairs in its prompt for Fleet. No Captain, no Critic. |
+| a member turn (any member the bot may use whose part is `member`: a premade one such as `fleet`, `coder` or `triage-sre`, a teamspace member or one of the bot's own) | That member alone, with the thread's earlier question and answer pairs in its prompt; the Coder continues the thread's OpenCode session instead. No lead, no reviewer. |
 
 The Coder is convened only for what the person asked. Before the Captain has read anything, its own
 `convene_council` decides; once it has read platform data — a log, a configuration, an MQTT sample, any tool
 result, which devices and apps wrote; in this turn or in the thread's earlier answers — a Coder task is
-accepted only when the person's own prompt asks for code or a change, and the council-mode plan the daemon
-builds itself convenes it only for a prompt that asks for a change. Otherwise the convene is refused with a
-tool result that says so, and the Captain answers from what it found or convenes Fleet alone. The Coder's
-prompt puts the person's request first, whole when it fits; after the Captain has read platform data the prompt holds none
-of the Captain's notes — the data asked, not the person — only the sentence that it reads what it needs
-itself, and otherwise the notes follow the request as data.
+accepted only when the person's own prompt asks for code or a change, and the plan the daemon builds itself in
+council mode follows the same rule. Here the word app no longer counts as asking for code: for "why is the app on
+r2 slow?" that plan has the council's Coder before platform data, but not after it. A Coder task the Captain
+convenes otherwise is refused with a tool result that says so and names the council's other members, if it
+has any; the Captain then answers from what it found or convenes one or more of them without the Coder (Fleet,
+in the Standard council). The Coder's prompt puts the person's request first, whole when it fits; after the
+Captain has read platform data the prompt holds none of the Captain's notes — the data asked, not the person —
+only the sentence that it reads what it needs itself, and otherwise the notes follow the request as data.
 
-A council turn runs the plan's tasks at once — Fleet's and the Coder's work in parallel — and then the
-Critic reads their reports and tool digests when the turn needs it: in council mode, when any tool result
-of the turn was cut, when a member did not finish (it stopped, wrote no report, ran out of tool rounds or
-tokens, or was cut off with tool calls it never ran), when a report says its confidence is low, when a
-report proposes a change, or when the Coder was convened. An auto turn skips it when its members all
-finished with complete results, no report says its confidence is low, no report proposes a change and the
-Coder was not convened, and the Captain is told the critique was not needed. A council with no reviewer
-skips it too. The Captain writes the answer last, with the reports and the critique as data, in three tool
-rounds at most.
+A council turn runs the plan's tasks at once — the members' work in parallel — and then the reviewer reads
+their reports and tool digests when the turn needs it: in council mode, when any tool result of the turn was
+cut (the Captain's own included), when a member did not finish (it stopped, wrote no report, ran out of tool
+rounds or tokens, or was cut off with tool calls it never ran), when a report says its confidence is low, when
+a report proposes a change, or when the Coder was convened. A tool result that is an error does not count by
+itself. An auto turn skips it when none of these holds, and the Captain is told the critique was not needed.
+A council with no reviewer skips it too. The Captain writes the answer last, with the reports and the
+critique as data, in three tool rounds at most.
 
 ## Budgets and deadlines
 
@@ -149,7 +192,8 @@ Tokens are counted as input plus cache write plus output; a cache read is free.
   call needs one call left and is not stopped by tokens.
 - **A council's own budget** (set on the platform) lowers the token cap of each of its ask turns (not
   member turns), never raises it, and keeps it lowered when an auto turn convenes.
-- **Fleet's own loop** gets 10 tool rounds and 120,000 tokens of its own, then it must write its report.
+- **A member's own loop** (each member but the Coder) gets the tool rounds and tokens of its own `budget`,
+  `maxToolRounds` 1 to 10 and `maxTokens` 10,000 to 120,000 (Fleet: 10 and 120,000); then it must write its report.
 - **The Coder's steps** spend the same token budget. When the reserve is reached OpenCode is stopped and the
   Coder reports `budget`.
 - **Four calls at once per bot**, all turns together; a call that finds no slot waits for one.
@@ -163,7 +207,7 @@ claim when it sets none:
 
 | At | What ends |
 | --- | --- |
-| `D − 75 s` | the work phases: routing with tools, the members, the Critic |
+| `D − 75 s` | the work phases: routing with tools, the members, the reviewer |
 | `D + 20 s` | the answer calls: the Captain's forced answer, and its synthesis |
 | `D + 50 s` | the turn's finish is posted by |
 
@@ -212,7 +256,7 @@ Neither cut is silent: the member gets a result that says what it is missing.
   are not wrapped.
 - **The store.** A result is kept whole only when it was cut: at most 16 MiB per turn, in memory, gone
   with the turn. Past the cap the member gets no reference, and its header says `the rest is not kept`.
-- **The Critic's rule.** The Critic's input counts the evidence entries that rest on a cut result
+- **The reviewer's rule.** The reviewer's input counts the evidence entries that rest on a cut result
   (`truncatedCalls`, and `"truncated": true` on each), and its instructions say that a count, a "none" or
   an absence resting on one is a problem, blocking when the answer depends on it, unless the member paged
   it with `read_result`.
@@ -289,6 +333,8 @@ The pod restarts a process that exits.
 
 ## See also
 
+- [`council role`](council-roles.md) - the members a council may use, and `council apply`.
+- [`council roster`](council-roster.md) - a bot's councils: the premade ones, its own, and the default a new chat asks.
 - [`chat`](chat.md) - the same turns, as a person in a terminal.
 - [`mcp`](mcp.md) - the council tools a person's own agent uses to lead a bot's members.
 - [Bot mode](../bot-mode.md) - what a bot's `tnctl` may and may not run.

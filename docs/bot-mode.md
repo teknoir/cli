@@ -40,19 +40,22 @@ the bot key is missing or empty (/run/teknoirbot/key): this computer predates th
 
 ## What a bot may do
 
-Everything a person's `tnctl` does with the fleet API: `robots`, `robot` (show, `add`, `disable`, `enable`,
-`remove`), `config`, `devices`, `device`, `whoami`, `api`, `inspect`, `mqtt stream`, `mqtt sample` and `mcp` (limited to the
-bot's teamspace). The platform decides what the bot's creator may do in the teamspace (`whoami` reports
-`access none`, `read` or `creator`).
+What a person's `tnctl` does with the fleet API, except `chat` and a person's `council` commands (refused,
+below): `robots`, `robot` (show, `add`, `disable`, `enable`, `remove`), `config`, `devices`, `device`, `whoami`,
+`api`, `inspect`, `mqtt stream`, `mqtt sample` and `mcp` (limited to the bot's teamspace). The platform decides
+what the bot's creator may do in the teamspace (`whoami` reports `access none`, `read` or `creator`).
 
 It also runs the one command that is the bot's own: [`council serve`](commands/council.md), the process of its
 council image, which takes the chat turns the platform queues for the bot and answers them with the bot's key.
+Every other `council` command is refused (see the table below). `tnctl council` itself and the `--help` of any
+council command (or `tnctl help council …`) still print their help, and a mistyped subcommand, a missing or extra
+argument or an unknown flag is a usage error first (exit 2).
 A bot's `mcp` runs without the council tools: `--council` is for a person's own agent, and `tnctl mcp
 --council` and `tnctl agent install --council` are both refused before anything starts (exit 2) with
 `--council is for a person's own agent: a TeknoirBot cannot drive a council`.
 
-A bot may **not** run the commands that open a session or hold a device login. They are refused before
-anything runs, with exit code 6 and this message:
+A bot may **not** run the commands that open a session or hold a device login, nor a person's `chat` and
+`council` commands. They are refused before anything runs, with exit code 6 and a message such as:
 
 ```text
 "tnctl ssh" is not available to a TeknoirBot: it cannot open tunnels or hold device logins. For logs use "tnctl inspect logs".
@@ -67,6 +70,7 @@ anything runs, with exit code 6 and this message:
 | `add` (and its subcommands), `domain` | They change where `tnctl` points, and a bot's platform is `$TEKNOIRBOT_API`. |
 | `ns` **with** a teamspace | A bot has exactly one teamspace. `tnctl ns` without one (or with `--list`) lists them. |
 | `chat` | It is the person's chat with a bot's council; a bot does not use it: `"tnctl chat" is not available to a TeknoirBot: a bot does not use the person chat.` |
+| `council role …`, `council roster …`, `council apply` | Only a person reads and changes a bot's council: `"tnctl council role list" is not available to a TeknoirBot: only a person reads and changes a bot's council.` The quoted command is the command's path, without its arguments and flags. |
 
 `--domain` and `--config` are refused with them (exit 2): a bot's platform comes from `$TEKNOIRBOT_API`.
 
@@ -83,7 +87,10 @@ Device logins are refused outright: `Credentials` and `CredentialsBulk` answer w
 ## Who am I
 
 ```bash
-$ tnctl whoami
+tnctl whoami
+```
+
+```text
 bot teknoir-demo/scout for a@b.c, access read, unit Karlstad (se-karlstad)
 ```
 

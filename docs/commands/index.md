@@ -18,10 +18,10 @@ usage, or follow the links below for full documentation.
 | [`exec`](exec.md) | | Run a command on a device over WireGuard and pass its exit code through. |
 | [`logs`](logs.md) | | Show the logs of a workload on a robot. |
 | [`inspect`](inspect.md) | | Read a robot's pods, logs and installed Helm releases without opening a session. |
-| [`chat`](chat.md) | | Chat with a TeknoirBot's council, or list your threads with it (`chat threads`). |
+| [`chat`](chat.md) | | Chat with a TeknoirBot's council (a new chat asks the bot's default, or the one named with `--roster`) or with one of its members (`--member`), or list the bot's chat threads (`chat threads`). |
 | [`mqtt`](mqtt.md) | | Follow the MQTT messages of the teamspace's devices. |
 | [`mcp`](mcp.md) | | Run the read-only MCP server (stdio) for AI agents; `--council` adds the TeknoirBot council tools. |
-| [`council`](council.md) | | Hidden, bot mode only: the process of a TeknoirBot's council image (`council serve`), not a person's command. |
+| [`council`](council.md) | | A person's commands to read and change a TeknoirBot's council: `council role` (the members, [council-roles.md](council-roles.md)), `council roster` (the councils, [council-roster.md](council-roster.md)) and `council apply` (members and councils from a YAML file). `council serve` is the bot's own, hidden. |
 | [`api`](api.md) | | Call the fleet API directly. |
 | [`whoami`](whoami.md) | | Show who this `tnctl` works as: a person, or a TeknoirBot. |
 | [`agent`](agent.md) | | Install the Teknoir agent kit (skills, MCP server, guard hook) for Claude Code, Codex and OpenCode. |
@@ -44,8 +44,10 @@ needs in the teamspace:
 | `whoami`, `api` | Any logged-in account; `api` shows whatever the fleet API shows the account. |
 | `inspect pod/logs/release` | The same access as opening a terminal in the robot (`pods/exec`), and `write` in the teamspace. |
 | `mqtt stream`, `mqtt sample` | Any device role; the platform decides which topics the account may follow. |
-| `chat` | Who may chat is who may open the bot's desktop: the bot's creator, and at Read only and Off also the teamspace's admins. The caller also needs permission to open a terminal (`pods/exec`) in the teamspace. The platform answers `403` with the reason otherwise. |
-| `mcp` | Each tool needs what its command needs: `inspect_*` as `inspect pod/logs/release`, `mqtt_sample` and `mqtt_get_sample` as `mqtt stream`, `mqtt_read` reads the server's own captures and needs nothing more, `whoami` any logged-in account, the rest any device role. The `council_*` tools (with `--council`) need what `chat` needs. |
+| `chat` | Who may chat is who may open the bot's desktop: the bot's creator, and at Read only and Off also the teamspace's admins. The caller also needs permission to open a terminal (`pods/exec`) in the teamspace. Anyone else is refused with the platform's reason, exit 6: `chat` prints `you cannot chat with <bot>: <reason>`, and `chat threads` the reason alone. `--roster` on a chat someone else started is refused (`not_author`) unless you are the bot's creator: `Only the author of this chat or the bot's creator can change its council.` |
+| `mcp` | Each tool needs what its command needs: `inspect_*` as `inspect pod/logs/release`, `mqtt_sample` and `mqtt_get_sample` as `mqtt stream`, `mqtt_read` reads the server's own captures and needs nothing more, `whoami` any logged-in account, the rest any device role. The `council_*` tools (with `--council`): `council_info` and `council_roles` need any device role (viewer, developer or admin) and the bot in your organisation units (for `council_roles`, when it names one); `council_ask`, `council_run` and `council_result` need what `chat` needs. |
+| `council role list/get/export`, `council roster list/get` | Any device role (viewer, developer or admin) and, with `--bot`, the bot in your organisation units. The instructions of a bot's own member (`role get --bot`) and the file of a bot's own member or of one of the bot's own councils (`role export --bot`, `role get --bot -o yaml`, `roster get <name> --bot <bot> -o yaml`) need what `chat` needs. |
+| `council role new/archive`, `council roster add/remove/use/delete`, `council apply` | For a bot's own members and councils, and for which council is the bot's default (`roster use`, which may name a premade council), the bot's creator or a teamspace admin, among those who may chat with the bot; for shared members, a teamspace admin. Premade members and councils are read-only. `council role new --dry-run` saves nothing: it needs any device role (viewer, developer or admin) and, with `--bot`, the bot in your organisation units. |
 | `council serve` | A bot's own command: it runs with the bot's key and its access level, so it needs nothing a person's account has. |
 | `config set/unset/delete/reset/try/untry/wait/promote`, `exec`, `port-forward` (forward a service over WireGuard) | Developer role; opening a session also needs permission to open terminals (`pods/exec`). |
 | `ssh`, `bootstrap`, `ansible*`, legacy `port-forward`, `socks-proxy` | Developer role **and** permission to open terminals: they read the device login (user name, key, password) from the platform, which gives it only to those. A viewer gets a clear `403`. |
@@ -88,7 +90,7 @@ Every command accepts these persistent flags:
 | `--device` | | Target device ID. |
 | `--config` | | Path to config file (default `~/.tnctl.yaml`). |
 | `--debug` | | Enable verbose debug output (on stderr). |
-| `--output` | `-o` | Output format of `robots`, `robot` and `config`: `table` (default), `json` or `yaml`. |
+| `--output` | `-o` | Output format of the commands that support it: table, json or yaml (default table); other commands ignore it. council role export prints YAML only; chat, chat threads, council role list, council roster list and mqtt stream\|sample take --json instead. Data goes to stdout, progress to stderr. |
 
 ## Interactive selection
 

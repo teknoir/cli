@@ -30,6 +30,8 @@ nav:
       - inspect: commands/inspect.md
       - chat: commands/chat.md
       - council: commands/council.md
+      - council role: commands/council-roles.md
+      - council roster: commands/council-roster.md
       - mqtt: commands/mqtt.md
       - mcp: commands/mcp.md
       - config: commands/config.md
