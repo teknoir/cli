@@ -805,7 +805,9 @@ platform's reason why you may not drive the bot, for example at Act as me:
 
 Inside a TeknoirBot, tnctl refuses every `tnctl council roster …` before any request, exit 6, with
 `"tnctl council roster list" is not available to a TeknoirBot: only a person reads and changes a bot's council.` The
-quoted command is the command's path, without its arguments and flags.
+quoted command is the command's path, without its arguments and flags. Their `--help` still prints, and a mistyped
+subcommand, a missing or extra argument or an unknown flag is a usage error first (exit 2;
+[Bot mode](../bot-mode.md)).
 
 ## Exit codes
 
@@ -816,7 +818,7 @@ quoted command is the command's path, without its arguments and flags.
 | 2 | Wrong arguments: an unknown council or member, a member that is not in the council, a slug more than one member has, a premade council without `--as`, an `--as` name that is taken, or a missing `--bot`. |
 | 3 | No bot of that name, or a bot outside your organisation units (the platform answers as if it did not exist). |
 | 5 | `roster delete`: the platform refused it, `roster_default` (the council is the bot's default) or `template_read_only` (it is a premade council); `roster add` or `roster remove`: the platform refused the changed council. |
-| 6 | Not allowed: a change refused with `council_edit_not_allowed`; `roster get <name> -o yaml` of one of the bot's own councils by someone who may not chat with the bot (`chat_not_allowed`); and every `tnctl council roster …` inside a TeknoirBot. |
+| 6 | Not allowed: a change refused with `council_edit_not_allowed`; `roster get <name> -o yaml` of one of the bot's own councils by someone who may not chat with the bot (`chat_not_allowed`); and, inside a TeknoirBot, every `tnctl council roster …` whose arguments and flags are valid (a malformed one is exit 2; `--help` prints, exit 0). |
 | 8 | `roster add` or `roster remove`: someone changed the council meanwhile; run it again. |
 
 ## See also

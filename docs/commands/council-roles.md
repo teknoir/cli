@@ -692,7 +692,9 @@ refused document means nothing is applied.
 Inside a TeknoirBot, tnctl refuses every `tnctl council role …` and `tnctl council apply` before any request, exit 6,
 with `"tnctl council role list" is not available to a TeknoirBot: only a person reads and changes a bot's council.`
 The quoted command is the command's path, without its arguments and flags: `tnctl council role get captain --bot
-scout` gives `"tnctl council role get" is not available to a TeknoirBot: …`.
+scout` gives `"tnctl council role get" is not available to a TeknoirBot: …`. Their `--help` still prints, and a
+mistyped subcommand, a missing or extra argument or an unknown flag is a usage error first (exit 2;
+[Bot mode](../bot-mode.md)).
 
 ## Exit codes
 
@@ -703,7 +705,7 @@ scout` gives `"tnctl council role get" is not available to a TeknoirBot: …`.
 | 2 | Wrong arguments or flags, for example `role list` with an argument, `role get bot/<slug>` without `--bot`, `--version` without `-o yaml`, `role new` without `--job` or without exactly one of `--bot` and `--teamspace`, or `role archive template/<slug>`; a council file that names an unknown member, or an ambiguous one without a scope; a confirmation tnctl cannot ask for. |
 | 3 | Not found: `role get nosuch`; with `council apply`, a bot the file names. |
 | 5 | Refused, for example by tnctl before any request, in the platform's words (`how: instructions are at most 4000 characters`, `The file is larger than 64 KiB.`), or by the platform (`role_in_use` on archive, `template_read_only`, a refused file). |
-| 6 | Not allowed: `council_edit_not_allowed`, `not_admin`, `chat_not_allowed`, and every `council role` command and `council apply` inside a TeknoirBot. |
+| 6 | Not allowed: `council_edit_not_allowed`, `not_admin`, `chat_not_allowed`, and, inside a TeknoirBot, every `council role` command and `council apply` whose arguments and flags are valid (a malformed one is exit 2; `--help` prints, exit 0). |
 | 8 | Changed meanwhile: run it again (`council apply`; `role new` when its slug was taken meanwhile). |
 
 ## See also
