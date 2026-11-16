@@ -42,6 +42,12 @@ const councilDefaultWait = 45 * time.Second
 // refuses the event stream (P8 allows at most four open streams per person).
 var councilPollInterval = 3 * time.Second
 
+// councilCatchUp is how long council_result with wait_seconds 0 follows the stream of a turn its
+// thread's record says has ended: long enough to read the events the record does not carry. A
+// stream that never brings the end (expired, silent) costs at most this long and a few reconnects,
+// after which the record stands.
+var councilCatchUp = 10 * time.Second
+
 // councilBackoff is the pause councilWait leaves between two reconnects of a stream that ended
 // without the turn: 0.5 s, 1 s, then 2 s for every further one.
 var councilBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second}
@@ -85,7 +91,7 @@ type mcpCouncilResultInput struct {
 	Namespace   string `json:"namespace,omitempty" jsonschema:"the teamspace; empty means the configured one"`
 	Bot         string `json:"bot" jsonschema:"the TeknoirBot the turn runs on"`
 	TurnID      string `json:"turn_id" jsonschema:"the turn id a council_ask or council_run gave"`
-	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the turn to end, 0 to 55; default 45"`
+	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the turn to end, 0 to 55; default 45; 0 answers the turn's state now"`
 }
 
 // ---------- the results ----------
@@ -232,6 +238,28 @@ func (s *councilState) forgetThread(key string) {
 	delete(s.threads, key)
 }
 
+// dropThread forgets a thread the platform deleted, as t's wait learned: every turn of that thread
+// (same teamspace, bot and thread) this process remembers that has not ended leaves its memory, and
+// t's conversation forgets the thread unless it keeps another one by now. An ended turn stays: its
+// result is what this process saw. The next start of the conversation makes a new thread.
+func (s *councilState) dropThread(t *councilTurn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.order[:0]
+	for _, id := range s.order {
+		u := s.turns[id]
+		if u != nil && u.ns == t.ns && u.bot == t.bot && u.thread == t.thread && !councilTerminal(u.state) {
+			delete(s.turns, id)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	s.order = kept
+	if t.key != "" && s.threads[t.key] == t.thread {
+		delete(s.threads, t.key)
+	}
+}
+
 // knownThreads are the threads this process knows of one bot.
 func (s *councilState) knownThreads(ns, bot string) []string {
 	prefix := ns + "/" + bot + "/"
@@ -253,6 +281,11 @@ func (s *councilState) addTurn(t *councilTurn) *councilTurn {
 	defer s.mu.Unlock()
 	if u, ok := s.turns[t.id]; ok {
 		return u
+	}
+	if t.key != "" && s.threads[t.key] != t.thread {
+		// The conversation no longer keeps this thread (a wait dropped it, or a start forgot it,
+		// meanwhile): the turn belongs to none of its conversations and must not refuse them.
+		t.key = ""
 	}
 	if len(s.turns) >= councilMaxTurns {
 		evicted := false
@@ -439,8 +472,26 @@ func (s *councilState) apply(t *councilTurn, ev api.ChatEvent) (ended bool) {
 	return false
 }
 
-// followRecord takes what the thread's own record says of t: its state, and its final answer, error
-// and usage once it ended. advance moves the turn's resume position to the record's lastSeq: that is
+// councilStateRank orders turn states by how far the turn has got: "" 0, queued 1, running 2, a
+// terminal state 3. A record read a moment after the stream may still say queued of a turn this
+// process saw start.
+func councilStateRank(state string) int {
+	switch state {
+	case "queued":
+		return 1
+	case "running":
+		return 2
+	}
+	if councilTerminal(state) {
+		return 3
+	}
+	return 0
+}
+
+// followRecord takes what the thread's own record says of t: its state, unless that is behind the
+// turn's (councilStateRank: a turn never moves back), and its final answer, error and usage where the
+// turn has none yet; a turn it takes done from the record drops the error an event gave while it ran,
+// as the stream's turn_end done does. advance moves the turn's resume position to the record's lastSeq: that is
 // right for a turn this process has never followed, whose stream has not started; the polling
 // fallback must not, or a later stream would skip the events between.
 func (s *councilState) followRecord(t *councilTurn, d *api.ChatThreadDetail, advance bool) {
@@ -453,13 +504,19 @@ func (s *councilState) followRecord(t *councilTurn, d *api.ChatThreadDetail, adv
 	if rec == nil {
 		return
 	}
-	if rec.State != "" {
+	// The record never moves the turn back: running is not replaced by a record's lagging queued, and
+	// a terminal state only by another one (the record has the last word on how the turn ended).
+	if rec.State != "" && councilStateRank(rec.State) >= councilStateRank(t.state) {
 		t.state = rec.State
+		if rec.State == "done" {
+			// A turn that answered is not a failed one (see apply's turn_end).
+			t.err = nil
+		}
 	}
 	if t.final == "" && rec.Final != nil {
 		t.final = *rec.Final
 	}
-	if t.err == nil && rec.Error != nil {
+	if t.err == nil && rec.Error != nil && t.state != "done" {
 		t.err = rec.Error
 	}
 	if t.usage == nil && rec.Usage != nil {
@@ -661,7 +718,7 @@ func addCouncilTools(s *mcp.Server, e *cliEnv) {
 			return mcpResult(raw), nil, nil
 		})
 
-	addCouncilTool(s, "council_result", "The state and result of a turn started by council_ask or council_run. While the turn runs, it waits up to wait_seconds (default 45) for it to end. "+mcpCouncilUntrustedNote,
+	addCouncilTool(s, "council_result", "The state and result of a turn started by council_ask or council_run. While the turn runs, it waits up to wait_seconds (default 45) for it to end; with wait_seconds 0 it answers the turn's state now (up to 10 s for a turn that has just ended, to collect its report). "+mcpCouncilUntrustedNote,
 		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpCouncilResultInput) (*mcp.CallToolResult, any, error) {
 			if err := mcpName(in.Bot, "bot"); err != nil {
 				return nil, nil, err
@@ -678,13 +735,22 @@ func addCouncilTools(s *mcp.Server, e *cliEnv) {
 				return nil, nil, err
 			}
 			t := st.turnOf(ns, in.Bot, in.TurnID)
+			known := t != nil
 			if t == nil {
 				// A turn of an earlier call or process: find it in the bot's threads.
 				if t, err = councilFindTurn(ctx, fl, st, ns, in.Bot, in.TurnID); err != nil {
 					return nil, nil, err
 				}
 			}
-			if err := councilWait(ctx, fl, st, t, wait); err != nil {
+			if wait <= 0 && known && !st.ended(t) {
+				// No wait asked for a turn this process already remembers (it started it, or an
+				// earlier call found it) and has not seen end: answer the platform's state now, not
+				// the one this process last saw. A turn found in this call already took its record's
+				// state.
+				if err := councilPeek(ctx, fl, st, t); err != nil {
+					return nil, nil, err
+				}
+			} else if err := councilWait(ctx, fl, st, t, wait); err != nil {
 				return nil, nil, err
 			}
 			if err := councilFinish(ctx, fl, st, t); err != nil {
@@ -963,6 +1029,11 @@ func councilWait(ctx context.Context, fl *api.Fleet, st *councilState, t *counci
 				return councilPoll(wctx, fl, st, t)
 			}
 			if refused := councilRefusal(err); refused != nil {
+				if councilGone(err) {
+					// The thread is gone: this conversation starts a new one, and the dead turn no
+					// longer refuses it.
+					st.dropThread(t)
+				}
 				return refused
 			}
 			if !councilSleep(wctx, councilPause(attempt)) {
@@ -1075,6 +1146,7 @@ func councilRead(ctx context.Context, s *api.ChatStream, st *councilState, t *co
 				}
 				return false, newErr(codeAuth, "%s", msg)
 			case "not_found":
+				st.dropThread(t)
 				return false, newErr(codeNotFound, "The conversation was deleted.")
 			}
 			return false, errCouncilReopen
@@ -1095,6 +1167,9 @@ func councilPoll(ctx context.Context, fl *api.Fleet, st *councilState, t *counci
 				return nil
 			}
 			if refused := councilRefusal(err); refused != nil {
+				if councilGone(err) {
+					st.dropThread(t)
+				}
 				return refused
 			}
 			// One read that failed says nothing about the thread: keep reading until the wait ends.
@@ -1111,6 +1186,49 @@ func councilPoll(ctx context.Context, fl *api.Fleet, st *councilState, t *counci
 			return nil
 		}
 	}
+}
+
+// councilPeek is council_result's look at a remembered turn it may not wait for (wait_seconds 0): it
+// reads the thread's record once. A turn the record says is still queued or running takes the record's
+// state, unless this process saw it further on (followRecord never moves a turn back). A turn the
+// record says ended is followed on its stream for at most councilCatchUp, because only the stream
+// carries a member's report, the members and the critique; if the stream does not bring the end in
+// that time, the record's state and final stand. A call its agent cancelled leaves the turn as the
+// stream left it. A deleted thread is dropped, as a wait drops it.
+func councilPeek(ctx context.Context, fl *api.Fleet, st *councilState, t *councilTurn) error {
+	d, _, err := fl.ChatThread(ctx, t.bot, t.thread)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if refused := councilRefusal(err); refused != nil {
+			if councilGone(err) {
+				st.dropThread(t)
+			}
+			return refused
+		}
+		return nil // one read that failed: the turn as it stands
+	}
+	rec := councilRecord(d, t.id)
+	if rec == nil || !councilTerminal(rec.State) {
+		st.followRecord(t, d, false)
+		return nil
+	}
+	// The record says the turn ended: follow the stream (never the record first, which would mark the
+	// turn ended and end the wait at once) for the events only it carries. The record's lastSeq is
+	// not a resume position here: advancing past it would skip the member and critique events.
+	if err := councilWait(ctx, fl, st, t, councilCatchUp); err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		// The agent cancelled the call: the turn stays as the stream left it, so the next look
+		// follows the stream again rather than freezing the turn on the record.
+		return nil
+	}
+	if !st.ended(t) {
+		st.followRecord(t, d, false)
+	}
+	return nil
 }
 
 // councilFinish completes t from the thread's own record when its stream ended without saying how:
@@ -1149,6 +1267,7 @@ func councilFindTurn(ctx context.Context, fl *api.Fleet, st *councilState, ns, b
 		// The turn's conversation: the one this process keeps the thread for. A turn of a thread this
 		// process does not keep (the web's, an earlier session's, one it forgot) belongs to none of its
 		// conversations: their next start makes or reads their own thread, so it must not refuse them.
+		// addTurn checks the key again, in case a wait dropped the thread in between.
 		t.key = st.keyOfThread(ns, bot, d.Thread.ID)
 		if t.key != "" && rec.Member != nil && d.Thread.MemberRole != nil {
 			st.setName(t.key, d.Thread.MemberRole.Name)
