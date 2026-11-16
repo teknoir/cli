@@ -110,7 +110,8 @@ Skeptic).
 Only two models are used, both through the platform's proxy: `claude-sonnet-5-5` and `claude-haiku-5-5`.
 Effort is `low`, `medium` or `high`; the proxy allows nothing above `high`, and neither does the council. A
 turn's `effort` is a ceiling: the lead, a member or the reviewer whose own effort is lower keeps its own, and when
-the turn gives none each one thinks at its own effort.
+the turn gives none each one thinks at its own effort. The Coder, in a thread it already worked in, keeps the
+effort its OpenCode session started with.
 
 The Standard council is:
 
