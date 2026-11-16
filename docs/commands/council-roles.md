@@ -397,7 +397,7 @@ A member made this way has no persona (the phrase its prompt introduces it with,
 and its description is derived from its job.
 
 After it saves the member, `role new` prints on stderr a try-it line and a line with the command that adds the member
-to a council. With `--bot` the second line is
+to a council ([council roster](council-roster.md)). With `--bot` the second line is
 `· add it to a council: tnctl council roster add <council> <slug> --bot <bot> (tnctl council roster list --bot <bot> lists them)`;
 with `--teamspace` it is `· add it to a bot's council: tnctl council roster add <council> teamspace/<slug> --bot <bot>`.
 
@@ -467,9 +467,11 @@ Error: how: instructions are at most 4000 characters
 Archive a member that a bot or the teamspace made: councils can no longer use it. A member that a council still
 names is refused (`role_in_use`, exit 5): the refusal, on stderr, lists the councils that name it (those of bots you
 may see, then how many more you cannot see) and, when it can, a `for example:` remove that takes it out of the
-first of them, as the first sample below shows. Archive in this order: first take the member out of every council
-that names it with `tnctl council roster remove`, then archive it. An archived member is still printed by
-`tnctl council role export`, and applying that YAML brings it back; the command prints that undo itself.
+first of them, as the first sample below shows. Archive in this order: first take it out of every council that names
+it, then archive it. As a member it comes out with [`tnctl council roster remove`](council-roster.md#roster-remove);
+as a reviewer, in the web chat's Council tab or in YAML (`tnctl council apply`); as a lead, in YAML (`tnctl council
+apply`) for now. An archived member is still printed by `tnctl council role export`, and applying that YAML brings it
+back; the command prints that undo itself.
 
 `<member>` is a slug such as `stream-watcher`, or `<scope>/<slug>` (scope `bot` or `teamspace`). With `--bot` it
 archives that bot's own member; without it, the teamspace's shared member, which needs a teamspace admin (`not_admin`,
@@ -708,5 +710,6 @@ scout` gives `"tnctl council role get" is not available to a TeknoirBot: …`.
 
 - [`chat`](chat.md) - chat with a bot's council, and ask one member alone.
 - [`council`](council.md) - the council that runs on a bot's computer.
+- [`council roster`](council-roster.md) - a bot's councils: the premade ones, its own, and the default a new chat asks.
 - [`mcp`](mcp.md) - the council tools a person's own agent uses to lead a bot's members.
 - [Bot mode](../bot-mode.md) - what a bot's `tnctl` may and may not run.
