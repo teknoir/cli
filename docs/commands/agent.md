@@ -63,8 +63,9 @@ With no `--agent` every agent is installed for, in the user scope.
   `tnctl agent install --project --agent codex --mcp --force` a project's `.codex/config.toml` (`--force`
   also overwrites the kit files you changed).
 - `--council` (with `--mcp`) registers `tnctl mcp --council` instead of the read-only server: the read
-  tools plus `council_info`, `council_ask`, `council_run` and `council_result`, which hand work to a
-  TeknoirBot's council. The entry has two forms and an install switches between them without `--force`;
+  tools plus `council_info`, `council_roles`, `council_ask`, `council_run` and `council_result`, which hand
+  work to a TeknoirBot's council (`council_ask` and `council_run` start work on the bot; the other three
+  only read). The entry has two forms and an install switches between them without `--force`;
   `agent list` marks the council one with `(council)`.
 - `--hooks` installs the guard hook for Claude Code and adds a `PreToolUse` entry for `Bash` and the
   `teknoir` MCP tools (`mcp__teknoir__*`, or `mcp__plugin_teknoir_teknoir__*` when the server comes from
@@ -178,7 +179,7 @@ output prints them after the actions.
 |---|---|
 | 0 | ok |
 | 1 | error |
-| 2 | usage: an unknown agent, two scopes, `--agents-md` without `--project` |
+| 2 | usage: an unknown agent, two scopes, `--agents-md` without `--project`, `--council` without `--mcp` (`--council needs --mcp`), or `--council --mcp` inside a TeknoirBot (`--council is for a person's own agent: a TeknoirBot cannot drive a council`) |
 | 5 | `list --check`: an install differs from this `tnctl`'s kit, or nothing is installed |
 | 8 | a file you changed, a commented `.jsonc`, a symlink `tnctl` does not follow, a damaged manifest or damaged AGENTS.md markers, or a Codex edit `tnctl` cannot make safely: needs `--force` or a hand edit |
 

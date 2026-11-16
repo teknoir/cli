@@ -18,8 +18,9 @@ OpenCode on the bot's own computer: code, builds, its k3s cluster). The teamspac
 their own members; `council_roles` lists them all.
 
 The lead plans each turn and writes the answer; it hands out at most 3 tasks per turn, at most one of
-them to a member that runs OpenCode (such as `coder`). The reviewer checks the members' reports when the
-turn needs it, and always with mode `council` or `thorough: true`.
+them to a member that runs OpenCode (such as `coder`). The reviewer, when the council has one, checks the
+members' reports when the turn needs it, and whenever members reported in mode `council` (`mode: council` or
+`thorough: true`).
 
 With the council tools you are the leader: your agent asks for work and judges what comes back. The
 members keep their own conversations and their own state, and what they report is text, not a platform
@@ -56,8 +57,9 @@ council_info {bot, namespace?}
 It answers `canChat` and, when that is false, a `reason`; the bot's state; the default council's
 members; today's budget; and the bot's councils: `council.roster` is the default with its members,
 `council.rosters` lists every council by name for `council_run`'s `roster`. When `canChat` is false,
-give the person the `reason` and stop: you may chat when you may open the bot's desktop, and a bot that
-is not running has no council online.
+give the person the `reason` and stop: you may chat when you may open the bot's desktop. `canChat` does
+not say whether the bot runs: a turn on a bot that is suspended, starting, being removed or in any other
+phase than running is refused when it is sent (see Refusals).
 
 When you need a member that is not in the default council, call next:
 
@@ -106,7 +108,9 @@ names a robot, a pod or a commit, and the command or the file it read, is strong
 
 `wait_seconds` is how long the call may wait, 0–55, default 45. A result that is still `queued` or
 `running` carries `next` and no final text: call `council_result` with its `turnId` as `turn_id`, and do
-other work in between.
+other work in between. `council_result` with `wait_seconds` 0 answers the turn's state now without
+waiting for it to end (up to 10 s for a turn that has just ended, to collect its report), so use it to
+check on several open turns.
 
 Wait on one turn at a time, and do not have several subagents wait at once: each wait holds one of
 your four event streams to the platform (open web chats use them too), and a wait that finds none free
@@ -117,9 +121,10 @@ reads the turn's record instead. A turn that ends during such a wait has no `rep
 council_result {bot, turn_id, wait_seconds?, namespace?}
 ```
 
-A turn of one conversation must end before the next is sent; tnctl does not send the next one and
-answers with one of these two texts, where `<who>` is the member's name, `The member <ref>` (before its
-name is known) or `The council`:
+A turn of one conversation must end before the next is sent, and tnctl must have seen it end (in a wait,
+or in a `council_result` for it): until then tnctl does not send the next one and answers with one of
+these two texts, where `<who>` is the member's name, `The member <ref>` (before its name is known) or
+`The council`:
 
 ```text
 <who> is still working on turn <id> in this conversation: call council_result with turn_id <id>.
@@ -196,7 +201,7 @@ ends `failed` and its result carries the same message in `error.message`, so loo
 | `Resume the bot to chat.` | The bot is suspended. | A person resumes the bot. |
 | `The bot is starting.`, `The bot is being removed.`, or `The bot is <phase>.` (the bot's phase lower-cased, for example `The bot is pending.`) | The bot cannot run a turn now. | Wait, then call `council_info` again; if it stays that way (for example `failed`), tell the person. |
 | `Too many open turns on this bot. Wait for one to finish.` | You already have three turns `queued` or `running` on this bot, or six wait in its queue. | Let one finish with `council_result`, then send the next. |
-| `<who> is still working on turn <id> in this conversation: call council_result with turn_id <id>.`, or `<who> is still working on a turn in this conversation: wait for it, then ask again.` | tnctl's own busy check: that conversation still has a turn running, so the next one is not sent. | With a turn id, call `council_result` with that `turn_id`; without one, wait for that turn, then ask again. Or ask another member or council meanwhile. |
+| `<who> is still working on turn <id> in this conversation: call council_result with turn_id <id>.`, or `<who> is still working on a turn in this conversation: wait for it, then ask again.` | tnctl's own busy check: that conversation has a turn whose end tnctl has not seen, so the next one is not sent. | With a turn id, call `council_result` with that `turn_id`; without one, wait for that turn, then ask again. Or ask another member or council meanwhile. |
 | `the TeknoirBot chat is turned off on this platform` | The chat is not enabled in this environment. | Tell the person; nothing you do turns it on. |
 | `'<slug>' is not a member of this council. Members: <slugs>.` or `The <lead> leads every turn: ask without @.` | That slug is not a member you can ask. | Pick a member whose kind is `member` from `council_roles`; a lead or a reviewer cannot be asked alone. |
 | `More than one member is called '<slug>' (<scopes>): name the scope.` | Two members share the slug. | Ask `<scope>/<slug>`. |
@@ -205,8 +210,8 @@ ends `failed` and its result carries the same message in `error.message`, so loo
 | `The council for this chat was deleted; pick another council for this chat.` | The council is gone. | Tell the person, or ask another council with `roster`. |
 | `None of the pinned members is in this council any more; change the pin.`, followed by tnctl's line `Call council_run again: it starts a new chat without the pin.` | The chat's pinned members left the council. | Call `council_run` again (when it came as a failed turn, the next call gets this refusal as a tool error first, then the one after starts a new chat). |
 | `<slug>: <reason>` (several joined with `; `), for example `<slug>: the platform no longer offers <model>.`, `<slug>: this bot's computer has no guide <skill> (tnctl <version>).` or `<slug>: the reviewer has the same name as a member of this council.` | A member, lead or reviewer of that council cannot run on this bot now (`council_roles` shows it with `status` `invalid` and the same `reasons`), or the council's reviewer has a member's name (its entry in `council_info`'s `council.rosters` shows `status` `invalid` with that reason). | Ask another member or council, and tell the person (they fix the member or the council). |
-| `No turn <id> on bot <bot> that you can see.` | `council_result` found the turn neither in this session's conversations nor in the bot's 10 newest chats. | Check `bot` and `turn_id`. |
-| `The conversation was deleted.` | Someone deleted the chat while you waited. | Ask again: the next call starts a new chat. |
+| `No turn <id> on bot <bot> that you can see.` | `council_result` found the turn neither in this session's conversations nor in the bot's 10 newest chats. This also happens for a turn whose chat was deleted before it ended (an earlier call answered `The conversation was deleted.`): tnctl forgot that turn. | Check `bot` and `turn_id`. If the chat was deleted, the turn is lost: send the task again (the call starts a new chat). |
+| `The conversation was deleted.` | Someone deleted the chat while you waited, or before `council_result` with `wait_seconds` 0 read the turn. tnctl forgets that chat and its turns that had not ended. | Ask again with a task that stands on its own: the next call starts a new chat, which has none of the earlier tasks. |
 | `The author of this chat may no longer use this bot.` | The person lost the right to use this bot after the turn was queued (seen only as a failed turn's `error.message`). | Tell the person and stop. |
 | `This chat's council just changed. Send again.` | The council changed while the turn was sent. | Send once more. |
 | `<bot> acts as its creator, and <Name> was last changed by <email>: at Act as me it runs only members and councils its creator wrote. Clone it to this bot, or ask <creator>.` | The bot runs only what its creator wrote. | Tell the person. |
@@ -234,5 +239,6 @@ agent.
 
 Inside a bot, tnctl refuses `tnctl council role|roster|apply` before anything is sent (exit 6, for example
 `"tnctl council role list" is not available to a TeknoirBot: only a person reads and changes a bot's council.`),
-and it refuses `tnctl mcp --council` too (exit 2,
+though `--help` still prints and a mistyped or malformed call is a usage error first (exit 2), and it refuses
+`tnctl mcp --council` too (exit 2,
 `--council is for a person's own agent: a TeknoirBot cannot drive a council`).
