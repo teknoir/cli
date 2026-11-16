@@ -205,11 +205,11 @@ func newChatThreadsCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
 		SilenceUsage: true,
 		Use:          "threads <bot>",
-		Short:        "List your chat threads with a TeknoirBot, newest first",
-		Long: `List the chat threads you have with a TeknoirBot: id, title, the council that answers it
+		Short:        "List a TeknoirBot's chat threads, newest first",
+		Long: `List a TeknoirBot's chat threads, whoever started them: id, title, the council that answers it
 (@<member> for a chat with one member, (default) when it follows the bot's default council), how
-many turns it has, the state of the last turn and when it last changed. Continue one with
-tnctl chat <bot> --thread <id>.`,
+many turns it has, the state of the last turn and when it last changed; newest first, at most 100.
+Continue one with tnctl chat <bot> --thread <id>.`,
 		Example: `  tnctl chat threads scout
   tnctl chat threads scout --json`,
 		Args: argsRange(1, 1, "chat threads needs a bot, for example: tnctl chat threads scout"),

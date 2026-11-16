@@ -18,7 +18,7 @@ usage, or follow the links below for full documentation.
 | [`exec`](exec.md) | | Run a command on a device over WireGuard and pass its exit code through. |
 | [`logs`](logs.md) | | Show the logs of a workload on a robot. |
 | [`inspect`](inspect.md) | | Read a robot's pods, logs and installed Helm releases without opening a session. |
-| [`chat`](chat.md) | | Chat with a TeknoirBot's council (a new chat asks the bot's default, or the one named with `--roster`) or with one of its members (`--member`), or list your threads with it (`chat threads`). |
+| [`chat`](chat.md) | | Chat with a TeknoirBot's council (a new chat asks the bot's default, or the one named with `--roster`) or with one of its members (`--member`), or list the bot's chat threads (`chat threads`). |
 | [`mqtt`](mqtt.md) | | Follow the MQTT messages of the teamspace's devices. |
 | [`mcp`](mcp.md) | | Run the read-only MCP server (stdio) for AI agents; `--council` adds the TeknoirBot council tools. |
 | [`council`](council.md) | | A person's commands to read and change a TeknoirBot's council: `council role` (the members, [council-roles.md](council-roles.md)), `council roster` (the councils, [council-roster.md](council-roster.md)) and `council apply` (members and councils from a YAML file). `council serve` is the bot's own, hidden. |
