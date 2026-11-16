@@ -1,18 +1,36 @@
 # `tnctl chat`
 
-Chat with a TeknoirBot's council — the Captain, Fleet, Coder and Critic — and read the answer as it is written.
+Chat with a TeknoirBot's council, or with one of its members, and read the answer as it is written.
 
 ```bash
-tnctl chat <bot> [prompt...] [--thread <id>] [--new] [--mode auto|quick|council]
-                             [--member fleet|coder] [--effort low|medium|high] [--json]
+tnctl chat <bot> [prompt...] [--thread <id>] [--new] [--roster <council>] [--thorough]
+                             [--member <slug>|<scope>/<slug>] [--json]
+                             [--mode auto|quick|council] [--effort low|medium|high]
 tnctl chat <bot> --thread <id> --follow
 tnctl chat threads <bot> [--json]
 ```
 
-A TeknoirBot is an AI bot with its own computer on the Teknoir platform. Its **council** answers you: the
-Captain runs it and writes the answer, Fleet looks at the bot's fleet and devices, the Coder reads and changes
-its computer, and the Critic checks the answer before it is done. `tnctl chat` is a person's view of that
-conversation; a bot's own `tnctl` refuses it (see [Bot mode](../bot-mode.md)).
+`--mode` and `--effort` are for advanced use: without `--mode` or `--thorough` the lead decides how the council
+answers, and without `--effort` the lead, each member and the reviewer think at their own effort (the Coder, in a
+thread it already worked in, at the effort its session started with).
+
+A TeknoirBot is an AI bot with its own computer on the Teknoir platform. Its **council** answers you: a council has
+a lead, its members, and a reviewer when it has one ([`council roster`](council-roster.md) has the premade councils
+and the bot's own). The lead takes each council turn: it answers a simple question itself or convenes members, at
+most 3 per turn. The reviewer checks the members' reports when the turn needs it, not on every turn, and a tool
+result that is an error does not make it run by itself. `--thorough` (in a council chat the same as `--mode council`)
+has the lead convene members, still at most 3, and the reviewer, when the council has one, check every report:
+slower, and several times the tokens. The lead still answers alone when it has no member it may convene (at Off
+(`none`) the Standard council has only the Coder, when code is asked for) or when its tool rounds, the budget or the
+time run out first ([`council`](council.md#turn-modes)).
+
+`--roster` picks the council: standard, ops, review or one of the bot's own. A new council chat without it gets
+the bot's default council; `tnctl council roster list --bot <bot>` lists the councils, and
+`tnctl council roster use <council> --bot <bot>` makes another one the default. With `--thread`, `--roster` changes
+that chat's council first. `--member` asks one member alone, without a council ([`council role`](council-roles.md)).
+
+`tnctl chat` is a person's chat with the bot's council or one of its members; a bot's own `tnctl` refuses it before
+anything is sent, exit 6 (see [Bot mode](../bot-mode.md)).
 
 ## Who may chat
 
@@ -23,9 +41,20 @@ Who may chat with a bot is who may open its desktop:
 | Act as me (`creator`) | Its creator. |
 | Read only (`read`), Off (`none`) | Its creator, and the teamspace's admins. |
 
-The caller also needs permission to open a terminal (`pods/exec`) in the teamspace. Anyone else gets the
-platform's `403` with the reason: `you cannot chat with <bot>: <reason>`, exit 6. A bot that is suspended, or
-one that has not started yet, has no council online, and the platform's reason says so.
+The caller also needs permission to open a terminal (`pods/exec`) in the teamspace. Anyone else is refused before
+anything is asked: `you cannot chat with <bot>: <reason>`, with the platform's reason (who may open the bot's
+computer), exit 6; `tnctl chat threads <bot>` prints the platform's reason alone, also exit 6. This check does not
+look at whether the bot runs: a turn on a bot that is not running (suspended or starting, for example) or is being
+removed is refused when it is asked, with the platform's sentence, such as `Resume the bot to chat.`, exit 8 (see
+[Exit codes](#exit-codes)); in a conversation the error is printed and the prompt comes back.
+
+A bot at Act as me (`creator`) runs the premade members and councils and, of its own members and councils and the
+members the teamspace shares, only what its creator wrote: a council as last changed, and a member at the version
+that runs (its latest, unless the council pins one). A chat that asks for one someone else wrote is refused with
+`creator_only`, exit 1. A council chat counts its council and each member it runs, lead and reviewer included; a
+member asked alone (`--member`, `@<slug>`) counts by itself, and with its council when that council pins its
+version. The platform's text: `<bot> acts as its creator, and <Name> was last changed by <email>: at Act as me it
+runs only members and councils its creator wrote. Clone it to this bot, or ask <creator>.`
 
 ## One turn, or a conversation
 
@@ -102,7 +131,7 @@ member the platform reports as gone:
 | At the `> ` prompt | Does |
 | --- | --- |
 | a line of text | one turn with the flags you gave: of the chat's council, or, in a chat with one member (`--member <slug>`, or `--thread` on a chat with one member), of that member alone |
-| `@<slug> <text>` | one turn of that member of the chat's council alone. `--effort` applies to it; `--mode` and `--thorough` do not |
+| `@<slug> <text>` | one turn of that member of the chat's council alone. `--effort` applies to it (the Coder, in a thread it already worked in, keeps its session's effort); `--mode` and `--thorough` do not |
 | `/new` | the next line starts a new thread |
 | `/cancel` | cancels the thread's open turn, if it has one |
 | `/quit` | ends the conversation (exit 0). Ctrl-C at the prompt does the same |
@@ -216,8 +245,8 @@ Before the first prompt, a conversation opened with `--thread` ends on any refus
 `--roster` change, and on a refusal of who you are while it follows an open turn. Any other refusal, a refused
 `/cancel` included, is printed and the prompt comes back.
 
-stdout of `tnctl chat threads scout`, which lists your threads, newest first (UPDATED is in your local time zone;
-this sample ran in UTC):
+stdout of `tnctl chat threads scout`, which lists the bot's threads, whoever started them, newest first and at most
+100 (UPDATED is in your local time zone; this sample ran in UTC):
 
 ```text
 ID                          TITLE                                     COUNCIL          TURNS  LAST       UPDATED
@@ -238,55 +267,101 @@ for a chat that names none and follows the bot's default council, whichever that
 
 | Flag | Description |
 | --- | --- |
-| `--thread <id>` | Continue this thread (it must exist). |
-| `--new` | Start a new thread. |
-| `--follow` | With `--thread`: follow that thread's last turn instead of asking anything — its events while it runs, its answer when it already ended. It takes no prompt. |
-| `--mode auto\|quick\|council` | How the council answers: `auto` decides, `quick` is one fast pass, `council` runs the whole council. |
-| `--member fleet\|coder` | Ask one member alone. It cannot be combined with `--mode`. |
-| `--effort low\|medium\|high` | How hard the members think. |
-| `--json` | Print each event of the turn as one JSON line. Not available in the conversation. |
+| `--thread <id>` | Continue this thread (the default is a new one). |
+| `--new` | Start a new thread (with `--thread`: a usage error). |
+| `--follow` | Follow the thread's last turn instead of asking anything — its events while it runs, its answer when it already ended. It needs `--thread` and takes no prompt. |
+| `--roster <council>` | The council that answers: standard, ops, review or one of the bot's own; with `--thread` it changes that chat's council first. |
+| `--thorough` | Have the lead convene members, at most 3, and the reviewer, when the council has one, check every report: slower, several times the tokens (in a council chat the same as `--mode council`; a chat with one member refuses it, exit 2). The lead's own answer stands when it has no member it may convene, or its tool rounds, the budget or the time run out first. |
+| `--member <slug>|<scope>/<slug>` | Ask one member alone: its slug, or `<scope>/<slug>` (scope bot, teamspace or template); with `--thread`, the slug alone. |
+| `--mode auto|quick|council` | Advanced: how the council answers: `auto` (the default) lets the lead answer itself or convene members, `quick` has it answer itself, `council` is the same as `--thorough` in a council chat (a chat with one member drops it). |
+| `--effort low|medium|high` | Advanced: how hard the members think: low, medium or high. It is a ceiling: the lead, a member or the reviewer whose own effort is lower keeps its own. The Coder keeps the effort its OpenCode session in the thread started with ([`council`](council.md)). |
+| `--json` | Print each event of the turn as one JSON line. Not available in the conversation. With `chat threads`: print the platform's answer as JSON instead of the table. |
 
-`--member` with `--mode` and a prompt over 16,000 characters are usage errors (exit 2), refused before
-anything is sent, as are `--follow` without `--thread` and `--follow` with a prompt.
+The command refuses these before anything is sent, as usage errors (exit 2):
+
+- no bot argument (`chat needs a bot, for example: tnctl chat scout "what is running?"`, then a `usage:` line), or
+  one that cannot be a bot's name (a bot that is not there is exit 3);
+- a bad `--mode`, `--effort` or `--roster` value, or a `--member` that is neither a member's slug such as
+  `triage-sre` nor `<scope>/<slug>` with scope bot, teamspace or template;
+- `--member` with `--mode` or with `--roster`; `--thorough` with `--member`, or with a `--mode` other than council;
+- `--new` with `--thread`; `--thread .` or `..`; `--member <scope>/<slug>` with `--thread`;
+- `--follow` without `--thread`, with a prompt, or with `--roster`;
+- a prompt over 16,000 characters;
+- without `--follow`: `--json` without a prompt, and no prompt when stdin or stdout is not a terminal and stdin
+  gives none (`chat needs a prompt: give it as arguments, or run tnctl chat <bot> in a terminal to talk`).
 
 ## Output
 
-stdout gets the answer. On a terminal the Captain's text is printed as it is written; when the turn's `final`
-arrives it is not printed again (only a newline when it is the same text), and when it is printed after text a
-`plan`, `member_done` or `critique` event reset, it starts a paragraph of its own (a blank line first). When
-stdout is not a terminal only the final text is printed. A member turn prints its `final`. A `final` the
-platform shortened for the stream (`cut: true`) is never printed as the answer: at the turn's end the
-command reads the thread's own record and prints the answer whole; if that read fails, it prints the
-shortened text and a line on stderr that says how to read the answer whole.
+stdout gets the answer. On a terminal, the text the lead streams is printed as it is written, and the turn's
+`final` is not printed a second time: when it says the same as the lead's text since the turn began, or since the
+last `member_done`, `critique` or `plan` (a quick turn's `plan` does not count), only a newline follows. After other
+streamed text, the final is printed as a paragraph of its own (a blank line first). When stdout is not a terminal
+only the final text is printed. A member turn — an `@<slug>` line in a conversation, `--member`, or any turn of a
+chat with one member — prints its `final`: the member's report is the answer.
 
-stderr gets one short line per event of the council, prefixed with `· `, so you can follow what it is doing:
+Without `--json`, a `final` the platform shortened for the stream (`cut: true`) is held back: at the turn's end the
+command reads the thread's own record and prints the answer whole. When that read fails, or finds no final, it
+prints the shortened text after all, with `the answer was shortened by the stream; read it whole with: tnctl chat
+<bot> --thread <id> --follow` on stderr. With `--json` (`--follow` included) the shortened `final` event is printed
+as it came, with `"cut":true`.
 
-```text
-· council: fleet, coder
-· fleet: check the robot's pods
-· fleet → robots.list
-· fleet done
-· critic: 2 issues (1 blocking)
-· budget: tokens limit 5000000
-done in 12.4s, 6 calls, 18422 tokens (+96200 cached)
+stderr gets a short line, starting with `·`, for each step of the council, so you can follow what it is doing; the
+paragraph below the sample explains each line, the two without `·` included. One council turn, with stdout not a
+terminal:
+
+```bash
+tnctl chat scout --roster ops "why does amr-02 restart?"
 ```
 
-The last line, from the turn's `usage` event, says how long it took, how many model calls it made and how many
-tokens it spent. Those are the tokens the bot's budget and its `tokens today` count: the prompt, the cache writes
-and the answer. Tokens read from the prompt cache cost far less and count against neither; they follow in brackets
-when there are any.
+stdout:
+
+```text
+amr-02 restarted four times in the last hour. Its vision-notebook container goes over its memory limit once the DeepStream pipeline has loaded its model, and the kernel kills it (OOMKilled); the restart policy brings it back. Next step: lower the pipeline's batch size, then watch the pod's restarts for an hour.
+```
+
+stderr of `tnctl chat scout --roster ops "why does amr-02 restart?"`:
+
+```text
+thread thr_8fa2Rq4Nm7Vb3Xd6Kp9WsQ
+· council Ops (ops) answers
+· council: Fleet, Triage SRE
+· Fleet: Find why amr-02 restarts: its problems, k3s events and the pods that failed in…
+· Fleet → get_problems
+· Triage SRE: Rank the likely causes of amr-02's restarts and propose the next runbook step.
+· Triage SRE → inspect_logs
+· Fleet done
+· Triage SRE done
+· Critic: 2 issues (1 blocking)
+· captain → read_result
+done in 41.2s, 8 calls, 22130 tokens (+96200 cached)
+```
+
+`thread <id>` is the thread the command made, or the one `--thread` names. `· council <Name> (<name>) answers` is
+said when the turn names its council. The plan line says how the turn is answered: `· council: <names>` names the
+members the turn convenes (`· council: Fleet, Triage SRE` here; the line before it names the council), and
+`· quick`, with no names, means the lead answers alone. A member's task, cut at 80 characters and ending in `…` when
+it is cut, its tool calls (`· Fleet → get_problems`) and its `done` are said by the member's name. The reviewer's
+line is `· <name>: <n> issues (<m> blocking)` (`· Critic: 2 issues (1 blocking)` here), and the Coder's steps, in a
+council with the Coder, show as `· coder: <kind>`, then the step's title when it has one. The lead's own tool calls
+show as `captain` (`· captain → read_result`), whatever the lead is called. The last line, from the turn's `usage`
+event, says how long it took, how many model calls it made and how many tokens it spent. Those are the tokens the
+bot's budget and its `tokens today` count: the prompt, the cache writes and the answer. Tokens read from the prompt
+cache cost far less and count against neither; they follow in brackets when there are any
+(`22130 tokens (+96200 cached)`). A limit the turn reaches prints `· budget: <what> limit <n>`, and an error event
+`· error: <code>: <message>`.
 
 All text from the bot — deltas, the final, titles and messages — is untrusted: ANSI escape sequences and
 control characters are dropped before it is printed, except newlines and tabs, so it can never drive your
 terminal.
 
 With `--json`, stdout gets every event of the turn as one JSON line — the platform's data, with the frame's
-sequence number and type in front, the other keys in alphabetical order — and stderr gets nothing but errors:
+sequence number and type in front, the other keys in alphabetical order — and stderr gets only errors and, after a
+Ctrl-C, `cancelling…`:
 
 ```json
-{"seq":41,"type":"text_delta","member":"captain","text":"Two pods ","turnId":"trn_9a1"}
-{"seq":42,"type":"final","text":"Two pods are running.","turnId":"trn_9a1"}
-{"seq":43,"type":"turn_end","state":"done","turnId":"trn_9a1"}
+{"seq":41,"type":"text_delta","member":"captain","text":"Two pods ","turnId":"trn_8fa2Xc6Rm2VnQ5Kd9Wb4Pg"}
+{"seq":42,"type":"final","text":"Two pods are running.","turnId":"trn_8fa2Xc6Rm2VnQ5Kd9Wb4Pg"}
+{"seq":43,"type":"turn_end","state":"done","turnId":"trn_8fa2Xc6Rm2VnQ5Kd9Wb4Pg"}
 ```
 
 Events of other turns of the thread are left out. The conversation is not available with `--json`: give a
@@ -322,10 +397,10 @@ during its first read of the thread (it then neither follows the thread's open t
 prompts) or during its `--roster` change, before the first prompt (the change stays).
 
 A refusal of a thread's read, of the stream and of a cancel prints the platform's own sentence, with no
-`(HTTP n)`, when the platform names a code tnctl knows; other refusals keep the `(HTTP n)` after the platform's
-words. A Ctrl-C whose cancel the platform refuses prints `· cancel failed: <the platform's words>` and
-keeps reading; a `/cancel` the platform refuses prints `Error: <the platform's words>` and the prompt comes
-back.
+`(HTTP n)`, when the platform names a code tnctl knows; one that names no code, or a code tnctl does not know,
+keeps the `(HTTP n)` after the platform's words. A Ctrl-C whose cancel the platform refuses prints
+`· cancel failed: <the platform's words>` (nothing with `--json`) and keeps reading; a `/cancel` the platform refuses prints
+`Error: <the platform's words>` and the prompt comes back.
 
 The turn's stream is followed until its `turn_end`. When it ends early — a slow reader is cut off, the network
 drops, the gateway restarts, or the platform reports `stream_expired` (the stream ran its hour) — the command
@@ -339,33 +414,61 @@ already ended is printed from the thread's record (its answer, or its error with
 A conversation opened on the thread (`--thread` without `--follow`) follows a turn that is still running
 before it shows its prompt. If the person may no longer chat with the bot (`access_lost`), it
 stops at once with exit 6 and the platform's reason. A frame the command cannot read is skipped
-(`· skipped a malformed event (seq N)` on stderr) and the stream is read on.
+(`· skipped a malformed event (seq N)` on stderr, nothing with `--json`) and the stream is read on.
 
 ## Exit codes
 
 | Exit | Meaning |
 | --- | --- |
 | 0 | ok: the turn is `done` |
-| 1 | error: the turn `failed` or `expired` (its code and message are printed), it was `cancelled`, the chat is turned off on this platform (`council_off`), or a second Ctrl-C left |
-| 2 | usage: a bad flag value, `--member` with `--mode`, `--new` with `--thread`, `--follow` without `--thread` or with a prompt, a prompt over 16,000 characters, `--json` without a prompt |
-| 3 | not found (`404`): the bot or the thread is not there |
-| 4 | the chat stream could not be followed: 6 failed attempts in a row (the turn goes on) |
-| 6 | not logged in or not allowed; you may not chat with this bot (`chat_not_allowed`, with the reason), or your access ended mid-turn (`access_lost`) |
-| 8 | conflict (`409`): the thread already has a turn open (`turn_open`): follow it with `--follow`, then Ctrl-C cancels it; the bot is suspended (`bot_suspended`): resume the bot; the bot is starting or being removed (`bot_not_ready`): wait, then run it again |
-| 9 | rate limited (`429`): too many turns or too many streams; wait the `Retry-After` |
+| 1 | error: the turn `failed` or `expired` (its code and message are printed), it was `cancelled`, or it did not end within 10 s of the cancel (a one-shot or `--follow`); the chat is turned off on this platform (`council_off`); `--follow` on a thread with no turn yet (`thread <id> has no turn yet`); a Ctrl-C before the turn was asked, or a second Ctrl-C; or the platform refused the council or member asked, at a new thread, a `--roster` change or a turn: `council_outdated`, `role_invalid`, `roster_gone`, `role_gone`, `pin_empty`, `creator_only` |
+| 2 | usage: the usage errors of [Flags](#flags) (a bad flag value included), the platform's `unknown_member`, `unknown_roster` and `ambiguous` (in the platform's words, for example `There is no council 'nope' for scout.` with a `councils: …` line), and a `--thread` chat the flags do not fit (a chat with one member and another `--member` or `--thorough`, or `--roster` in a conversation; a council chat whose council does not have the `--member`), see [The thread](#the-thread) |
+| 3 | not found: the bot or the thread is not there (`not_found`, or a `404` with no code tnctl knows) |
+| 4 | timeout: the chat stream could not be followed: 6 failed attempts in a row (the turn goes on); or another request got no answer within 30 s (`the request timed out: …`) or the gateway answered it with `408` or `504` |
+| 5 | rejected: the platform refused the request as invalid (`invalid`); with `--thread` and `--roster`, the chat's pinned members are not all in the new council: `this chat's pinned members are not all in council '<council>': change or clear the pin in the web chat, then run the command again`; with a prompt, `--roster` on a chat with one member: `roster: A chat with one member has no council to change.` |
+| 6 | not logged in or not allowed; you may not chat with this bot (before anything is asked, `you cannot chat with <bot>: <reason>`; a later refusal, and that of `tnctl chat threads`, is the platform's `chat_not_allowed`, printed as its reason alone), a `--roster` change of a chat someone else started, unless you are the bot's creator (`not_author`: `Only the author of this chat or the bot's creator can change its council.`), your access ended mid-turn (`access_lost`), or `tnctl chat` inside a TeknoirBot |
+| 8 | conflict: the thread already has a turn open (`turn_open`), also when `--roster` would change its council: follow it with `--follow`, then Ctrl-C cancels it; the chat's council changed meanwhile (`conflict`: `This chat's council just changed. Send again.`); the bot is suspended (`bot_suspended`: `Resume the bot to chat.`): resume the bot, then run it again; the bot is not running or is being removed (`bot_not_ready`: `The bot is starting.`, `The bot is being removed.`, or `The bot is <phase>.` with its phase in lower case for any other phase that is not running): wait, then run it again; or another `409` with no code tnctl knows |
+| 9 | rate limited (`429`): the platform refuses a turn while you already have 3 turns queued or running on that bot (from any client: tnctl, an MCP client, the web chat), or while the bot already has 6 queued: `Too many open turns on this bot. Wait for one to finish.` The bot runs at most two turns at a time; a third waits queued. |
+
+The council refusals of exit 1 (`council_outdated`, `role_invalid`, `roster_gone`, `role_gone`, `pin_empty`,
+`creator_only`) can come at once, or after the turn was queued: the turn then ends `failed` and the command prints
+`the turn failed: <code>: <message>` (exit 1; in a conversation the error is printed and the prompt comes back). A
+turn can also end that way with `access_changed`: `The author of this chat may no longer use this bot.`
+`role_invalid`'s message has one `<slug>: <reason>` for each reason the refusal names, joined with a semicolon and a
+space.
+
+A refusal whose code tnctl knows prints the platform's own sentence, with no `(HTTP n)`, whatever it refuses: the
+turn, a new thread, the thread's reads and council change, the stream or a cancel. That includes `bot_not_ready` and
+`bot_suspended` (exit 8) and `too_many_turns` (exit 9), so `Resume the bot to chat.` is printed as it is. Three print
+tnctl's own sentence instead: `turn_open`, on a turn or a `--roster` change (`this chat already has a turn in
+progress (tnctl chat <bot> --thread <id> --follow, then Ctrl-C cancels it)`); `council_off` on the chat info the
+command reads first, and in `tnctl chat threads` (`the TeknoirBot chat is turned off on this platform`); and a pin
+that does not fit the new council (exit 5). A refusal that names no code, or a code tnctl does not know, keeps the
+`(HTTP n)` after the platform's words.
 
 ## Examples
 
 ```bash
-# one question, then continue the thread later
+# one question
 tnctl chat scout "what is running on my robot?"
-tnctl chat scout --thread thr_8fa2 "which pod restarts?"
+
+# and then the pods, in the same thread
+tnctl chat scout --thread thr_123 "and the pods?"
 
 # pick the thread's last turn up again after the stream was lost
-tnctl chat scout --thread thr_8fa2 --follow
+tnctl chat scout --thread thr_123 --follow
 
-# one member alone, with a high effort
-tnctl chat scout --member coder --effort high "why does the notebook fail to start?"
+# the Review council: the lead convenes up to 3 of its members, and the reviewer checks every report
+tnctl chat scout --roster review --thorough "is the update safe to roll out?"
+
+# one member alone, by its slug
+tnctl chat scout --member triage-sre "why is arm-2 offline?"
+
+# one member alone, with its scope
+tnctl chat scout --member teamspace/triage "why is arm-3 slow?"
+
+# the bot's chat threads, whoever started them, newest first
+tnctl chat threads scout
 
 # scripts: the events, one JSON line each
 tnctl chat scout --json "list my devices" | jq -r 'select(.type=="final").text'
@@ -376,6 +479,10 @@ tnctl chat scout
 
 ## See also
 
+- [`council role`](council-roles.md) — the members a bot's councils can use.
+- [`council roster`](council-roster.md) — a bot's councils, and the default one a new chat asks.
+- [`council`](council.md) — the process on the bot's computer that answers the turns, and its turn modes.
+- [`mcp`](mcp.md) — the council tools a person's own agent uses on the same bots.
 - [Bot mode](../bot-mode.md) — a bot does not use the person chat.
 - [`inspect`](inspect.md), [`robots`](robots.md) — what the council reads about the bot's fleet.
-- [`mqtt`](mqtt.md) — the stream interface `chat` follows a turn with.
+- [`mqtt`](mqtt.md) — the devices' MQTT messages, read as a stream of server-sent events like a chat turn's.
