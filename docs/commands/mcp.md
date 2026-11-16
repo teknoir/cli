@@ -324,6 +324,7 @@ How they behave:
 - [`chat`](chat.md) - the same council, as a person in a terminal.
 - [`council`](council.md) - the bot's own half: the process that answers the turns.
 - [`council role`](council-roles.md) - the members a bot's councils can use.
+- [`council roster`](council-roster.md) - the bot's councils, which `council_run`'s `roster` names.
 - [`mqtt`](mqtt.md) - the same stream in a terminal, with `tnctl mqtt stream` for endless output or
   `tnctl mqtt sample` for a finite capture of whole messages.
 - [Bot mode](../bot-mode.md) - the server inside a TeknoirBot.
