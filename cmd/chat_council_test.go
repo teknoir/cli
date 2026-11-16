@@ -124,7 +124,7 @@ func TestChatCouncilUsageErrors(t *testing.T) {
 		{"a member and a roster", []string{"chat", "scout", "--member", "fleet", "--roster", "review", "hi"},
 			"--member and --roster cannot be used together: a member answers alone, without a council"},
 		{"thorough with a member", []string{"chat", "scout", "--thorough", "--member", "fleet", "hi"},
-			"--thorough asks the whole council: it cannot be used with --member"},
+			"--thorough asks the council: it cannot be used with --member"},
 		{"thorough with another mode", []string{"chat", "scout", "--thorough", "--mode", "quick", "hi"},
 			"--thorough is --mode council: it cannot be used with --mode quick"},
 		{"a council name in capitals", []string{"chat", "scout", "--roster", "Review", "hi"},
@@ -1192,11 +1192,13 @@ func TestChatHelpTexts(t *testing.T) {
 		t.Errorf("Short %q, want %q", c.Short, want)
 	}
 	for _, want := range []string{
-		"has the lead convene the members and the reviewer check every report",
+		"the reviewer, when the council has one, check every report",
+		"The lead still answers alone when it has no member it may convene",
 		"the council's reviewer, when it has one, checks their reports when the turn needs it",
 		"@<member> <text> asks one member of the chat's council alone",
 		"tnctl council role list --bot <bot> --templates lists each",
-		"tnctl council roster list --bot <bot> lists the\ncouncils, and tnctl council roster use <council> --bot <bot> makes another one the default.",
+		"tnctl council roster\nlist --bot <bot> lists the councils, and tnctl council roster use <council> --bot <bot> makes\nanother one the default.",
+		"without --mode or --thorough the lead decides how the\ncouncil answers. --effort is a ceiling",
 	} {
 		if !strings.Contains(c.Long, want) {
 			t.Errorf("Long lacks %q:\n%s", want, c.Long)
@@ -1215,7 +1217,7 @@ func TestChatHelpTexts(t *testing.T) {
 	usages := map[string]string{
 		"member":   "ask one member alone: its slug, or <scope>/<slug> (scope bot, teamspace or template)",
 		"roster":   "the council that answers: standard, ops, review or one of the bot's own; with --thread it changes that chat's council first",
-		"thorough": "have the lead convene the members and the reviewer check their reports: slower, several times the tokens (the same as --mode council)",
+		"thorough": "have the lead convene members, at most 3, and the reviewer, when the council has one, check every report: slower, several times the tokens (in a council chat the same as --mode council)",
 		"mode":     "advanced: how the council answers: auto, quick or council",
 		"effort":   "advanced: how hard the members think: low, medium or high",
 	}
@@ -1242,7 +1244,7 @@ func TestChatCouncilUsageErrorOrder(t *testing.T) {
 		badRoster      = `--roster is a council's name: 2 to 24 lowercase letters, digits and dashes, starting with a letter, not "Review"`
 		memberMode     = "--member and --mode cannot be used together: a member answers alone"
 		memberRoster   = "--member and --roster cannot be used together: a member answers alone, without a council"
-		thoroughMember = "--thorough asks the whole council: it cannot be used with --member"
+		thoroughMember = "--thorough asks the council: it cannot be used with --member"
 		thoroughMode   = "--thorough is --mode council: it cannot be used with --mode quick"
 		newAndThread   = "--new and --thread cannot be used together"
 		followNoThread = "--follow needs --thread"

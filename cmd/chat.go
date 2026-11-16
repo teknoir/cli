@@ -96,15 +96,18 @@ func newChatCmd(e *cliEnv) *cobra.Command {
 		Short:        "Chat with a TeknoirBot's council, or with one of its members",
 		Long: `Chat with a TeknoirBot's council, or with one of its members, and read the answer as it is written.
 
-The council's lead takes each turn: it answers a simple question itself or convenes members, and
-the council's reviewer, when it has one, checks their reports when the turn needs it. --thorough
-has the lead convene the members and the reviewer check every report: slower, and several times
-the tokens. --roster picks the council: standard, ops, review or one of the bot's own; a new chat
-without it gets the bot's default council. tnctl council roster list --bot <bot> lists the
-councils, and tnctl council roster use <council> --bot <bot> makes another one the default.
---member asks one member alone, without a council: its slug, or <scope>/<slug> when more than one
-member has that slug. With --thread, --member names a member of that chat by its slug alone.
-tnctl council role list --bot <bot> --templates lists each member's slug and scope.
+The council's lead takes each turn: it answers a simple question itself or convenes members, at
+most 3, and the council's reviewer, when it has one, checks their reports when the turn needs it.
+--thorough (in a council chat the same as --mode council) has the lead convene members, still at
+most 3, and the reviewer, when the council has one, check every report: slower, and several times
+the tokens. The lead still answers alone when it has no member it may convene, or when its tool
+rounds, the budget or the time run out first. --roster picks the council: standard, ops, review or
+one of the bot's own; a new chat without it gets the bot's default council. tnctl council roster
+list --bot <bot> lists the councils, and tnctl council roster use <council> --bot <bot> makes
+another one the default. --member asks one member alone, without a council: its slug, or
+<scope>/<slug> when more than one member has that slug. With --thread, --member names a member of
+that chat by its slug alone. tnctl council role list --bot <bot> --templates lists each member's
+slug and scope.
 
 With a prompt the command runs one turn and prints the answer: stdout gets the answer (as it is
 written when stdout is a terminal, at the end otherwise) and stderr the progress of the council.
@@ -118,7 +121,9 @@ turn (a second one leaves at once).
 With --thread <id> --follow the command does not ask anything: it follows the thread's last turn,
 picking up the answer where it is when that turn still runs, and printing it when it already ended.
 
---mode and --effort are for advanced use: without them the lead decides how the council answers.`,
+--mode and --effort are for advanced use: without --mode or --thorough the lead decides how the
+council answers. --effort is a ceiling: the lead, a member or the reviewer whose own effort is
+lower keeps its own.`,
 		Example: `  tnctl chat scout "what is running on my robot?"
   tnctl chat scout --thread thr_123 "and the pods?"
   tnctl chat scout --thread thr_123 --follow
@@ -193,7 +198,7 @@ picking up the answer where it is when that turn still runs, and printing it whe
 	c.Flags().StringVar(&f.mode, "mode", "", "advanced: how the council answers: auto, quick or council")
 	c.Flags().StringVar(&f.member, "member", "", "ask one member alone: its slug, or <scope>/<slug> (scope bot, teamspace or template)")
 	c.Flags().StringVar(&f.roster, "roster", "", "the council that answers: standard, ops, review or one of the bot's own; with --thread it changes that chat's council first")
-	c.Flags().BoolVar(&f.thorough, "thorough", false, "have the lead convene the members and the reviewer check their reports: slower, several times the tokens (the same as --mode council)")
+	c.Flags().BoolVar(&f.thorough, "thorough", false, "have the lead convene members, at most 3, and the reviewer, when the council has one, check every report: slower, several times the tokens (in a council chat the same as --mode council)")
 	c.Flags().StringVar(&f.effort, "effort", "", "advanced: how hard the members think: low, medium or high")
 	c.Flags().BoolVar(&f.json, "json", false, "print each event of the turn as one JSON line")
 	c.AddCommand(newChatThreadsCmd(e))
@@ -205,11 +210,11 @@ func newChatThreadsCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
 		SilenceUsage: true,
 		Use:          "threads <bot>",
-		Short:        "List a TeknoirBot's chat threads, newest first",
+		Short:        "List a TeknoirBot's chat threads, the most recently changed first",
 		Long: `List a TeknoirBot's chat threads, whoever started them: id, title, the council that answers it
 (@<member> for a chat with one member, (default) when it follows the bot's default council), how
-many turns it has, the state of the last turn and when it last changed; newest first, at most 100.
-Continue one with tnctl chat <bot> --thread <id>.`,
+many turns it has, the state of the last turn and when it last changed; the most recently changed
+first, at most 100. Continue one with tnctl chat <bot> --thread <id>.`,
 		Example: `  tnctl chat threads scout
   tnctl chat threads scout --json`,
 		Args: argsRange(1, 1, "chat threads needs a bot, for example: tnctl chat threads scout"),
@@ -271,7 +276,7 @@ func chatValidate(f *chatFlags) error {
 		return usageErr("--member and --roster cannot be used together: a member answers alone, without a council")
 	}
 	if f.thorough && f.member != "" {
-		return usageErr("--thorough asks the whole council: it cannot be used with --member")
+		return usageErr("--thorough asks the council: it cannot be used with --member")
 	}
 	if f.thorough && f.mode != "" && f.mode != "council" {
 		return usageErr("--thorough is --mode council: it cannot be used with --mode %s", f.mode)
@@ -1526,6 +1531,11 @@ func runChatTurn(ctx context.Context, fl *api.Fleet, bot, thread, turnID string,
 					return fmt.Errorf("malformed chat event: %w", err)
 				}
 				p.progress(who(d.Member, "") + " → " + terminalText(cleanBotText(d.Tool)))
+				if d.Member == "captain" {
+					// The final is the text of the lead's last model call alone: its text before this call
+					// is not in it, so the comparison starts over, as after a council's plan.
+					p.resetCaptainText()
+				}
 			case "coder_update":
 				var d struct {
 					Kind  string `json:"kind"`
@@ -1695,17 +1705,19 @@ func chatRetryAfterWait(ae *api.Error) time.Duration {
 }
 
 // chatTurnPrinter writes one turn: the answer on stdout, the council's progress on stderr. Its
-// mutex keeps the lines of the turn's loop and of the Ctrl-C watcher apart.
+// mutex guards the writes and the fields below json and tty, which the turn's loop and the Ctrl-C
+// watcher share.
 type chatTurnPrinter struct {
 	mu        sync.Mutex
 	out, errw io.Writer
 	json      bool
 	tty       bool
-	// captain is the Captain's text printed since the last plan, member_done or critique event.
+	// captain is the Captain's text printed since the last plan, member_done or critique event, or
+	// the lead's last tool call.
 	captain      strings.Builder
 	wroteCaptain bool
 	// printedAny says whether any Captain text was printed in this turn, that text included: the
-	// final then starts a paragraph of its own. lastNewline says whether that text ended its line.
+	// final then starts a paragraph of its own. lastNewline says whether stdout's last line is ended.
 	printedAny  bool
 	lastNewline bool
 }
@@ -1719,25 +1731,27 @@ func (p *chatTurnPrinter) delta(member, text string) {
 	if clean == "" {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.captain.WriteString(clean)
 	p.wroteCaptain = true
 	p.printedAny = true
 	p.lastNewline = strings.HasSuffix(clean, "\n")
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	_, _ = fmt.Fprint(p.out, clean)
 }
 
 // resetCaptainText starts the comparison for the final over.
 func (p *chatTurnPrinter) resetCaptainText() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.captain.Reset()
 	p.wroteCaptain = false
 }
 
 // final prints the turn's answer: alone when nothing was printed yet, otherwise the final is only
 // printed when the Captain's stream did not already say exactly this. After Captain text that a
-// plan, a member_done or a critique reset, the final starts a new paragraph: it reads as its own
-// answer and not as the end of the last sentence.
+// plan, a member_done, a critique or a tool call of the lead reset, the final starts a new
+// paragraph: it reads as its own answer and not as the end of the last sentence.
 func (p *chatTurnPrinter) final(text string) {
 	if p.json {
 		return
@@ -1749,7 +1763,11 @@ func (p *chatTurnPrinter) final(text string) {
 	case !p.tty, !p.wroteCaptain && !p.printedAny:
 		_, _ = fmt.Fprint(p.out, endWithNewline(clean))
 	case p.wroteCaptain && strings.TrimSpace(p.captain.String()) == strings.TrimSpace(clean):
-		_, _ = fmt.Fprint(p.out, "\n")
+		// The answer is on the screen already: only its line is ended, unless a line on stderr (a
+		// quick turn's plan) has ended it.
+		if !p.lastNewline {
+			_, _ = fmt.Fprint(p.out, "\n")
+		}
 	default:
 		sep := "\n\n"
 		if p.lastNewline {
@@ -1765,11 +1783,18 @@ func (p *chatTurnPrinter) final(text string) {
 // it (cancelled, failed, interrupted, or its stream lost): the error and the next prompt then start
 // a line of their own.
 func (p *chatTurnPrinter) endLine() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.endOpenLineLocked()
+}
+
+// endOpenLineLocked ends stdout's line when the Captain's text left it open. When stdout is a
+// terminal, stderr is usually the same screen: a line on stderr, or the next prompt, must not land
+// inside the answer. The caller holds p.mu.
+func (p *chatTurnPrinter) endOpenLineLocked() {
 	if p.json || !p.tty || !p.printedAny || p.lastNewline {
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	_, _ = fmt.Fprint(p.out, "\n")
 	p.lastNewline = true
 }
@@ -1781,6 +1806,7 @@ func (p *chatTurnPrinter) progress(line string) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.endOpenLineLocked()
 	_, _ = fmt.Fprintf(p.errw, "· %s\n", escapeLine(cleanBotText(line)))
 }
 
@@ -1788,6 +1814,7 @@ func (p *chatTurnPrinter) progress(line string) {
 func (p *chatTurnPrinter) errLine(line string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.endOpenLineLocked()
 	_, _ = fmt.Fprintln(p.errw, line)
 }
 
@@ -1798,6 +1825,7 @@ func (p *chatTurnPrinter) skipped(seq int64) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.endOpenLineLocked()
 	_, _ = fmt.Fprintf(p.errw, "· skipped a malformed event (seq %d)\n", seq)
 }
 
@@ -1819,6 +1847,7 @@ func (p *chatTurnPrinter) summary(u *api.ChatUsage) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.endOpenLineLocked()
 	_, _ = fmt.Fprintf(p.errw, "done in %ss, %s, %s\n", secs, calls, tokens)
 }
 

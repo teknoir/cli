@@ -286,10 +286,14 @@ enabling either; device credentials; the settings, workspace, Observatory, MQTT 
 pages; managing bots; turning Connect access on or off; resetting every override at once. `inspect`
 needs `creator` because it runs through the robot's Shell.
 
-Also refused inside a bot: every command that opens a tunnel or holds a device login (`ssh`, `exec`,
-`logs`, `port-forward`, `socks-proxy`, `wg`, `ansible`, `ansible-playbook`, `ansible-inventory`,
-`bootstrap`, `login`, `domain`, `add`), and `ns <teamspace>`. `--wait=applied` and `--wait=ready` need
-a device shell: use `--wait=published`.
+Also refused inside a bot, with exit 6: every command that opens a tunnel or holds a device login (`ssh`, `exec`,
+`logs`, `port-forward`, `socks-proxy`, `wg`, `wg-proxy`, `ansible`, `ansible-playbook`, `ansible-inventory`,
+`bootstrap`, `login`, `domain`, `add`), `ns <teamspace>`, `chat` (a person's chat with a bot) and a person's
+`council role|roster|apply` (skill `teknoir-council`). Their `--help` still prints, but `ansible` and
+`ansible-playbook` pass every flag on, so they refuse even `--help` and an unknown flag. A call that tnctl rejects
+before the refusal, such as one with an unknown flag or, for some of them, the wrong number of arguments, fails with
+that error instead (exit 2, or 1 for some argument counts). `--wait=applied` and `--wait=ready` need a device shell:
+use `--wait=published`.
 
 **Asking for a different level.** A bot cannot raise its own access. Tell the person, in these words:
 

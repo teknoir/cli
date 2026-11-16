@@ -290,13 +290,13 @@ func TestMCPCouncilTexts(t *testing.T) {
 		"council_info":  "Who may chat with a TeknoirBot and its councils: the bot's state, whether you may chat (and why not), the default council's members with their models, today's token budget, and the bot's councils (council.roster is the default council with its members; council.rosters lists every council by name, for council_run's roster). Call it before council_ask or council_run. " + mcpCouncilPeopleNote,
 		"council_roles": "The members a TeknoirBot's councils can use. With bot: available lists every member the bot may ask or put in a council (the bot's own first, then the teamspace's, then the premade ones; each with its slug, scope, kind, model, effort, tool groups and status), and catalog the tool groups, skills and limits. Without bot: the teamspace's catalog (the premade members and councils, and the teamspace's shared members). council_ask takes the slug of one whose kind is member (leads and reviewers only lead or check a council), or <scope>/<slug> when two members share a slug. " + mcpCouncilPeopleNote,
 		"council_ask":   "Give one member of a TeknoirBot's council a task: fleet looks at the teamspace's robots and devices with the read tools, coder works on the bot's own computer (code, builds, its k3s cluster), and council_roles lists every member the bot may ask. You lead: split the work and judge the reports; to have several members work at once, ask each with wait_seconds 0 and collect their reports with council_result (clients may run council calls one at a time). Each member keeps one conversation per MCP session, so a follow-up task sees the earlier ones; name it the same way each time (fleet and template/fleet are two conversations). It waits up to wait_seconds (default 45) for the report; a turn still running is fetched with council_result. It starts work on the bot and uses its token budget. " + mcpCouncilUntrustedNote,
-		"council_run":   "Ask one of a TeknoirBot's councils: its lead plans, convenes members when needed, and answers; the council's reviewer, when it has one, checks the members' reports when the turn needs it. roster picks the council by name (council_info lists them in council.rosters); without it the bot's default council answers. Each council keeps one conversation per MCP session. mode quick has the lead answer alone, auto (the default) lets the lead decide, and council (or thorough: true) always convenes members and has the reviewer, if the council has one, check their reports: slower, several times the tokens. It waits like council_ask; a turn still running is fetched with council_result. It starts work on the bot and uses its token budget. " + mcpCouncilUntrustedNote,
+		"council_run":   "Ask one of a TeknoirBot's councils: its lead plans, convenes members when needed, and answers; the council's reviewer, when it has one, checks the members' reports when the turn needs it. roster picks the council by name (council_info lists them in council.rosters); without it the bot's default council answers. Each council keeps one conversation per MCP session, so a follow-up sees the earlier turns; name it the same way each time (an empty roster and the default council's name are two conversations). mode quick has the lead answer alone, auto (the default) lets the lead decide, and council (or thorough: true) has the lead convene members, at most 3, and the reviewer, if the council has one, check their reports: slower, several times the tokens. The lead still answers alone when it has no member it may convene, or when its tool rounds, the budget or the time run out first. It waits like council_ask; a turn still running is fetched with council_result. It starts work on the bot and uses its token budget. " + mcpCouncilUntrustedNote,
 	}
 	props := map[string]map[string]string{
 		"council_ask": {"member": "which member: its slug, such as fleet or coder, or <scope>/<slug> (scope bot, teamspace or template) when two members share a slug; council_info lists the default council's members (council.roster.members), council_roles every member the bot may ask (those with kind member)"},
 		"council_run": {
 			"roster":   "the council to ask, by name (council_info: council.rosters); empty means the bot's default council",
-			"mode":     "auto (default): the lead answers itself or convenes members; quick: the lead answers alone; council: the lead always convenes members, and the council's reviewer, when it has one, checks their reports (slower, several times the tokens)",
+			"mode":     "auto (default): the lead answers itself or convenes members; quick: the lead answers alone; council: the lead convenes members, at most 3, and the council's reviewer, when it has one, checks their reports (slower, several times the tokens); the lead still answers alone when it has no member it may convene, or when its tool rounds, the budget or the time run out first",
 			"thorough": "true asks for the most careful answer, slower and several times the tokens: the same as mode council, and the platform records the question as thorough",
 		},
 		"council_roles": {"bot": "the TeknoirBot, by name; empty lists the teamspace's catalog instead"},
@@ -612,7 +612,7 @@ func TestMCPCouncilWaitThenResult(t *testing.T) {
 	if got["state"] != "running" {
 		t.Fatalf("state %v, want running", got["state"])
 	}
-	if next, _ := got["next"].(string); next != "The turn is still running: call council_result with bot scout and turn_id trn_1 to wait for it." {
+	if next, _ := got["next"].(string); next != "The turn is still running: call council_result with bot scout, namespace teknoir-demo and turn_id trn_1 to wait for it." {
 		t.Errorf("next %q", next)
 	}
 
@@ -628,6 +628,36 @@ func TestMCPCouncilWaitThenResult(t *testing.T) {
 	mu.Unlock()
 	if len(resume) != 2 || resume[1] != "1" {
 		t.Errorf("Last-Event-ID per stream %q, want the resumption after seq 1", resume)
+	}
+}
+
+// A turn in another teamspace: next names its namespace, and council_result called as next says finds it.
+func TestMCPCouncilNextNamesTheNamespace(t *testing.T) {
+	councilFast(t)
+	p := newChatAPI(t)
+	const other = "/api/device/fleet/other"
+	p.on("POST", other+"/bots/scout/chat/threads", 201, chatThreadBody("thr_1", "MCP: test fleet", "fleet"))
+	p.on("POST", other+"/bots/scout/chat/threads/thr_1/turns", 202, chatTurnIn("trn_1", "thr_1", "fleet"))
+	p.onStream(other+"/bots/scout/chat/threads/thr_1/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		holdStream(w, r, nil)
+	})
+	p.on("GET", other+"/bots/scout/chat/threads/thr_1", 200,
+		chatDetailBody("thr_1", 1, chatTurnRecord("trn_1", "thr_1", "queued", "", "fleet")))
+	cs := councilHarness(t, p)
+
+	got := mcpMap(t, mcpCall(t, cs, "council_ask", map[string]any{
+		"bot": "scout", "member": "fleet", "task": "go", "namespace": "other", "wait_seconds": 0,
+	}))
+	want := "The turn is still queued: call council_result with bot scout, namespace other and turn_id trn_1 to wait for it."
+	if next, _ := got["next"].(string); next != want {
+		t.Fatalf("next %q, want %q", next, want)
+	}
+	res := mcpCall(t, cs, "council_result", map[string]any{"bot": "scout", "namespace": "other", "turn_id": "trn_1", "wait_seconds": 0})
+	if res.IsError {
+		t.Fatalf("council_result as next says: %s", mcpText(t, res))
+	}
+	if got := mcpMap(t, res); got["state"] != "queued" {
+		t.Errorf("state %v, want queued", got["state"])
 	}
 }
 

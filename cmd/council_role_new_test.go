@@ -684,18 +684,31 @@ func TestCouncilRoleArchiveInUseHint(t *testing.T) {
 	}
 }
 
-// TestCouncilRoleArchiveLong names the councils a member is in as the next step.
+// TestCouncilRoleArchiveLong names the councils a member is in as the next step, and how to take a lead or
+// a reviewer out.
 func TestCouncilRoleArchiveLong(t *testing.T) {
 	archive := councilSub(councilSub(newCouncilCmd(&cliEnv{}), "role"), "archive")
 	if archive == nil {
 		t.Fatal("council role has no archive subcommand")
 	}
 	want := "Archive a member that a bot or the teamspace made: councils can no longer use it. A member that\n" +
-		"a council still names is refused: remove it from those councils first (tnctl council roster\n" +
-		"remove). tnctl council role export still prints an archived member, and applying that YAML brings\n" +
-		"it back.\n\n"
+		"a council still names is refused: take it out of those councils first (tnctl council roster\n" +
+		"remove for a member; a lead or a reviewer is changed in YAML with tnctl council apply, a reviewer\n" +
+		"also in the web chat's Council tab). tnctl council role export still prints an archived member,\n" +
+		"and applying that YAML brings it back.\n\n"
 	if !strings.HasPrefix(archive.Long, want) {
 		t.Errorf("archive Long:\n%s", archive.Long)
+	}
+}
+
+// TestCouncilRoleNewUse names the flags council role new needs: --job, and --bot or --teamspace.
+func TestCouncilRoleNewUse(t *testing.T) {
+	newCmd := councilSub(councilSub(newCouncilCmd(&cliEnv{}), "role"), "new")
+	if newCmd == nil {
+		t.Fatal("council role has no new subcommand")
+	}
+	if want := "new <name> --job <text> (--bot <bot> | --teamspace)"; newCmd.Use != want {
+		t.Errorf("Use %q, want %q", newCmd.Use, want)
 	}
 }
 

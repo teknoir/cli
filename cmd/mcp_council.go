@@ -72,7 +72,7 @@ type mcpCouncilAskInput struct {
 	Bot         string `json:"bot" jsonschema:"the TeknoirBot, by name"`
 	Member      string `json:"member" jsonschema:"which member: its slug, such as fleet or coder, or <scope>/<slug> (scope bot, teamspace or template) when two members share a slug; council_info lists the default council's members (council.roster.members), council_roles every member the bot may ask (those with kind member)"`
 	Task        string `json:"task" jsonschema:"what the member should do, in a sentence or two"`
-	Effort      string `json:"effort,omitempty" jsonschema:"how hard the member thinks: low, medium or high"`
+	Effort      string `json:"effort,omitempty" jsonschema:"how hard the member thinks, at most: low, medium or high; a member whose own effort is lower keeps its own, and without effort it thinks at its own; the coder, in a conversation it already worked in, keeps the effort its session started with"`
 	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the report, 0 to 55; default 45; 0 returns right after the turn is queued"`
 }
 
@@ -81,9 +81,9 @@ type mcpCouncilRunInput struct {
 	Bot         string `json:"bot" jsonschema:"the TeknoirBot, by name"`
 	Question    string `json:"question" jsonschema:"the question for the council"`
 	Roster      string `json:"roster,omitempty" jsonschema:"the council to ask, by name (council_info: council.rosters); empty means the bot's default council"`
-	Mode        string `json:"mode,omitempty" jsonschema:"auto (default): the lead answers itself or convenes members; quick: the lead answers alone; council: the lead always convenes members, and the council's reviewer, when it has one, checks their reports (slower, several times the tokens)"`
+	Mode        string `json:"mode,omitempty" jsonschema:"auto (default): the lead answers itself or convenes members; quick: the lead answers alone; council: the lead convenes members, at most 3, and the council's reviewer, when it has one, checks their reports (slower, several times the tokens); the lead still answers alone when it has no member it may convene, or when its tool rounds, the budget or the time run out first"`
 	Thorough    bool   `json:"thorough,omitempty" jsonschema:"true asks for the most careful answer, slower and several times the tokens: the same as mode council, and the platform records the question as thorough"`
-	Effort      string `json:"effort,omitempty" jsonschema:"how hard the members think: low, medium or high"`
+	Effort      string `json:"effort,omitempty" jsonschema:"how hard the council thinks, at most: low, medium or high; the lead, a member or the reviewer whose own effort is lower keeps its own, and without effort each thinks at its own; the coder, in a conversation it already worked in, keeps the effort its session started with"`
 	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the answer, 0 to 55; default 45; 0 returns right after the turn is queued"`
 }
 
@@ -528,10 +528,10 @@ func (s *councilState) followRecord(t *councilTurn, d *api.ChatThreadDetail, adv
 
 // councilSnapshot is a turn as its result renders it.
 type councilSnapshot struct {
-	id, bot, thread, kind, member, state, final string
-	report, critique, usage                     json.RawMessage
-	members                                     []mcpCouncilMember
-	err                                         *api.ChatError
+	id, ns, bot, thread, kind, member, state, final string
+	report, critique, usage                         json.RawMessage
+	members                                         []mcpCouncilMember
+	err                                             *api.ChatError
 	// finalCut says the stream's final was shortened: the record has the whole answer.
 	finalCut bool
 }
@@ -540,7 +540,7 @@ func (s *councilState) snapshot(t *councilTurn) councilSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snap := councilSnapshot{
-		id: t.id, bot: t.bot, thread: t.thread, kind: t.kind, member: t.member,
+		id: t.id, ns: t.ns, bot: t.bot, thread: t.thread, kind: t.kind, member: t.member,
 		state: t.state, final: t.final, report: t.report, critique: t.critique, usage: t.usage,
 		err: t.err, finalCut: t.finalCut,
 	}
@@ -663,7 +663,7 @@ func addCouncilTools(s *mcp.Server, e *cliEnv) {
 			return mcpResult(raw), nil, nil
 		})
 
-	addCouncilTool(s, "council_run", "Ask one of a TeknoirBot's councils: its lead plans, convenes members when needed, and answers; the council's reviewer, when it has one, checks the members' reports when the turn needs it. roster picks the council by name (council_info lists them in council.rosters); without it the bot's default council answers. Each council keeps one conversation per MCP session. mode quick has the lead answer alone, auto (the default) lets the lead decide, and council (or thorough: true) always convenes members and has the reviewer, if the council has one, check their reports: slower, several times the tokens. It waits like council_ask; a turn still running is fetched with council_result. It starts work on the bot and uses its token budget. "+mcpCouncilUntrustedNote,
+	addCouncilTool(s, "council_run", "Ask one of a TeknoirBot's councils: its lead plans, convenes members when needed, and answers; the council's reviewer, when it has one, checks the members' reports when the turn needs it. roster picks the council by name (council_info lists them in council.rosters); without it the bot's default council answers. Each council keeps one conversation per MCP session, so a follow-up sees the earlier turns; name it the same way each time (an empty roster and the default council's name are two conversations). mode quick has the lead answer alone, auto (the default) lets the lead decide, and council (or thorough: true) has the lead convene members, at most 3, and the reviewer, if the council has one, check their reports: slower, several times the tokens. The lead still answers alone when it has no member it may convene, or when its tool rounds, the budget or the time run out first. It waits like council_ask; a turn still running is fetched with council_result. It starts work on the bot and uses its token budget. "+mcpCouncilUntrustedNote,
 		func(ctx context.Context, req *mcp.CallToolRequest, in mcpCouncilRunInput) (*mcp.CallToolResult, any, error) {
 			if err := mcpName(in.Bot, "bot"); err != nil {
 				return nil, nil, err
@@ -1253,7 +1253,8 @@ func councilFinish(ctx context.Context, fl *api.Fleet, st *councilState, t *coun
 // ---------- finding a turn this process did not start ----------
 
 // councilFindTurn looks for a turn of the bot's in the threads this process knows, then in the bot's
-// own threads, newest first (at most 10): the agent may ask about a turn of an earlier session.
+// own threads, the most recently changed first (at most 10): the agent may ask about a turn of an
+// earlier session.
 func councilFindTurn(ctx context.Context, fl *api.Fleet, st *councilState, ns, bot, id string) (*councilTurn, error) {
 	found := func(d *api.ChatThreadDetail) *councilTurn {
 		rec := councilRecord(d, id)
@@ -1408,7 +1409,7 @@ func councilNext(s councilSnapshot) string {
 	if s.state != "queued" && s.state != "running" {
 		return ""
 	}
-	return fmt.Sprintf("The turn is still %s: call council_result with bot %s and turn_id %s to wait for it.", s.state, s.bot, s.id)
+	return fmt.Sprintf("The turn is still %s: call council_result with bot %s, namespace %s and turn_id %s to wait for it.", s.state, s.bot, s.ns, s.id)
 }
 
 // councilTerminal says whether a turn state is one the turn never leaves.

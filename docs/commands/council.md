@@ -10,7 +10,7 @@ council image, hidden and bot-only. The rest of this page is about `serve`.
 tnctl council role list
 tnctl council role get <member>
 tnctl council role export <member>
-tnctl council role new <name> --job <text> [--bot <bot> | --teamspace]
+tnctl council role new <name> --job <text> (--bot <bot> | --teamspace)
 tnctl council role archive <member>
 tnctl council roster list --bot <bot>
 tnctl council roster get <name> --bot <bot>
@@ -26,8 +26,9 @@ tnctl council serve [--max-turns 1|2] [--work-dir /work]
 anywhere else it is a usage error (exit 2): `tnctl council serve runs only inside a TeknoirBot`. Inside a bot,
 `council role …`, `council roster …` and `council apply` are refused with exit 6, for example
 `"tnctl council role list" is not available to a TeknoirBot: only a person reads and changes a bot's council.`
-Their `--help` still prints, and a mistyped subcommand, a missing or extra argument or an unknown flag is a
-usage error first (exit 2; [Bot mode](../bot-mode.md)).
+Their `--help` still prints. A mistyped subcommand, a missing or extra argument, an unknown flag or a flag value of
+the wrong type (`--version abc`) is a usage error first (exit 2); other wrong flags, such as `role new` without
+`--job` or `apply` without `-f`, get the exit-6 refusal ([Bot mode](../bot-mode.md)).
 
 ## What it does
 
@@ -45,8 +46,10 @@ The council image starts it as `tini -- tnctl council serve --work-dir /work`. F
    council being off, and it is logged at the first 404 of a run and every tenth one after that, rather
    than every 60 s. Each poll announces the council protocol, the kit version, and the tools and guides
    the computer has (the `X-Teknoir-Council-*` headers). On a computer whose polls carry none of these
-   headers (an older tnctl), or headers the platform cannot read, only the Standard council and the premade
-   `fleet` and `coder` run, and the platform refuses a turn it cannot run there with `council_outdated`
+   headers (an older tnctl), or headers the platform cannot read, the platform runs only a council led by the
+   premade `captain`, with the premade `fleet` and `coder` as its members (and no chat pin that leaves one out),
+   the premade `critic` as its reviewer and no budget of its own, as the Standard council is, and a turn that asks
+   the premade `fleet` or `coder` alone. It refuses a turn it cannot run there with `council_outdated`
    ([council-roster.md](council-roster.md)). The guides come from `/etc/teknoirbot/kit`, with the ones built
    into tnctl as the fallback.
 2. **Runs the turn.** Which phases run depends on the turn's `kind` and `mode`; see [Turn modes](#turn-modes).
@@ -156,12 +159,15 @@ conversation) — and, for an ask, a `mode`:
 | `auto` (the default, and anything empty or unknown) | The Captain decides. The turn starts on the quick budget and is upgraded to the council budget when it convenes. |
 | a member turn (any member the bot may use whose part is `member`: a premade one such as `fleet`, `coder` or `triage-sre`, a teamspace member or one of the bot's own) | That member alone, with the thread's earlier question and answer pairs in its prompt; the Coder continues the thread's OpenCode session instead. No lead, no reviewer. |
 
-The Coder is convened only for what the person asked. Before the Captain has read anything, its own
-`convene_council` decides; once it has read platform data — a log, a configuration, an MQTT sample, any tool
-result, which devices and apps wrote; in this turn or in the thread's earlier answers — a Coder task is
-accepted only when the person's own prompt asks for code or a change, and the plan the daemon builds itself in
-council mode follows the same rule. Here the word app no longer counts as asking for code: for "why is the app on
-r2 slow?" that plan has the council's Coder before platform data, but not after it. A Coder task the Captain
+The Coder is convened only for what the person asked. Before the Captain has read platform data, its own
+`convene_council` decides. Platform data is text that devices and apps wrote: a log, a configuration, an MQTT
+sample. In this turn every tool result the Captain gets counts, except a `read_skill` page and the refusal of a
+`convene_council`; every earlier answer of the thread counts too, since it may quote such data, so a turn after
+the thread's first answer starts after platform data. After platform data a Coder task is accepted only when the
+person's own prompt asks for code or a change, and the plan the daemon builds itself in council mode follows the
+same rule. Here the word app no longer counts as asking for code: for "why is the app on r2 slow?" that plan has
+the council's Coder while the thread has no answer yet and the Captain has read no platform data, but not after
+either. A Coder task the Captain
 convenes otherwise is refused with a tool result that says so and names the council's other members, if it
 has any; the Captain then answers from what it found or convenes one or more of them without the Coder (Fleet,
 in the Standard council). The Coder's prompt puts the person's request first, whole when it fits; after the
@@ -199,8 +205,9 @@ Tokens are counted as input plus cache write plus output; a cache read is free.
 - **Four calls at once per bot**, all turns together; a call that finds no slot waits for one.
 - **A limit that is hit** is posted once, as a `budget` event: `calls`, `tokens` or `time`.
 - **The answer can fail and the turn still answer.** When the Captain cannot write it (no time, no budget, a
-  model error, a refusal), the turn ends `done` with the members' reports, under
-  `The Captain could not write the answer (<why>). The members' reports:`.
+  model error, a refusal, an empty answer), the turn ends `done` with the members' reports, under
+  `The <lead> could not write the answer (<why>). The members' reports:`, where `<lead>` is the lead's name
+  (Captain in the premade councils).
 
 The deadlines are all relative to the turn's deadline `D`, which the platform sets, and 10 minutes from the
 claim when it sets none:
@@ -277,7 +284,7 @@ opencode run --standalone --format json --model teknoir/claude-sonnet-5-5#<effor
 | Its config | `/etc/teknoirbot/opencode.json`, the only config it reads: passed as `OPENCODE_CONFIG`, with `OPENCODE_DISABLE_PROJECT_CONFIG=1` so no `opencode.json` in the work directory can replace it. A task that wrote one could send the bot's key to another URL. |
 | The skills | The kit's, `/etc/teknoirbot/kit/skills`, read through the config's `skills.paths`; nothing is linked into the work directory. |
 | Its config home | `XDG_CONFIG_HOME=/etc/teknoirbot/xdg`, read-only, with an empty `opencode` directory. The coder cannot write a global config there, and a task does not start when the image has no such directory. |
-| The work directory | `<work-dir>/chat-<the thread id's first 8 characters>`, its own git repository (`git init` on first use). A task's changed files are that repository's `git status --porcelain`. |
+| The work directory | `<work-dir>/chat-<the 8 characters after thr_ in the thread id>` (thread `thr_8fa2Jd9Nm4Xb7Rm2VnQ5Kg` works in `<work-dir>/chat-8fa2Jd9N`), its own git repository (`git init` on first use). A task's changed files are that repository's `git status --porcelain`. |
 | The home | `<work-dir>/home`, with its XDG data, state and cache directories below it. Only `PATH`, `LANG`, `LC_ALL`, `TZ`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, the Kubernetes service variables, the bot-mode variables and `BUILDKIT_HOST` are passed through from the bot's own environment, plus `TEKNOIRBOT_MEMBER=coder` and the turn's id. |
 | The session | One OpenCode session per chat thread, remembered in `<work-dir>/home/.local/state/teknoirbot/sessions.json` (the 1000 most recent threads). A follow-up in the thread continues it. A thread keeps the effort it started with: OpenCode refuses a session resumed at another effort. |
 | One at a time | The bot runs one OpenCode process at a time; a second Coder task waits for it, and its turn shows a `wait` update while it does. |
@@ -314,7 +321,7 @@ It writes to stderr only, one line an event, prefixed `council: `:
 council: turn=trn_… kind=ask mode=auto
 council: turn=trn_… critique: 2 evidence entries dropped
 council: turn=trn_… critique: skipped (not needed)
-council: coder: turn=trn_… thread=thr_…: started with effort high
+council: coder: turn trn_… thread thr_…: started with effort high
 council: turn=trn_… state=done code= calls=6 tokens=18422 ms=12345
 ```
 
@@ -325,9 +332,9 @@ prompts and answers go to the bot API. A turn that fails says so in its own line
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | ok: the bot was stopped and every turn was finished |
+| 0 | ok: the bot was stopped, once its running turns had finished or the 5-second stop grace had run out, whichever came first |
 | 1 | error: it could not start (a bot API base that may not carry the key, an MCP server that could not be built) |
-| 2 | usage: `--max-turns` is not 1 or 2, or it runs outside a TeknoirBot |
+| 2 | usage: `--max-turns` is not 1 or 2, it runs outside a TeknoirBot, or `TEKNOIRBOT_NAMESPACE` is not set |
 
 The pod restarts a process that exits.
 

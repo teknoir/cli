@@ -2368,3 +2368,146 @@ func TestChatCutLine(t *testing.T) {
 		}
 	}
 }
+
+// A lead that writes before a tool call: the final is the text of its last model call alone, so it is
+// compared with the text after the call and not printed a second time. The tool call's line on stderr
+// ends the line the first text left open.
+func TestChatLeadToolCallStartsTheAnswerAfresh(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "turn_start", `"mode":"auto"`),
+			frame(2, "text_delta", `"member":"captain","text":"Let me check the robots."`),
+			frame(3, "tool_call", `"member":"captain","id":"c1","tool":"list_robots","input":{}`),
+			frame(4, "text_delta", `"member":"captain","text":"`+quickFinal+`"`),
+			frame(5, "plan", `"mode":"quick","tasks":[]`),
+			frame(6, "final", `"text":"`+quickFinal+`"`),
+			frame(7, "turn_end", `"state":"done"`),
+		})
+	})
+	out, _, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Let me check the robots.\n" + quickFinal + "\n"; out != want {
+		t.Errorf("stdout %q, want %q (the answer printed once)", out, want)
+	}
+}
+
+// chatOneScreen runs turn trn_1 of thr_new with stdout and stderr on one buffer, as one terminal shows
+// them, and returns that screen and the turn's error.
+func chatOneScreen(t *testing.T, p *chatAPI, sigs <-chan os.Signal) (string, error) {
+	t.Helper()
+	fl, _, _, err := p.env(t).fleet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	screen := &syncBuf{}
+	pr := &chatTurnPrinter{out: screen, errw: screen, tty: true}
+	err = runChatTurn(context.Background(), fl, "scout", "thr_new", "trn_1", 0, pr, sigs)
+	return screen.String(), err
+}
+
+// On one terminal a line on stderr starts a line of its own after the lead's open text, a final the
+// screen already shows only ends its line, and the turn's end adds no blank line.
+func TestChatTurnOnOneTerminal(t *testing.T) {
+	const usage = `"calls":2,"input":100,"output":40,"cacheRead":0,"cacheWrite":0,"ms":1500`
+	cases := []struct {
+		name   string
+		frames []string
+		want   string
+	}{
+		{"a quick turn with a tool call of the lead", []string{
+			frame(1, "turn_start", `"mode":"auto"`),
+			frame(2, "text_delta", `"member":"captain","text":"Let me check the robots."`),
+			frame(3, "tool_call", `"member":"captain","id":"c1","tool":"list_robots","input":{}`),
+			frame(4, "text_delta", `"member":"captain","text":"Two pods are running."`),
+			frame(5, "plan", `"mode":"quick","tasks":[]`),
+			frame(6, "usage", usage),
+			frame(7, "final", `"text":"Two pods are running."`),
+			frame(8, "turn_end", `"state":"done"`),
+		}, "Let me check the robots.\n· captain → list_robots\nTwo pods are running.\n· quick\ndone in 1.5s, 2 calls, 140 tokens\n"},
+		{"a quick turn whose text ends its line", []string{
+			frame(1, "text_delta", `"member":"captain","text":"Hello there.\n"`),
+			frame(2, "plan", `"mode":"quick","tasks":[]`),
+			frame(3, "final", `"text":"Hello there."`),
+			frame(4, "turn_end", `"state":"done"`),
+		}, "Hello there.\n· quick\n"},
+		{"a failed turn", []string{
+			frame(1, "text_delta", `"member":"captain","text":"start"`),
+			frame(2, "error", `"code":"model_error","message":"boom"`),
+			frame(3, "usage", usage),
+			frame(4, "turn_end", `"state":"failed"`),
+		}, "start\n· error: model_error: boom\ndone in 1.5s, 2 calls, 140 tokens\n"},
+		{"a council turn", []string{
+			frame(1, "text_delta", `"member":"captain","text":"Asking fleet."`),
+			frame(2, "plan", `"mode":"council","tasks":[{"member":"fleet","name":"Fleet","task":"look"}]`),
+			frame(3, "tool_call", `"member":"fleet","id":"c1","tool":"get_problems","input":{}`),
+			frame(4, "member_done", `"member":"fleet","name":"Fleet"`),
+			frame(5, "text_delta", `"member":"captain","text":"Two pods."`),
+			frame(6, "final", `"text":"Two pods."`),
+			frame(7, "turn_end", `"state":"done"`),
+		}, "Asking fleet.\n· council: Fleet\n· Fleet → get_problems\n· Fleet done\nTwo pods.\n"},
+		{"a final that differs", []string{
+			frame(1, "text_delta", `"member":"captain","text":"a draft"`),
+			frame(2, "final", `"text":"the answer"`),
+			frame(3, "turn_end", `"state":"done"`),
+		}, "a draft\n\nthe answer\n"},
+		{"members, then a final with no text after them", []string{
+			frame(1, "text_delta", `"member":"captain","text":"Asking fleet."`),
+			frame(2, "plan", `"mode":"council","tasks":[{"member":"fleet","name":"Fleet","task":"look"}]`),
+			frame(3, "member_done", `"member":"fleet","name":"Fleet"`),
+			frame(4, "final", `"text":"the answer"`),
+			frame(5, "turn_end", `"state":"done"`),
+		}, "Asking fleet.\n· council: Fleet\n· Fleet done\n\nthe answer\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			noBotMode(t)
+			setTTY(t, false, true)
+			p := newChatAPI(t)
+			p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+				writeFrames(w, c.frames)
+			})
+			if got, _ := chatOneScreen(t, p, nil); got != c.want {
+				t.Errorf("screen\n%q\nwant\n%q", got, c.want)
+			}
+		})
+	}
+}
+
+// A Ctrl-C after the lead began: the watcher's cancelling… starts a line of its own, and the turn's
+// end adds no blank line after it. With -race, this is the watcher reading the printer's state.
+func TestChatCtrlCOnOneTerminal(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	sigs := make(chan os.Signal, 1)
+	p := newChatAPI(t)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns/trn_1/cancel", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, frame(1, "text_delta", `"member":"captain","text":"start"`))
+		w.(http.Flusher).Flush()
+		time.Sleep(50 * time.Millisecond)
+		sigs <- os.Interrupt
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) && len(p.seen("POST", "/bots/scout/chat/threads/thr_new/turns/trn_1/cancel")) == 0 {
+			time.Sleep(2 * time.Millisecond)
+		}
+		_, _ = io.WriteString(w, frame(2, "turn_end", `"state":"cancelled"`))
+		w.(http.Flusher).Flush()
+	})
+	got, err := chatOneScreen(t, p, sigs)
+	if err == nil || err.Error() != "the turn was cancelled" {
+		t.Errorf("err %v, want the turn was cancelled", err)
+	}
+	if want := "start\ncancelling…\n"; got != want {
+		t.Errorf("screen %q, want %q", got, want)
+	}
+}

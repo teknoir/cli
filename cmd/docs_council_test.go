@@ -974,12 +974,10 @@ loop:
 			// (tnctl <command> help is tnctl help <command> written the wrong way round). A placeholder
 			// that may stand for a child with that subcommand is that child's command (council <group>
 			// apply is council role apply), and the line's flags are checked against those commands.
-			if anySub && !badSub && docsCmdWordPlaceholder(subPh) && (docsCmdSub(cur, tok) != nil || docsCmdCobraOwn(cur, tok)) {
+			if anySub && !badSub && slotSubs == nil && docsCmdWordPlaceholder(subPh) {
 				if subs := docsCmdSlotSubs(cur, subPh, tok); len(subs) > 0 {
-					if slotSubs == nil {
-						slotSubs = subs
-					}
-				} else {
+					slotSubs = subs
+				} else if docsCmdSub(cur, tok) != nil || docsCmdCobraOwn(cur, tok) {
 					// A word placeholder fills the subcommand slot, so the real subcommand after it is only
 					// a positional argument, and the group refuses it (council roster <name> add).
 					badSub = true
@@ -992,7 +990,23 @@ loop:
 			// A plain word while the walk is on the command tree.
 			if docsCmdCobraOwn(cur, tok) {
 				// cobra adds help and completion to the root only, and only when a command runs;
-				// the flags written before the word are still checked, nothing after it is.
+				// the flags written before the word are still checked. tnctl help <path> names a
+				// command: its path is checked as tnctl <path> would be, and a flag after it must be
+				// one of the root's, as cobra's help command takes no other.
+				if tok == "help" && i+1 < len(toks) {
+					sub := docsCmdWalk(root, c, append([]string{toks[0]}, toks[i+1:]...))
+					msgs = append(msgs, sub...)
+					for _, ft := range toks[i+1:] {
+						if len(sub) > 0 || !docsCmdIsFlagToken(ft) {
+							continue
+						}
+						for _, part := range docsCmdFlagParts(docsCmdTrimFlag(ft)) {
+							if !docsCmdNotAFlag(part) && !docsCmdFlagExists(root, part) {
+								msgs = append(msgs, fmt.Sprintf("%s:%d: tnctl help: unknown flag %q", c.page, c.line, ft))
+							}
+						}
+					}
+				}
 				break loop
 			}
 			if sub := docsCmdSub(cur, tok); sub != nil {
@@ -1064,7 +1078,13 @@ loop:
 			if !docsCmdTypoDash(part) && (docsCmdFlagExists(cur, part) || docsCmdNotAFlag(part)) {
 				continue
 			}
-			if (anySub && slotSubs == nil && docsCmdSubHasFlag(cur, part)) || docsCmdAnyHasFlag(slotSubs, part) {
+			// A slot that names its alternatives (<role|roster>) is each of them, so each must have the
+			// flag; a generic slot (<group>) is any child.
+			slotOK := docsCmdAnyHasFlag(slotSubs, part)
+			if !docsCmdGenericSlot(subPh) {
+				slotOK = docsCmdAllHaveFlag(slotSubs, part)
+			}
+			if (anySub && slotSubs == nil && docsCmdSubHasFlag(cur, part)) || slotOK {
 				continue
 			}
 			shown := tok
@@ -1177,6 +1197,32 @@ func docsCmdAnyHasFlag(cmds []*cobra.Command, tok string) bool {
 		}
 	}
 	return false
+}
+
+// docsCmdGenericSlot reports whether the placeholder ph stands for any child (<group>, <command>,
+// <subcommand>, <cmd>) rather than naming its alternatives (<role|roster>).
+func docsCmdGenericSlot(ph string) bool {
+	for _, p := range strings.FieldsFunc(strings.ToLower(ph), func(r rune) bool { return r < 'a' || r > 'z' }) {
+		switch p {
+		case "group", "command", "subcommand", "cmd":
+			return true
+		}
+	}
+	return false
+}
+
+// docsCmdAllHaveFlag reports whether every one of cmds has the flag tok names, as docsCmdAnyHasFlag
+// counts it; none for an empty list.
+func docsCmdAllHaveFlag(cmds []*cobra.Command, tok string) bool {
+	if len(cmds) == 0 {
+		return false
+	}
+	for _, s := range cmds {
+		if !docsCmdAnyHasFlag([]*cobra.Command{s}, tok) {
+			return false
+		}
+	}
+	return true
 }
 
 // docsCmdRefusesWord reports whether c refuses word: it is the root (cobra's legacyArgs refuses any
@@ -1620,8 +1666,10 @@ func docsCmdInline(page string, startLine int, lines []string) []docsCmdLine {
 	return out
 }
 
-// docsCmdPages are the pages that describe the council commands, relative to the repository root.
+// docsCmdPages are the pages, and the kit's council guide, that describe the council commands,
+// relative to the repository root.
 var docsCmdPages = []string{
+	"agentkit/skills/teknoir-council/SKILL.md",
 	"docs/bot-mode.md",
 	"docs/commands/agent.md",
 	"docs/commands/chat.md",
@@ -2095,8 +2143,21 @@ func TestDocsCouncilParser(t *testing.T) {
 			name: "completion at the root",
 			page: bash("tnctl completion bash --no-descriptions\n" +
 				"tnctl completion bash --nope\n" +
-				"tnctl -n x completion bash\n" +
-				"tnctl help council --nope"),
+				"tnctl -n x completion bash"),
+		},
+		{
+			name: "the path after help",
+			page: bash("tnctl help council role list\n" +
+				"tnctl help council rolee list\n" +
+				"tnctl help council --nope\n" +
+				"tnctl help council …\n" +
+				"tnctl help -n x council role list\n" +
+				"tnctl help council role list --templates"),
+			want: []string{
+				`case.md:3: tnctl council: unknown subcommand "rolee"`,
+				`case.md:4: tnctl council: unknown flag "--nope"`,
+				`case.md:7: tnctl help: unknown flag "--templates"`,
+			},
 		},
 		{
 			name: "a flag before help at the root",
@@ -3295,6 +3356,15 @@ func TestDocsCouncilParser(t *testing.T) {
 			name: "a group placeholder before a subcommand its groups share",
 			page: bash("tnctl council <group> apply -f <file>\ntnctl council <role|roster> apply -f <file|->\n" +
 				"tnctl council <role or roster> apply -f <file>\ntnctl council <command> apply -f council.yaml"),
+		},
+		{
+			name: "a slot that names its alternatives",
+			page: bash("tnctl council <role|roster> list --bot scout\n" +
+				"tnctl council <role|roster> list --bot scout --templates\n" +
+				"tnctl council <group> list --bot scout --templates"),
+			want: []string{
+				`case.md:3: tnctl council: unknown flag "--templates"`,
+			},
 		},
 		{
 			name: "a name placeholder before a subcommand its groups share",

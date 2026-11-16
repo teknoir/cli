@@ -20,9 +20,11 @@ The platform ships three premade councils, which every bot's chats can ask. They
 The budget column is the council's own budget; `roster get` prints `no council cap` for a council whose file has none,
 and its turns then keep only the turn caps of [Budgets and deadlines](council.md#budgets-and-deadlines).
 
-On a bot whose computer runs an older tnctl, only the Standard council of the three can answer: `roster list` shows ops
-and review as `unavailable`, and the platform refuses a turn on them with `This bot's computer runs an older council
-(tnctl <ver>) that knows only the Standard council. Use the Standard council until its computer is updated.`
+On a bot whose computer runs an older tnctl, only a council with the Standard council's premade lead, members and
+reviewer and no budget can answer: Standard, or one of the bot's own made the same way
+([`council`](council.md#what-it-does)). `roster list` shows the others, ops and review included, as `unavailable`,
+and the platform refuses a turn on them with `This bot's computer runs an older council (tnctl <ver>) that knows
+only the Standard council. Use the Standard council until its computer is updated.`
 
 Every other council a bot's chats can ask is one of the bot's own: `tnctl council apply` writes one from a council file,
 and `roster add` or `roster remove` with `--as` saves a copy of a council, premade or one of the bot's own, as a new
@@ -53,7 +55,8 @@ its `NAME`, `DISPLAY NAME`, `SCOPE`, `LEAD`, `MEMBERS` and `REVIEWER`, the `DEFA
 chat asks) and `STATUS`: `ok`, `unavailable` or `not checked` (the bot's computer has not yet told the platform which
 tools it offers). In the table, the reason a council is unavailable follows on stderr, one line per council, and the
 exit code stays 0. `--json` prints the councils as the platform sent them, as JSON, and none of the lines on stderr:
-each council's reasons are in its `reasons` field.
+each council's reasons are in its `reasons` field. The global `-o` is ignored here: `--json` is this command's
+machine-readable form.
 
 Every council a bot has:
 
@@ -411,7 +414,9 @@ Error: Only anna@example.com can open this computer: its council acts as them.
 ## `roster add` and `roster remove`
 
 Add a member to a council, after its members, or take one out. A council keeps at least one member, and the platform
-checks the changed council. `-o json|yaml` prints the council as the platform answers, on stdout; the line that says a
+checks the changed council. When it saves a council that cannot answer, stderr adds
+`· council <name> — unavailable: <reasons>`, as `roster use` does. `-o json|yaml` prints the council as the platform
+answers, on stdout; the line that says a
 copy became the bot's default then goes to stderr. `<member>` is the member's slug, such as `cost-watcher`; when more
 than one member has that slug, name its scope too: `<scope>/<slug>`, or the slug with
 `--scope bot|teamspace|template`. `tnctl council role list --bot <bot> --templates` lists the members a bot can use,
@@ -427,7 +432,9 @@ print do not add up from one sample to the next.
 
 A premade council cannot be changed: `--as <new-name>` saves a copy with the change, and when the premade council was the
 bot's default, the copy becomes the default. On one of the bot's own councils, `--as` saves a copy and leaves the council
-as it was.
+as it was. When the platform saves the copy but refuses to make it the default, the command exits with that refusal's
+code, and stderr adds after the refusal: `council <new-name> was saved, but it is not the default: tnctl council
+roster use <new-name> --bot <bot> makes it the default`.
 
 A premade council that was the default, copied with a new member: the copy becomes the default too:
 
@@ -731,7 +738,8 @@ Nothing goes to stderr.
 Delete one of a bot's own councils. The chats that asked the deleted council ask the bot's default council from then
 on. tnctl asks nothing: to keep a copy, save it first with
 `tnctl council roster get <name> --bot <bot> -o yaml > <name>.yaml`, and `tnctl council apply -f <name>.yaml` makes it
-again.
+again. Someone who may see the bot but may not change its council is refused before the default and premade checks
+below (`council_edit_not_allowed`, exit 6; [Who may](#who-may)).
 
 ops-scout can be deleted once another council is scout's default (here after
 `tnctl council roster use ops --bot scout`):
@@ -805,9 +813,10 @@ platform's reason why you may not drive the bot, for example at Act as me:
 
 Inside a TeknoirBot, tnctl refuses every `tnctl council roster …` before any request, exit 6, with
 `"tnctl council roster list" is not available to a TeknoirBot: only a person reads and changes a bot's council.` The
-quoted command is the command's path, without its arguments and flags. Their `--help` still prints, and a mistyped
-subcommand, a missing or extra argument or an unknown flag is a usage error first (exit 2;
-[Bot mode](../bot-mode.md)).
+quoted command is the command's path, without its arguments and flags. Their `--help` still prints. A mistyped
+subcommand, a missing or extra argument, an unknown flag or a flag value of the wrong type is a usage error first
+(exit 2); other wrong flags, such as `roster list` without `--bot`, get the exit-6 refusal
+([Bot mode](../bot-mode.md)).
 
 ## Exit codes
 
@@ -818,7 +827,7 @@ subcommand, a missing or extra argument or an unknown flag is a usage error firs
 | 2 | Wrong arguments: an unknown council or member, a member that is not in the council, a slug more than one member has, a premade council without `--as`, an `--as` name that is taken, or a missing `--bot`. |
 | 3 | No bot of that name, or a bot outside your organisation units (the platform answers as if it did not exist). |
 | 5 | `roster delete`: the platform refused it, `roster_default` (the council is the bot's default) or `template_read_only` (it is a premade council); `roster add` or `roster remove`: the platform refused the changed council. |
-| 6 | Not allowed: a change refused with `council_edit_not_allowed`; `roster get <name> -o yaml` of one of the bot's own councils by someone who may not chat with the bot (`chat_not_allowed`); and, inside a TeknoirBot, every `tnctl council roster …` whose arguments and flags are valid (a malformed one is exit 2; `--help` prints, exit 0). |
+| 6 | Not allowed: a change refused with `council_edit_not_allowed`; `roster get <name> -o yaml` of one of the bot's own councils by someone who may not chat with the bot (`chat_not_allowed`); a `roster` command by someone without a device role in the teamspace; and, inside a TeknoirBot, every `tnctl council roster …` (`--help` prints, exit 0; a mistyped subcommand, a missing or extra argument, an unknown flag or a flag value of the wrong type is exit 2 first; other wrong flags, such as `roster list` without `--bot`, are refused too). |
 | 8 | `roster add` or `roster remove`: someone changed the council meanwhile; run it again. |
 
 ## See also

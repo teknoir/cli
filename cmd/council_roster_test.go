@@ -2551,8 +2551,9 @@ func TestCouncilRosterHelp(t *testing.T) {
 				"  tnctl council roster get ops-scout --bot scout -o yaml > ops-scout.yaml"},
 		{"use", "use <name> --bot <bot>", "Make a council the bot's default: the one a new chat asks",
 			"Make a council the bot's default. A new chat asks the default council unless it names another\n" +
-				"(tnctl chat --roster). Only the bot's creator or a teamspace admin may change it (exit 6\n" +
-				"otherwise). -o json|yaml prints the bot's council as the platform answers.",
+				"(tnctl chat --roster). Only the bot's creator or a teamspace admin, among those who may chat with\n" +
+				"the bot, may change it (exit 6 otherwise). -o json|yaml prints the bot's council as the platform\n" +
+				"answers.",
 			"  tnctl council roster use ops --bot scout"},
 		{"add", "add <name> <member> --bot <bot>", "Add a member to a council",
 			"Add a member to one of a bot's councils, after its members. <member> is a slug such as triage, or\n" +

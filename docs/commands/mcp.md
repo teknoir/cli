@@ -77,8 +77,8 @@ council with these tools.
 
 | Tool | Inputs | Returns |
 | --- | --- | --- |
-| `council_info` | `bot`, `namespace` | Whether you may chat with the bot and, when you may not, why: the platform's `canChat` and `reason`, the bot (`access`, `phase`, `online`, `lastSeen`, and `council`: the `tnctl/<version>` its computer last reported, or null), `isCreator`, the `members` (each with its `name`, `model`, `effort` and `job`) and today's `budget` (`tokensToday`, `tokensPerDay`); the answer's own `council`, beside `bot` (missing from an older platform), carries `proto`, `tnctl`, `kit`, `capsError`, `defaultRoster`, `canEdit`, `roster` (the default council with its members) and `rosters` (every council by name, for `council_run`'s `roster`). Call it before `council_ask` or `council_run`. |
-| `council_roles` | `bot` (optional), `namespace` | With `bot`: `{available, catalog}`, where `available` lists every member the bot may ask or put in a council — the bot's own first, then the teamspace's, then the premade ones — each with its `slug`, `scope`, `kind`, `model`, `effort`, `groups` and `status`, and `catalog` is the tool groups, skills and limits. Without `bot`: the teamspace's catalog. Only a member whose kind is `member` can be asked (a lead or a reviewer only leads or checks a council). Read-only. |
+| `council_info` | `bot`, `namespace` | Whether you may chat with the bot and, when you may not, why: the platform's `canChat` and `reason`, the bot (`access`, `phase`, `online`, `lastSeen`, and `council`: the `tnctl/<version>` its computer last reported, or null), `isCreator`, the default council's `members` (its lead, its members and its reviewer, in that order, each with its `id`, which is its slug, `name`, `model`, `effort` and `job`, and for the coder `runtime` `OpenCode`) and today's `budget` (`tokensToday`, `tokensPerDay`); the answer's own `council`, beside `bot` (missing from an older platform), carries `proto`, `tnctl`, `kit`, `capsError`, `defaultRoster`, `canEdit`, `roster` (the default council with its members) and `rosters` (every council by name, for `council_run`'s `roster`). Call it before `council_ask` or `council_run`. |
+| `council_roles` | `bot` (optional), `namespace` | With `bot`: `{available, catalog}`, where `available` lists every member the bot may ask or put in a council — the bot's own first, then the teamspace's, then the premade ones — each with its `slug`, `scope`, `kind`, `model`, `effort`, `groups` and `status`, and `catalog` is the tool groups, skills and limits. Without `bot`: the teamspace's catalog, which also carries the premade members and councils (`templates`) and the teamspace's shared members (`roles`). Only a member whose kind is `member` can be asked (a lead or a reviewer only leads or checks a council). Read-only. |
 | `council_ask` | `bot`, `member`, `task`, `effort`, `wait_seconds`, `namespace` | One member's turn: `untrusted`, `turnId`, `threadId`, `member`, `state` and, once it ends, `report`, `final`, `usage` and `error`; `next` while it still runs. `member` is its slug, such as `fleet` or `coder`, or `<scope>/<slug>` (scope `bot`, `teamspace` or `template`) when two members share a slug; `council_info` lists the default council's members (`council.roster.members`), `council_roles` every member the bot may ask (those with kind `member`). A lead's or a reviewer's slug is refused by the platform with `The Captain leads every turn: ask without @.`, with the name of the lead of the bot's default council in place of Captain. A member other than the coder reports in Fleet's shape: `summary`, `findings` (`claim`, `evidence`), `proposals` (`what`, `why`), `confidence` and `open_questions`; the coder in its OpenCode task's shape: `state`, `reason`, `text`, `error`, `changed`, `sessionId`, `steps`, `tools`, `usage`, `durationMs`. |
 | `council_run` | `bot`, `question`, `roster`, `mode` (`auto`, `quick` or `council`), `thorough`, `effort`, `wait_seconds`, `namespace` | A whole council turn: `untrusted`, `turnId`, `threadId`, `state` and, once it ends, `answer` (the lead's markdown), `members` (each with `member`; `name`, missing from an older bot; `task`, the task's number in the turn; and `summary`: for a member other than `coder` its report's `summary`, for `coder` the start of its answer, or its error when it has none, with its state when its task did not finish), `critique` (the reviewer's, when the council has one and the turn needed it: `issues` of `member`, `severity`, `claim`, `why`, and `note`), `usage` and `error`; `next` while it still runs. `roster` takes a council's `name` (not its `displayName`) from `council_info`'s `council.rosters`; empty is the bot's default council. `thorough: true` asks for the most careful answer: the same as `mode` `council`, and the platform records the question as thorough; it is refused with `mode` `auto` or `quick`. |
 | `council_result` | `bot`, `turn_id`, `wait_seconds`, `namespace` | That turn again, in the shape of the tool that started it: its `state`, and its result once it ended. A turn this session did not start (an earlier session's, or the web chat's, found in the bot's chats) is taken from the chat's record, and its events are followed only from there: one that had already ended has an ask turn's `final` without its `report`, and none of a council turn's `members` or `critique`. |
@@ -102,9 +102,11 @@ How they behave:
   stream for up to `wait_seconds`: 45 when the call gives none and 55 at most, which stays below the tool
   timeout most MCP clients use. With `wait_seconds` 0, `council_ask` and `council_run` return as soon as the
   turn is queued. A turn still `queued` or `running` comes back with `next` and no result, and
-  `council_result` with its `turnId` as `turn_id` waits for it again. `council_result` with `wait_seconds` 0
-  does not wait for the turn to end: for a turn this MCP session remembers and that has not ended, it reads
-  the chat once and answers the turn's state as that read shows it; when the read shows that the turn has
+  `council_result` with its `turnId` as `turn_id` (and the same `namespace`) waits for it again.
+  `council_result` with `wait_seconds` 0 does not wait for the turn to end: for a turn this MCP session
+  remembers and that has not ended, it reads the chat once and answers the turn's state as that read shows it,
+  unless this session already saw the turn further on (`running` stays `running` against a record that still
+  says `queued`) or the read fails (the state this session last saw stands); when the read shows that the turn has
   ended, it follows the turn's events for up to 10 s so that the result has the `report`, or the `members`
   and the `critique`, and when they do not arrive, the chat's own state and final answer stand. A turn it
   finds in the chats instead (one this session did not start) is read once, by that search.
@@ -170,12 +172,13 @@ How they behave:
   at most two turns at a time; a third waits queued. So with `wait_seconds` 0, keep at most three turns open
   per bot.
 - **A conversation that went away.** A wait (in `council_ask`, `council_run` or `council_result`), or a
-  `council_result` with `wait_seconds` 0 that reads the turn, whose chat was deleted meanwhile answers
-  `The conversation was deleted.`, and tnctl forgets that chat and the turns
-  of it that had not ended: the next `council_ask` or `council_run` for that conversation starts a new chat.
-  A `council_result` for a turn it finds neither in this session's conversations nor in the bot's 10 newest
-  chats, such as one tnctl forgot with its deleted chat, answers `No turn <id> on bot <bot> that you can
-  see.` An ended login gives tnctl's own login error, and the platform's `access_lost` gives its sentence.
+  `council_result` with `wait_seconds` 0 that reads the turn, whose chat was deleted meanwhile, or whose bot is
+  gone, answers `The conversation was deleted.`, and tnctl forgets that chat and the turns of it that it had not
+  seen end: the next `council_ask` or `council_run` for that conversation starts a new chat. The platform deletes
+  a chat only once its turns have ended, so such a turn may have done its work: check before you send a change
+  again. A `council_result` for a turn it finds neither in this session's conversations nor in the bot's 10 most
+  recently changed chats, such as one tnctl forgot with its deleted chat, answers `No turn <id> on bot <bot> that
+  you can see.` An ended login gives tnctl's own login error, and the platform's `access_lost` gives its sentence.
   Each of them ends the call at once, without waiting further.
 - **The stream cap.** A wait holds one of the person's four event streams, which the web chat uses too.
   When the platform refuses one (`429`), the wait reads the thread every 3 s instead, until the turn ends or

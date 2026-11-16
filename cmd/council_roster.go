@@ -454,8 +454,9 @@ func newCouncilRosterUseCmd(e *cliEnv) *cobra.Command {
 		Use:   "use <name> --bot <bot>",
 		Short: "Make a council the bot's default: the one a new chat asks",
 		Long: `Make a council the bot's default. A new chat asks the default council unless it names another
-(tnctl chat --roster). Only the bot's creator or a teamspace admin may change it (exit 6
-otherwise). -o json|yaml prints the bot's council as the platform answers.`,
+(tnctl chat --roster). Only the bot's creator or a teamspace admin, among those who may chat with
+the bot, may change it (exit 6 otherwise). -o json|yaml prints the bot's council as the platform
+answers.`,
 		Example:      "  tnctl council roster use ops --bot scout",
 		SilenceUsage: true,
 		Args:         argsRange(1, 1, "council roster use needs one council's name, for example: tnctl council roster use ops --bot scout"),

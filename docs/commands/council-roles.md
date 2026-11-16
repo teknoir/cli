@@ -35,7 +35,7 @@ of your own that starts from one, use `tnctl council role new` with `--from <pre
 
 The *What it does* column is the member's description, the sentence the lead reads about it, so "you" there is the
 lead. The part of a member is its `kind`. The **access ceiling** is the most it may be given on any bot: `creator` acts
-with the bot's full access (Act as me), `read` reads, and `none` gets no data tool at all.
+with the bot's full access (Act as me), `read` reads, and `none` gets at most `whoami`, when it holds `core_read`.
 
 ## The tool groups
 
@@ -69,7 +69,7 @@ a shared or premade member read without `--bot` — none of it is known, and `ro
 tnctl council role list [--bot <bot>] [--templates] [--json]
 tnctl council role get <member> [--bot <bot>] [--template] [-o json | -o yaml [--version <n>]]
 tnctl council role export <member> [--bot <bot>] [--template] [--version <n>]
-tnctl council role new <name> --job <text> [--bot <bot> | --teamspace] [--from <premade>] [--how <text> | --how-file <file|->] [--dry-run] [--yes]
+tnctl council role new <name> --job <text> (--bot <bot> | --teamspace) [--from <premade>] [--how <text> | --how-file <file|->] [--dry-run] [--yes]
 tnctl council role archive <member> [--bot <bot>]
 tnctl council apply -f <file|-> [--dry-run] [--yes]
 ```
@@ -162,7 +162,8 @@ cost-watcher  Cost watcher  teamspace  member  haiku  medium  core_read,metrics,
 
 Nothing goes to stderr.
 
-A bot of another teamspace, with no members of its own and none shared there:
+A bot of another teamspace, with no members of its own and none shared there. `--bot` names a bot of the teamspace
+`tnctl` targets (`-n`, or the domain's stored namespace), so here that teamspace is the other one:
 
 ```bash
 tnctl council role list --bot arm-2
@@ -314,6 +315,11 @@ get <member> -o yaml`: save it, edit it, and `tnctl council apply` it. `--versio
 `--template` reads the premade member. `-o json` is a usage error here (exit 2): `council role export prints YAML; use
 council role get -o json`.
 
+A premade member's export cannot be applied as it is. To clone it, give it a new `metadata.name`, set
+`spec.scope: bot` and `spec.bot: <bot>` (or `spec.scope: teamspace`), and remove `spec.version` and `spec.runtime`.
+A lead or reviewer clone also needs `spec.templateRef` naming the premade one, and it keeps that one's access
+ceiling and category. A `spec.templateRef` that names `coder` is refused: the Coder cannot be cloned.
+
 A bot's own member:
 
 ```bash
@@ -373,7 +379,7 @@ start from, takes that member's model, tools (without `inspect`) and skills, and
 the premade member's otherwise. tnctl prints the draft, then saves it.
 
 ```bash
-tnctl council role new <name> --job <text> [--bot <bot> | --teamspace] [--from <premade>] [--how <text> | --how-file <file|->] [--dry-run] [--yes]
+tnctl council role new <name> --job <text> (--bot <bot> | --teamspace) [--from <premade>] [--how <text> | --how-file <file|->] [--dry-run] [--yes]
 ```
 
 - `--job` is required: one sentence on what the member does.
@@ -392,6 +398,12 @@ tnctl council role new <name> --job <text> [--bot <bot> | --teamspace] [--from <
   which is not a council file and cannot be applied as it is. The lines on stderr print either way.
 - `--yes` confirms what the platform asks to confirm; a new member never asks, so it has no effect today, and it is
   kept for symmetry with `council apply`.
+- The platform may warn about its draft. Each warning goes to stderr after the draft and before the save or the dry
+  run, as `warning: <path>: <message>`: `job` for a job that starts with the word I, You, My or We (`write the job
+  in the third person ("finds the stuck topic"), not as a question to the member`), `spec.effort` for an effort it
+  lowered to the most it allows, and `spec.model` for a model it does not offer. A warning does not stop the save,
+  except `warning: spec.model: The platform offers no model for this member yet.`: the save is then refused, exit 5,
+  with `spec.model: the platform does not offer <model>`.
 
 A member made this way has no persona (the phrase its prompt introduces it with, such as Fleet's `the fact finder`),
 and its description is derived from its job.
@@ -466,21 +478,25 @@ Error: how: instructions are at most 4000 characters
 
 Archive a member that a bot or the teamspace made: councils can no longer use it. A member that a council still
 names is refused (`role_in_use`, exit 5): the refusal, on stderr, lists the councils that name it (those of bots you
-may see, then how many more you cannot see) and, when it can, a `for example:` remove that takes it out of the
-first of them, as the first sample below shows. Archive in this order: first take it out of every council that names
-it, then archive it. As a member it comes out with [`tnctl council roster remove`](council-roster.md#roster-remove);
-as a reviewer, in the web chat's Council tab or in YAML (`tnctl council apply`); as a lead, in YAML (`tnctl council
-apply`) for now. An archived member is still printed by `tnctl council role export`, and applying that YAML brings it
-back; the command prints that undo itself.
+may see, then how many more you cannot see) and, when it can, a `for example:` remove for the first of them, as the
+first sample below shows. That remove takes it out where it is a member; where it is the lead or the reviewer, the
+remove is refused, exit 2, and says where to change it. Archive in this order: first take it out of every council
+that names it, then archive it. As a member it comes out with
+[`tnctl council roster remove`](council-roster.md#roster-remove); as a reviewer, in the web chat's Council tab or
+in YAML (`tnctl council apply`); as a lead, in YAML (`tnctl council apply`) for now. An archived member is still
+printed by `tnctl council role export`, and applying that YAML brings it back; the command prints that undo itself.
 
 `<member>` is a slug such as `stream-watcher`, or `<scope>/<slug>` (scope `bot` or `teamspace`). With `--bot` it
 archives that bot's own member; without it, the teamspace's shared member, which needs a teamspace admin (`not_admin`,
 `Only teamspace admins can change shared members.`). `-o json|yaml` prints the archived member as the platform
-answers it.
+answers it. A scope that does not fit `--bot` is refused by tnctl before any request, exit 2: `bot/<slug>` without
+`--bot` (`a bot's own member needs --bot <bot>`), and `teamspace/<slug>` with `--bot`
+(`teamspace/<slug> is a shared member: leave out --bot to archive it`).
 
 Premade members cannot be archived: `tnctl council role archive template/<slug>` is refused by tnctl before any
-request, exit 2, with `premade members cannot be archived: they are read-only`; a premade slug given without its
-scope is refused by the platform with `template_read_only`, exit 5.
+request, exit 2, with `premade members cannot be archived: they are read-only`. A premade slug given without its
+scope is refused by the platform with `template_read_only`, exit 5, once you may archive there; someone who may not
+gets that refusal first (`council_edit_not_allowed` or `not_admin`, exit 6; see [Who may](#who-may)).
 
 A council still names the member:
 
@@ -537,7 +553,10 @@ answer instead of the table.
 
 The table has one row per document: `DOC`, `KIND`, `NAME`, `SCOPE`, `BOT`, `ACTION` and `VERSION`.
 
-`stream-watcher.yaml` is the export above, saved to a file: a member that is already there.
+`stream-watcher.yaml` is the export above, saved to a file: a member that is already there. anna@example.com, who
+saved it last, runs the commands below. The platform reports a member as `unchanged` only to the person who saved it
+last; for anyone else the same file saves version 2 under their name, so the dry run and the apply show `updated`
+and `2`.
 
 ```yaml
 apiVersion: council.teknoir.org/v1alpha1
@@ -677,9 +696,13 @@ DOC  KIND         NAME         SCOPE  BOT    ACTION   VERSION
 | --- | --- | --- |
 | List the members, and read a shared or premade member (`role list`, `role get`, `role export`) | Any device role: viewer, developer or admin. With `--bot`, the bot must be in your organisation units. | Exit 3 when the bot is outside your organisation units (the platform answers as if the bot did not exist); exit 6 without a device role. |
 | Read a bot's own member's instructions (`role get --bot`), and export a bot's own member (`role export --bot`, or `role get --bot -o yaml`) | Whoever may chat with the bot. | An export (`role export`, `role get -o yaml`): `chat_not_allowed`, exit 6. `role get` with any other output is not refused: it shows the member without its instructions. |
+| Draft a member without saving it (`role new --dry-run`) | Any device role: viewer, developer or admin. With `--bot`, the bot must be in your organisation units. | Exit 3 when the bot is outside your organisation units (the platform answers as if the bot did not exist); exit 6 without a device role. |
 | Make or archive a bot's own member (`role new --bot`, `role archive --bot`) | The bot's creator or a teamspace admin, among those who may chat with the bot. | `council_edit_not_allowed`, exit 6 |
 | Make or archive a shared member (`role new --teamspace`, `role archive`) | A teamspace admin. | `not_admin`, exit 6: `Only teamspace admins can change shared members.` |
-| Change a premade member | Nobody: premade members are read-only for everyone. | `role archive template/<slug>`: refused by tnctl before any request, exit 2, `premade members cannot be archived: they are read-only`; otherwise `template_read_only`, exit 5: `Premade members and councils are read-only: give it a new name to clone it.` |
+| Change a premade member | Nobody: premade members are read-only for everyone. | `role archive template/<slug>`: refused by tnctl before any request, exit 2, `premade members cannot be archived: they are read-only`; otherwise `template_read_only`, exit 5 (`role archive <slug>` gets it only once you may archive there, see the two rows above): `Premade members and councils are read-only: give it a new name to clone it.` |
+
+`role new` without `--dry-run` drafts before it saves, so a refused save still prints the draft lines on stdout
+(with `-o json|yaml`, nothing) before the refusal on stderr.
 
 A `council_edit_not_allowed` refusal carries the platform's reason why you may not drive the bot, for example at Act
 as me: `Only anna@example.com can open this computer: its council acts as them.`
@@ -692,9 +715,10 @@ refused document means nothing is applied.
 Inside a TeknoirBot, tnctl refuses every `tnctl council role …` and `tnctl council apply` before any request, exit 6,
 with `"tnctl council role list" is not available to a TeknoirBot: only a person reads and changes a bot's council.`
 The quoted command is the command's path, without its arguments and flags: `tnctl council role get captain --bot
-scout` gives `"tnctl council role get" is not available to a TeknoirBot: …`. Their `--help` still prints, and a
-mistyped subcommand, a missing or extra argument or an unknown flag is a usage error first (exit 2;
-[Bot mode](../bot-mode.md)).
+scout` gives `"tnctl council role get" is not available to a TeknoirBot: …`. Their `--help` still prints. A
+mistyped subcommand, a missing or extra argument, an unknown flag or a flag value of the wrong type (`--version abc`)
+is a usage error first (exit 2); other wrong flags, such as `role new` without `--job` or `apply` without `-f`, get
+the exit-6 refusal ([Bot mode](../bot-mode.md)).
 
 ## Exit codes
 
@@ -702,10 +726,10 @@ mistyped subcommand, a missing or extra argument or an unknown flag is a usage e
 | --- | --- |
 | 0 | Done. A member was listed, read, exported, made, archived or applied; or nothing needed to change. |
 | 1 | `council apply` was not confirmed (`not confirmed: nothing was written`), or the platform still asked to confirm after `--yes`. |
-| 2 | Wrong arguments or flags, for example `role list` with an argument, `role get bot/<slug>` without `--bot`, `--version` without `-o yaml`, `role new` without `--job` or without exactly one of `--bot` and `--teamspace`, or `role archive template/<slug>`; a council file that names an unknown member, or an ambiguous one without a scope; a confirmation tnctl cannot ask for. |
-| 3 | Not found: `role get nosuch`; with `council apply`, a bot the file names. |
+| 2 | Wrong arguments or flags, for example `role list` with an argument, `role get bot/<slug>` without `--bot`, `--version` without `-o yaml`, `role new` without `--job` or without exactly one of `--bot` and `--teamspace`, or `role archive template/<slug>`, `role archive bot/<slug>` without `--bot` or `role archive teamspace/<slug>` with `--bot`; a council file that names an unknown member, or an ambiguous one without a scope; a confirmation tnctl cannot ask for. |
+| 3 | Not found, for example a member, a version or a bot that is not there, or a bot outside your organisation units: `role get nosuch`, `role export <member> --version <n>` of a version it does not have, `role archive` of a member that is not there or is archived already; with `council apply`, a bot the file names. A `role archive` without a `bot/` or `teamspace/` scope adds a line on what was perhaps meant: `--bot`, or `teamspace/<slug>`. |
 | 5 | Refused, for example by tnctl before any request, in the platform's words (`how: instructions are at most 4000 characters`, `The file is larger than 64 KiB.`), or by the platform (`role_in_use` on archive, `template_read_only`, a refused file). |
-| 6 | Not allowed: `council_edit_not_allowed`, `not_admin`, `chat_not_allowed`, and, inside a TeknoirBot, every `council role` command and `council apply` whose arguments and flags are valid (a malformed one is exit 2; `--help` prints, exit 0). |
+| 6 | Not allowed: `council_edit_not_allowed`, `not_admin`, `chat_not_allowed`, and, inside a TeknoirBot, every `council role` command and `council apply` (`--help` prints, exit 0; a mistyped subcommand, a missing or extra argument, an unknown flag or a flag value of the wrong type such as `--version abc` is exit 2 first; other wrong flags, such as `role new` without `--job`, are refused too). |
 | 8 | Changed meanwhile: run it again (`council apply`; `role new` when its slug was taken meanwhile). |
 
 ## See also

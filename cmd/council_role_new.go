@@ -28,7 +28,7 @@ type councilRoleNewFlags struct {
 func newCouncilRoleNewCmd(e *cliEnv) *cobra.Command {
 	var f councilRoleNewFlags
 	c := &cobra.Command{
-		Use:   "new <name>",
+		Use:   "new <name> --job <text> (--bot <bot> | --teamspace)",
 		Short: "Make a member from a name and its job in words",
 		Long: `Make a member from a name and its job in words. The platform drafts it: it picks a free slug
 and the premade member to start from (--from names one), takes that member's model, tools and
@@ -254,9 +254,10 @@ func newCouncilRoleArchiveCmd(e *cliEnv) *cobra.Command {
 		Use:   "archive <member>",
 		Short: "Archive a member: councils can no longer use it",
 		Long: `Archive a member that a bot or the teamspace made: councils can no longer use it. A member that
-a council still names is refused: remove it from those councils first (tnctl council roster
-remove). tnctl council role export still prints an archived member, and applying that YAML brings
-it back.
+a council still names is refused: take it out of those councils first (tnctl council roster
+remove for a member; a lead or a reviewer is changed in YAML with tnctl council apply, a reviewer
+also in the web chat's Council tab). tnctl council role export still prints an archived member,
+and applying that YAML brings it back.
 
 <member> is a slug such as triage, or <scope>/<slug> (scope bot or teamspace). With --bot it
 archives that bot's own member; without it, the teamspace's shared member (teamspace admins
