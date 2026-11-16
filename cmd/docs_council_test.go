@@ -895,6 +895,9 @@ func docsCmdWalk(root *cobra.Command, c docsCmdLine, toks []string) []string {
 	var pos []string // the positional arguments the line gives, for the too-many check
 	concrete := true // the count is exact: no spaced | alternative, and every placeholder is a quoted word or a one-word <name> outside the subcommand slot
 	outVal := ""     // the value the line gives the root's -o/--output flag, "" when none
+	// slotSubs are the commands a slot placeholder and the word after it may name (council
+	// <role|roster> apply is council role apply or council roster apply): the line's flags are theirs.
+	var slotSubs []*cobra.Command
 	// unknownSub is the message for a word cur refuses: a subcommand tnctl does not have, or a
 	// positional argument on a command that takes none.
 	unknownSub := func(word string) string {
@@ -966,16 +969,22 @@ loop:
 		case !walking:
 			// A plain word after the walk left the tree is a positional argument of the command it
 			// ended on, counted for the too-many check.
-			// cobra's help and completion of the root are skipped, as in the default branch: cobra adds
-			// them only when a command runs, so the line must mean the same before and after a run. A
-			// placeholder that may stand for a child with that subcommand is that child's command
-			// (council <group> apply is council role apply).
-			if anySub && !badSub && docsCmdWordPlaceholder(subPh) && docsCmdSub(cur, tok) != nil &&
-				!docsCmdCobraOwn(cur, tok) && !docsCmdSlotMayNameChild(cur, subPh, tok) {
-				// A word placeholder fills the subcommand slot, so the real subcommand after it is only
-				// a positional argument, and the group refuses it (council roster <name> add).
-				badSub = true
-				msgs = append(msgs, fmt.Sprintf("%s:%d: %s: a placeholder before the subcommand %q", c.page, c.line, cur.CommandPath(), tok))
+			// cobra's help and completion are subcommands of the root here whether or not a run has added
+			// them yet: tnctl always has them, and the line must mean the same before and after a run
+			// (tnctl <command> help is tnctl help <command> written the wrong way round). A placeholder
+			// that may stand for a child with that subcommand is that child's command (council <group>
+			// apply is council role apply), and the line's flags are checked against those commands.
+			if anySub && !badSub && docsCmdWordPlaceholder(subPh) && (docsCmdSub(cur, tok) != nil || docsCmdCobraOwn(cur, tok)) {
+				if subs := docsCmdSlotSubs(cur, subPh, tok); len(subs) > 0 {
+					if slotSubs == nil {
+						slotSubs = subs
+					}
+				} else {
+					// A word placeholder fills the subcommand slot, so the real subcommand after it is only
+					// a positional argument, and the group refuses it (council roster <name> add).
+					badSub = true
+					msgs = append(msgs, fmt.Sprintf("%s:%d: %s: a placeholder before the subcommand %q", c.page, c.line, cur.CommandPath(), tok))
+				}
 			}
 			pos = append(pos, tok)
 			flagToks = append(flagToks, docsCmdDashParts(tok)...)
@@ -1055,7 +1064,7 @@ loop:
 			if !docsCmdTypoDash(part) && (docsCmdFlagExists(cur, part) || docsCmdNotAFlag(part)) {
 				continue
 			}
-			if anySub && docsCmdSubHasFlag(cur, part) {
+			if (anySub && slotSubs == nil && docsCmdSubHasFlag(cur, part)) || docsCmdAnyHasFlag(slotSubs, part) {
 				continue
 			}
 			shown := tok
@@ -1118,32 +1127,52 @@ func docsCmdWordPlaceholder(tok string) bool {
 	return !strings.Contains(l, "flag") && !strings.Contains(l, "option") && !strings.HasPrefix(l, "<-")
 }
 
-// docsCmdChildHasSub reports whether a child of c has a subcommand named word.
-func docsCmdChildHasSub(c *cobra.Command, word string) bool {
-	for _, child := range c.Commands() {
-		if docsCmdSub(child, word) != nil {
-			return true
-		}
-	}
-	return false
-}
-
-// docsCmdSlotMayNameChild reports whether the placeholder ph in c's subcommand slot may stand for a
-// child of c that has a subcommand named word: ph names such a child (<role|roster>, <role or
-// roster>) or is a generic slot (<group>, <command>, <subcommand>, <cmd>). Then the line is that
-// child's command (council <group> apply is council role apply); a <name> or a quoted word is no such
-// slot.
-func docsCmdSlotMayNameChild(c *cobra.Command, ph, word string) bool {
+// docsCmdSlotSubs returns the commands named word under the children of c that the placeholder ph in
+// c's subcommand slot may stand for: the children ph names (<role|roster>, <role or roster>), or every
+// child for a generic slot (<group>, <command>, <subcommand>, <cmd>). Then the line is one of those
+// commands (council <group> apply is council role apply), and its flags are theirs. A <name> or a
+// quoted word stands for none, and cobra's own help and completion are never such a child, so the
+// answer is the same before and after a run.
+func docsCmdSlotSubs(c *cobra.Command, ph, word string) []*cobra.Command {
 	if !strings.HasPrefix(ph, "<") {
-		return false
+		return nil
+	}
+	var out []*cobra.Command
+	add := func(child *cobra.Command) {
+		if docsCmdCobraOwn(c, child.Name()) {
+			return
+		}
+		if s := docsCmdSub(child, word); s != nil {
+			for _, o := range out {
+				if o == s {
+					return
+				}
+			}
+			out = append(out, s)
+		}
 	}
 	parts := strings.FieldsFunc(strings.ToLower(ph), func(r rune) bool { return r < 'a' || r > 'z' })
 	for _, p := range parts {
 		switch p {
 		case "group", "command", "subcommand", "cmd":
-			return docsCmdChildHasSub(c, word)
+			for _, child := range c.Commands() {
+				add(child)
+			}
+			return out
 		}
-		if child := docsCmdSub(c, p); child != nil && docsCmdSub(child, word) != nil {
+		if child := docsCmdSub(c, p); child != nil {
+			add(child)
+		}
+	}
+	return out
+}
+
+// docsCmdAnyHasFlag reports whether one of cmds, or a descendant of one, has the flag tok names. A
+// hidden flag is no flag here, as in docsCmdSubHasFlag.
+func docsCmdAnyHasFlag(cmds []*cobra.Command, tok string) bool {
+	for _, s := range cmds {
+		f := docsCmdFlagOf(s, tok)
+		if ((f == nil || !f.Hidden) && docsCmdFlagExists(s, tok)) || docsCmdSubHasFlag(s, tok) {
 			return true
 		}
 	}
@@ -1300,8 +1329,8 @@ func docsCmdDashParts(tok string) []string {
 }
 
 // docsCmdCobraOwn reports whether word names one of the commands cobra adds to the root c only when
-// a command runs, help and completion: a line must mean the same before and after a run, so the
-// rules never look them up.
+// a command runs, help and completion: tnctl always has both, so the rules decide on the name alone,
+// never on whether the root has the command yet, and a line means the same before and after a run.
 func docsCmdCobraOwn(c *cobra.Command, word string) bool {
 	return !c.HasParent() && (word == "help" || word == "completion")
 }
@@ -1663,8 +1692,10 @@ func docsCmdPage(page, markdown string) ([]docsCmdLine, []string) {
 // docsCmdIndentProblems reports each tnctl command a page shows in an indented code block, which
 // MkDocs renders as code but docsCmdExtract never reads. Such a block is outside every fence (read
 // as docsCmdExtract reads them, blockquotes too), after a blank line, a heading, or another line of
-// the same block, and indented at least 4 columns past the container it is in: the page, or 4 past
-// a list item's marker or a !!!, ??? or === opener. Only a line that starts a block (after a blank)
+// the same block, and indented at least 4 columns past the container it is in: the page, 4 past the
+// 4-column level a list item's marker is on (a marker indented 1 to 3 blanks is an item of the same
+// list), 4 past a !!!, ??? or === opener, or the start of a blockquote's text, measured after its >
+// markers (the container's base comes back when the blockquote ends). Only a line that starts a block (after a blank)
 // leaves a container; a hanging continuation line indented 2 does not. A tab counts as 4 blanks; a
 // non-breaking space counts as none. A "$ " prompt is dropped before the line is read.
 func docsCmdIndentProblems(page, markdown string) []string {
@@ -1672,6 +1703,7 @@ func docsCmdIndentProblems(page, markdown string) []string {
 	openRun, openDepth := "", 0
 	prevBlank, inCode := true, false
 	base := 0
+	quoteBase, inQuote := 0, false // the base of the container a blockquote is in, while the scan is in one
 	for i, row := range strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n") {
 		fixed, _ := docsCmdFixOddSpaces(docsCmdShell{}, row)
 		limit := -1
@@ -1701,6 +1733,21 @@ func docsCmdIndentProblems(page, markdown string) []string {
 		if openRun != "" {
 			continue
 		}
+		switch {
+		case depth > 0 && !inQuote:
+			// A blockquote starts a block, and its lines are measured after their > markers: its
+			// content starts at column 0 of its own, whatever container the blockquote is in. The
+			// blanks before its first > are its indent in that container: a blockquote that starts a
+			// block left of a list item's or admonition's content leaves it, as any block does.
+			lead := row[:len(row)-len(strings.TrimLeft(row, " \t"))]
+			if outer := len(strings.ReplaceAll(lead, "\t", "    ")); prevBlank && outer < base {
+				base = outer - outer%4
+			}
+			quoteBase, base, inQuote, prevBlank = base, 0, true, true
+		case depth == 0 && inQuote:
+			// The blockquote ended: the lines are back in the list item or admonition it was in.
+			base, inQuote = quoteBase, false
+		}
 		if trimmed == "" {
 			prevBlank = true
 			continue
@@ -1715,7 +1762,11 @@ func docsCmdIndentProblems(page, markdown string) []string {
 		startsBlock := prevBlank
 		inCode, prevBlank = false, strings.HasPrefix(trimmed, "#") && indent < base+4 // a heading is one line: an indented line after it is code
 		switch {
-		case docsCmdListMarker(trimmed) || strings.HasPrefix(trimmed, "!!!") || strings.HasPrefix(trimmed, "???") || strings.HasPrefix(trimmed, "==="):
+		case docsCmdListMarker(trimmed):
+			// An item's content starts 4 past the 4-column level its marker is on: a marker
+			// indented 1 to 3 blanks (a 2- or 3-space nested list) is an item of the same list.
+			base = indent - indent%4 + 4
+		case strings.HasPrefix(trimmed, "!!!") || strings.HasPrefix(trimmed, "???") || strings.HasPrefix(trimmed, "==="):
 			base = indent + 4
 		case startsBlock && indent < base:
 			// Only a line that starts a block leaves the list item or admonition: a hanging
@@ -3254,15 +3305,25 @@ func TestDocsCouncilParser(t *testing.T) {
 			},
 		},
 		{
-			// TestDocsCouncilPlaceholderSkipsCobraCommands pins this on a tree that has help and
-			// completion in any test order; here it holds after a test ran rootCmd.
-			name: "cobra's root-only help and completion after a placeholder",
-			page: bash("tnctl <command> help\ntnctl <command> completion"),
+			// TestDocsCouncilPlaceholderBeforeCobraCommands pins this on a tree with and without help
+			// and completion; here it holds in any test order on rootCmd.
+			name: "a placeholder before cobra's help or completion is flagged",
+			page: bash("tnctl <command> help\ntnctl <command> completion\ntnctl <command> --bot -h help --no-descriptions"),
+			want: []string{
+				`case.md:2: tnctl: a placeholder before the subcommand "help"`,
+				`case.md:3: tnctl: a placeholder before the subcommand "completion"`,
+				`case.md:4: tnctl: a placeholder before the subcommand "help"`,
+			},
 		},
 		{
-			name: "a flag after cobra's help is still checked",
-			page: bash("tnctl <command> --bot -h help --no-descriptions"),
-			want: []string{`case.md:2: tnctl: unknown flag "--no-descriptions"`},
+			name: "a group placeholder's flags are those of the commands it may name",
+			page: bash("tnctl council <role|roster> apply -f <file> --bot <bot>\ntnctl council <group> apply -f council.yaml --json\n" +
+				"tnctl council <role|roster> apply -f council.yaml --dry-run --yes -o json\ntnctl <group> add -f <file> --replace\n" +
+				"tnctl <command> logs <robot> <podNamespace>/<pod> -c <container> --previous"),
+			want: []string{
+				`case.md:2: tnctl council: unknown flag "--bot"`,
+				`case.md:3: tnctl council: unknown flag "--json"`,
+			},
 		},
 		{
 			name: "flags, a variable or an elision before the subcommand",
@@ -3371,32 +3432,92 @@ func TestDocsCouncilSubHasFlagSkipsCobraCommands(t *testing.T) {
 	}
 }
 
-// TestDocsCouncilPlaceholderSkipsCobraCommands pins, on a tree of its own that already has cobra's
-// help and completion commands, that a word placeholder in the root's subcommand slot followed by
-// help or completion is no "placeholder before the subcommand": cobra adds those two to the real root
-// only when a command runs, so a check on rootCmd alone would depend on the order of the tests.
-func TestDocsCouncilPlaceholderSkipsCobraCommands(t *testing.T) {
-	root := &cobra.Command{Use: "tnctl"}
-	council := &cobra.Command{Use: "council"}
-	roster := &cobra.Command{Use: "roster"}
-	roster.AddCommand(&cobra.Command{Use: "add", Run: func(*cobra.Command, []string) {}})
-	council.AddCommand(roster, &cobra.Command{Use: "list", Run: func(*cobra.Command, []string) {}})
-	root.AddCommand(council)
-	root.InitDefaultHelpCmd()
-	root.InitDefaultCompletionCmd()
-	if docsCmdSub(root, "help") == nil || docsCmdSub(root, "completion") == nil {
-		t.Fatal("the tree has no help or completion command")
+// TestDocsCouncilPlaceholderBeforeCobraCommands pins, on two trees of their own, one with cobra's help
+// and completion commands and one without, that a word placeholder in the root's subcommand slot
+// followed by help or completion is a "placeholder before the subcommand" on both: tnctl always has
+// those two, and cobra adds them to the real root only when a command runs, so the answer must not
+// depend on the order of the tests.
+func TestDocsCouncilPlaceholderBeforeCobraCommands(t *testing.T) {
+	tree := func(cobraOwn bool) *cobra.Command {
+		root := &cobra.Command{Use: "tnctl"}
+		council := &cobra.Command{Use: "council"}
+		roster := &cobra.Command{Use: "roster"}
+		roster.AddCommand(&cobra.Command{Use: "add", Run: func(*cobra.Command, []string) {}})
+		council.AddCommand(roster, &cobra.Command{Use: "list", Run: func(*cobra.Command, []string) {}})
+		// A root command named like a subcommand of cobra's completion: a placeholder before it is
+		// still flagged once completion exists, since completion is never a child the slot stands for.
+		root.AddCommand(council, &cobra.Command{Use: "bash", Run: func(*cobra.Command, []string) {}})
+		if cobraOwn {
+			root.InitDefaultHelpCmd()
+			root.InitDefaultCompletionCmd()
+			if docsCmdSub(root, "help") == nil || docsCmdSub(root, "completion") == nil {
+				t.Fatal("the tree has no help or completion command")
+			}
+		}
+		return root
 	}
 	cases := []struct {
 		line string
 		want []string
 	}{
-		{line: "tnctl <command> help"},
-		{line: "tnctl <command> completion bash"},
-		{line: `tnctl "x" help`},
+		{line: "tnctl <command> help", want: []string{`case.md:2: tnctl: a placeholder before the subcommand "help"`}},
+		{line: "tnctl <command> completion bash", want: []string{`case.md:2: tnctl: a placeholder before the subcommand "completion"`}},
+		{line: `tnctl "x" help`, want: []string{`case.md:2: tnctl: a placeholder before the subcommand "help"`}},
+		{line: "tnctl help <command>"},
+		{line: "tnctl <help> council", want: []string{`case.md:2: tnctl: a placeholder before the subcommand "council"`}},
 		{line: "tnctl <command> council", want: []string{`case.md:2: tnctl: a placeholder before the subcommand "council"`}},
+		{line: "tnctl <command> bash", want: []string{`case.md:2: tnctl: a placeholder before the subcommand "bash"`}},
 		{line: "tnctl council <command> list", want: []string{`case.md:2: tnctl council: a placeholder before the subcommand "list"`}},
 		{line: "tnctl council roster <name> add", want: []string{`case.md:2: tnctl council roster: a placeholder before the subcommand "add"`}},
+	}
+	for _, cobraOwn := range []bool{false, true} {
+		root := tree(cobraOwn)
+		for _, tc := range cases {
+			lines, msgs := docsCmdPage("case.md", "```bash\n"+tc.line+"\n```\n")
+			got := msgs
+			for _, l := range lines {
+				got = append(got, docsCmdCheck(root, l)...)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("help and completion %v: %s: got %q, want %q", cobraOwn, tc.line, got, tc.want)
+			}
+		}
+	}
+}
+
+// TestDocsCouncilPlaceholderFlagsOfItsCommands pins, on a tree of its own, that the flags of a line
+// whose group placeholder stands for some commands (council <group> apply) are checked against those
+// commands and their subcommands: a descendant's flag counts, a hidden flag does not.
+func TestDocsCouncilPlaceholderFlagsOfItsCommands(t *testing.T) {
+	run := func(*cobra.Command, []string) {}
+	root := &cobra.Command{Use: "tnctl"}
+	council := &cobra.Command{Use: "council"}
+	role, roster := &cobra.Command{Use: "role"}, &cobra.Command{Use: "roster"}
+	roleApply := &cobra.Command{Use: "apply", Run: run}
+	roleApply.Flags().StringP("file", "f", "", "")
+	roleApply.Flags().Bool("secret", false, "")
+	_ = roleApply.Flags().MarkHidden("secret")
+	rosterApply := &cobra.Command{Use: "apply", Run: run}
+	rosterApply.Flags().StringP("file", "f", "", "")
+	deep := &cobra.Command{Use: "deep", Run: run}
+	deep.Flags().Bool("deep", false, "")
+	rosterApply.AddCommand(deep)
+	role.AddCommand(roleApply)
+	roster.AddCommand(rosterApply)
+	// council apply is a command of its own too, as in tnctl, so apply after a group placeholder is the
+	// subcommand the slot rule looks at.
+	councilApply := &cobra.Command{Use: "apply", Run: run}
+	councilApply.Flags().StringP("file", "f", "", "")
+	council.AddCommand(role, roster, councilApply)
+	council.Flags().Bool("council-only", false, "")
+	root.AddCommand(council)
+	cases := []struct {
+		line string
+		want []string
+	}{
+		{line: "tnctl council <group> apply -f x --deep"},
+		{line: "tnctl council <group> apply -f x --secret", want: []string{`case.md:2: tnctl council: unknown flag "--secret"`}},
+		{line: "tnctl council <role|roster> apply -f x --council-only"},
 	}
 	for _, tc := range cases {
 		lines, msgs := docsCmdPage("case.md", "```bash\n"+tc.line+"\n```\n")
@@ -3542,6 +3663,66 @@ func TestDocsCouncilPageProblems(t *testing.T) {
 		{
 			name: "a quoted fence",
 			page: "> ```bash\n> tnctl council role list\n> ```\n\nok\n",
+		},
+		{
+			name: "a list item's paragraph after its blockquote",
+			page: "1. Apply it. The hub answers:\n\n    > council_edit_not_allowed\n\n    `tnctl council apply` exits 6 then.\n\n2. Next.\n" + tail,
+		},
+		{
+			name: "an admonition's paragraph after its blockquote",
+			page: "!!! quote \"The hub\"\n\n    > not allowed\n\n    The hub refuses, and `tnctl council role new` exits 6.\n" + tail,
+		},
+		{
+			name: "a list item's indented block after its blockquote",
+			page: "1. Apply it:\n\n    > council_edit_not_allowed\n\n        tnctl council rolee list\n" + tail,
+			want: []string{"case.md:5" + indentMsg},
+		},
+		{
+			name: "a 2-space blockquote leaves its list item",
+			page: "- Read it:\n\n  > Only a person reads members.\n\n      tnctl council rolee list\n" + tail,
+			want: []string{"case.md:5" + indentMsg},
+		},
+		{
+			name: "a 2-space blockquote's paragraph",
+			page: "- Read it:\n\n  > Only a person reads members.\n\n  `tnctl council apply` exits 6.\n" + tail,
+		},
+		{
+			name: "an indented block that opens a blockquote",
+			page: "Text\n>     tnctl council rolee list\n" + tail,
+			want: []string{"case.md:2" + indentMsg},
+		},
+		{
+			name: "a blockquote's indented block inside a list item",
+			page: "1. Apply it:\n\n    > Run:\n    >\n    >     tnctl council rolee list\n" + tail,
+			want: []string{"case.md:5" + indentMsg},
+		},
+		{
+			name: "a list item's blockquote that opens with an indented block",
+			page: "1. Apply it:\n\n    >     tnctl council rolee list\n" + tail,
+			want: []string{"case.md:3" + indentMsg},
+		},
+		{
+			name: "a blockquote's paragraph inside a list item",
+			page: "1. Apply it:\n\n    > Run:\n    >\n    > tnctl council role list prints it.\n" + tail,
+		},
+		{
+			name: "a 2-space nested item's indented block",
+			page: "- a\n  - b\n\n        tnctl council rolee list\n" + tail,
+			want: []string{"case.md:4" + indentMsg},
+		},
+		{
+			name: "a 3-space nested item's indented block",
+			page: "1. a\n   - b\n\n         tnctl council rolee list\n" + tail,
+			want: []string{"case.md:4" + indentMsg},
+		},
+		{
+			name: "a 2-space nested item's paragraph",
+			page: "- a\n  - b\n\n    tnctl council role list prints it.\n" + tail,
+		},
+		{
+			name: "a nested item's indented block inside an item",
+			page: "1. Step\n\n    text\n\n    - sub\n      - subsub\n\n            tnctl council rolee list\n" + tail,
+			want: []string{"case.md:8" + indentMsg},
 		},
 		{
 			name: "an indented block after a blockquote ended its fence",
