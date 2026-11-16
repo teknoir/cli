@@ -19,9 +19,12 @@ import (
 // it (docsCmdCheck cuts it).
 type docsCmdLine struct {
 	page string // the file path as given, for the messages
-	line int    // 1-based line number of the line that starts with tnctl
+	line int    // 1-based line number of the line the command starts on
 	text string // the command text after joining continuations
 	odd  bool   // a line of it held a non-breaking or zero-width space
+	// unended is the delimiter of a here-document the line opens and the block never ends; text is
+	// empty then and docsCmdCheck reports the here-document, not a command.
+	unended string
 }
 
 // docsCmdOddLen is the byte length of the space-like character a shell does not split at that text
@@ -37,12 +40,13 @@ func docsCmdOddLen(text string) int {
 
 // docsCmdFixOddSpaces turns every non-breaking or zero-width space (docsCmdOddLen) outside quotes,
 // substitutions and the comment into a blank, so the command is still found and walked, and reports
-// whether the line held one there: a shell reads it as part of a word, never as a blank, so the line
-// is no command at all (and docsCmdCheck says so). A BOM at the start of a line is one of them.
-func docsCmdFixOddSpaces(line string) (string, bool) {
+// whether the line held one there: a shell reads it as part of a word, never as a blank (and
+// docsCmdCheck says so). A BOM at the start of a line is one of them. The scan starts in the shell
+// state sh: the zero state for a line of its own, and the state a command's earlier lines left for a
+// line that goes on inside a quote or $( they opened (docsCmdStateAt).
+func docsCmdFixOddSpaces(sh docsCmdShell, line string) (string, bool) {
 	var (
 		b   strings.Builder
-		sh  docsCmdShell
 		odd bool
 	)
 	for i := 0; i < len(line); i++ {
@@ -162,27 +166,39 @@ func (s *docsCmdShell) step(b byte) {
 // renders them: an indented fence (a list item's) and a fence with an info string (```bash
 // title="…", ```{.bash}) open a block too, and a fence closes it only when it is of the same
 // character, at least as long, and has nothing after it, so a ```bash example shown inside a
-// ````markdown block is skipped whole. A line starts a command when it holds at least one tnctl
-// command (docsCmdSegments), with a console transcript's "$ " prompt dropped; a following line that
-// is more indented than the line that starts the command and then starts with [ or -, or that
-// follows a line ending in a backslash, continues the command above it. A blank line ends a command,
-// also after a backslash, and so does a line whose quote or $( is still open when the next line
-// starts a tnctl command. The body of a here-document is data, never a command.
+// ````markdown block is skipped whole; a fence inside a blockquote (> ```bash), which MkDocs renders
+// as code, opens a block too, read with its > markers dropped (docsCmdQuote). A line starts a
+// command when it holds at least one tnctl command (docsCmdHasCmd), with a console transcript's "$ "
+// prompt dropped; a following line that is more indented than the line that starts the command and
+// then starts with [ or -, or that follows a line ending in a backslash, or whose quote or $( is
+// still open (unless the next line starts a tnctl command), continues the command above it. A blank
+// line ends a command, also after a backslash. The body of a here-document is data, never a command,
+// and one whose delimiter never comes is reported (docsCmdLine.unended). Once a block has shown a
+// "$ " prompt it is a console transcript: only the "$ " lines start a command, a "> " prompt is
+// dropped, and every other line is output. A block without a prompt is read like bash.
 func docsCmdExtract(page, markdown string) []docsCmdLine {
 	markdown = strings.ReplaceAll(markdown, "\r\n", "\n")
 	var out []docsCmdLine
 	var cur docsCmdLine
-	has := false       // cur holds a command that is not in out yet
-	cont := false      // the last line of cur is continued: a backslash, or a quote or $( still open
-	curIndent := 0     // the indentation of the line that started cur
-	heredoc := ""      // the delimiter of the here-document the scan is in, "" outside one
-	var prose []string // the lines outside every fence, for their inline code spans
-	proseLine := 0     // the 1-based line number of prose[0]
+	has := false          // cur holds a command that is not in out yet
+	cont := false         // the last line of cur is continued: a backslash, or a quote or $( still open
+	curIndent := 0        // the indentation of the line that started cur
+	var heredocs []string // the delimiters of the here-documents still to read, in order
+	heredocLine := 0      // the 1-based line number of the line that opened them
+	var prose []string    // the lines outside every fence, for their inline code spans
+	proseLine := 0        // the 1-based line number of prose[0]
 	// flush ends the command in cur: it goes to out when it holds one.
 	flush := func() {
 		if has {
 			out = append(out, cur)
 			has = false
+		}
+	}
+	// unended reports the here-documents a block ends inside, and forgets them.
+	unended := func() {
+		if len(heredocs) > 0 {
+			out = append(out, docsCmdLine{page: page, line: heredocLine, unended: heredocs[0]})
+			heredocs = nil
 		}
 	}
 	// flushProse adds the commands the lines outside the fences quote, and drops them.
@@ -194,22 +210,40 @@ func docsCmdExtract(page, markdown string) []docsCmdLine {
 	}
 	inBlock := false    // the scan is inside a fenced block
 	openRun := ""       // the fence that opened it, such as ``` or ~~~~
+	openDepth := 0      // the blockquote markers before the fence that opened it
 	shellBlock := false // that block is a shell block, not one to skip
-	for i, raw := range strings.Split(markdown, "\n") {
-		raw, odd := docsCmdFixOddSpaces(raw)
+	transcript := false // that block has shown a "$ " prompt: from there on only prompt lines start a command
+	for i, row := range strings.Split(markdown, "\n") {
+		line := row // the line as the page has it: the prose keeps it, and docsCmdInline fixes a span's odd spaces itself
+		fixed, odd := docsCmdFixOddSpaces(docsCmdShell{}, line)
+		limit := -1
+		if inBlock {
+			limit = openDepth
+		}
+		raw, depth := docsCmdQuote(fixed, limit)
+		if inBlock && depth < openDepth {
+			// The blockquote ended before the fence closed: so does the block (docsCmdFenceProblems
+			// reports the fence).
+			inBlock, openRun, shellBlock, transcript = false, "", false, false
+			flush()
+			unended()
+			cur, has, cont = docsCmdLine{}, false, false
+			raw, depth = docsCmdQuote(fixed, -1)
+		}
 		trimmed := strings.TrimLeft(raw, " \t")
 		if run, info := docsCmdFence(trimmed); run != "" {
 			switch {
 			case !inBlock:
 				flush()
 				flushProse()
-				inBlock, openRun, heredoc = true, run, ""
+				inBlock, openRun, openDepth, transcript, heredocs = true, run, depth, false, nil
 				shellBlock = docsCmdShellLang(strings.ToLower(docsCmdFenceLang(info)))
 				cur, has, cont = docsCmdLine{}, false, false
 				continue
 			case run[0] == openRun[0] && len(run) >= len(openRun) && strings.TrimSpace(info) == "":
-				inBlock, openRun, shellBlock, heredoc = false, "", false, ""
+				inBlock, openRun, shellBlock, transcript = false, "", false, false
 				flush()
+				unended()
 				cur, has, cont = docsCmdLine{}, false, false
 				continue
 			}
@@ -220,7 +254,7 @@ func docsCmdExtract(page, markdown string) []docsCmdLine {
 			if len(prose) == 0 {
 				proseLine = i + 1
 			}
-			prose = append(prose, raw)
+			prose = append(prose, line)
 			flush()
 			has, cont = false, false
 			continue
@@ -230,20 +264,52 @@ func docsCmdExtract(page, markdown string) []docsCmdLine {
 			has, cont = false, false
 			continue
 		}
-		if heredoc != "" {
+		ps2 := false
+		if transcript && strings.HasPrefix(trimmed, "> ") {
+			// A transcript's PS2 prompt (a here-document line, or the line after a backslash or an
+			// open quote) is no part of what was typed.
+			trimmed = strings.TrimLeft(trimmed[2:], " \t")
+			raw, ps2 = trimmed, true
+		}
+		if len(heredocs) > 0 {
 			// A here-document's body is data (a chat prompt, a YAML file), never a command.
-			if strings.TrimSpace(raw) == heredoc {
-				heredoc = ""
+			if strings.TrimSpace(raw) == heredocs[0] {
+				heredocs = heredocs[1:]
 			}
 			flush()
 			has, cont = false, false
 			continue
 		}
-		heredoc = docsCmdHeredoc(docsCmdStripComment(trimmed))
-		if has && cont && docsCmdOpen(docsCmdStripComment(cur.text)) && len(docsCmdSegments(trimmed)) > 0 {
-			// An open quote or $( never swallows the next tnctl command: the line above is reported
-			// as open instead.
-			cont = false
+		if strings.HasPrefix(trimmed, "$ ") {
+			// Set only outside a here-document: a "$ " line in a body is data.
+			transcript = true
+		}
+		if transcript && (!has || !cont) && !strings.HasPrefix(trimmed, "$ ") {
+			// A transcript's line without a prompt is output, never a command.
+			flush()
+			has, cont = false, false
+			continue
+		}
+		start := docsCmdShell{} // the shell state the line starts in
+		if has && cont && docsCmdOpen(docsCmdStripComment(cur.text)) {
+			if len(docsCmdSegments(trimmed)) > 0 {
+				// An open quote or $( never swallows the next tnctl command: the line above is
+				// reported as open instead.
+				cont = false
+			} else {
+				// The line goes on inside the quote or $( the line above left open: scan it from
+				// there, so a << or a non-breaking space inside the quote is the quote's text.
+				start = docsCmdStateAt(docsCmdStripComment(cur.text))
+				src, _ := docsCmdQuote(line, depth)
+				if t := strings.TrimLeft(src, " \t"); ps2 && strings.HasPrefix(t, "> ") {
+					src = strings.TrimLeft(t[2:], " \t")
+				}
+				raw, odd = docsCmdFixOddSpaces(start, src)
+				trimmed = strings.TrimLeft(raw, " \t")
+			}
+		}
+		if heredocs = docsCmdHeredoc(start, trimmed); len(heredocs) > 0 {
+			heredocLine = i + 1
 		}
 		indent := len(raw) - len(trimmed)
 		switch {
@@ -265,7 +331,7 @@ func docsCmdExtract(page, markdown string) []docsCmdLine {
 				trimmed = strings.TrimLeft(trimmed[2:], " \t")
 			}
 			text, backslash := docsCmdDropBackslash(trimmed)
-			if len(docsCmdSegments(text)) > 0 {
+			if docsCmdHasCmd(text) {
 				flush()
 				cur, has, cont = docsCmdLine{page: page, line: i + 1, text: text, odd: odd}, true,
 					backslash || docsCmdOpen(docsCmdStripComment(text))
@@ -277,16 +343,45 @@ func docsCmdExtract(page, markdown string) []docsCmdLine {
 		}
 	}
 	flush()
+	unended()
 	flushProse()
 	return out
 }
 
-// docsCmdHeredoc returns the delimiter of the here-document a line opens (<<EOF, <<-EOF, <<'EOF',
-// << "EOF") outside quotes and substitutions, or "" when it opens none. A here-string (<<<) is no
-// here-document: its three < are stepped over whole, so the quotes after it still count.
-func docsCmdHeredoc(text string) string {
-	var sh docsCmdShell
+// docsCmdQuote drops the blockquote markers a line starts with (each > with at most one blank after
+// it, and the blanks before it), at most limit of them, or all of them when limit is negative, and
+// returns the rest of the line and how many it dropped. A line with no marker comes back whole. A
+// block opened inside a blockquote (> ```bash, which pymdownx.superfences renders as code) is read
+// with that many markers dropped from each of its lines; a block opened outside one drops none, so a
+// "> " prompt line of a ```text transcript, or a "> EOF" in a here-document, stays as it is.
+func docsCmdQuote(line string, limit int) (string, int) {
+	n := 0
+	for limit < 0 || n < limit {
+		t := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(t, ">") {
+			break
+		}
+		line = strings.TrimPrefix(t[1:], " ")
+		n++
+	}
+	return line, n
+}
+
+// docsCmdHeredoc returns the delimiters, in order, of the here-documents a line opens (<<EOF,
+// <<-EOF, <<'EOF', << "EOF", <<\EOF, <<E'O'F: quote removal drops every quote and backslash)
+// outside quotes and substitutions, nil when it opens none. The scan starts in the shell state sh
+// (docsCmdStateAt for a line that goes on inside a quote) and ends at a comment. A here-string (<<<)
+// is no here-document: its three < are stepped over whole, so the quotes after it still count. A
+// shift (<<= and an arithmetic line, (( … )) or let) and a << with no delimiter open none.
+func docsCmdHeredoc(sh docsCmdShell, text string) []string {
+	if t := strings.TrimLeft(text, " \t"); sh.outside(false) && (strings.HasPrefix(t, "((") || strings.HasPrefix(t, "let ")) {
+		return nil // arithmetic: << is a shift there, never a here-document
+	}
+	var out []string
 	for i := 0; i+1 < len(text); i++ {
+		if sh.outside(false) && text[i] == '#' && (i == 0 || text[i-1] == ' ' || text[i-1] == '\t') {
+			return out // the comment is no part of the command
+		}
 		if sh.outside(false) && strings.HasPrefix(text[i:], "<<<") {
 			sh.step('<')
 			sh.step('<')
@@ -299,11 +394,29 @@ func docsCmdHeredoc(text string) string {
 			if end := strings.IndexAny(rest, " \t;|&><)"); end >= 0 {
 				rest = rest[:end]
 			}
-			return strings.Trim(rest, `'"`)
+			// <<= is a shift assignment; an empty delimiter is no here-document bash would read.
+			if d := strings.NewReplacer(`'`, "", `"`, "", `\`, "").Replace(rest); d != "" && !strings.HasPrefix(text[i+2:], "=") {
+				out = append(out, d)
+			}
+			sh.step('<')
+			sh.step('<')
+			i++
+			continue
 		}
 		sh.step(text[i])
 	}
-	return ""
+	return out
+}
+
+// docsCmdStateAt is the shell state at the end of a command text, once the blank the join adds after
+// it is stepped too: the state the next line of the command starts in.
+func docsCmdStateAt(text string) docsCmdShell {
+	var sh docsCmdShell
+	for i := 0; i < len(text); i++ {
+		sh.step(text[i])
+	}
+	sh.step(' ')
+	return sh
 }
 
 // docsCmdOpen reports whether the text ends inside a quote or a $( … ) substitution, so the shell
@@ -318,7 +431,8 @@ func docsCmdOpen(text string) bool {
 
 // docsCmdFence reports whether the line, with its leading blanks already trimmed, is a fence: three
 // or more backticks or three or more tildes. run is that whole run of one character and info what
-// follows it; both are empty when the line is no fence.
+// follows it; both are empty when the line is no fence. A backtick run whose info string holds a
+// backtick is no fence but an inline code span (```bash``` blocks), as in CommonMark.
 func docsCmdFence(trimmed string) (run, info string) {
 	if trimmed == "" || (trimmed[0] != '`' && trimmed[0] != '~') {
 		return "", ""
@@ -327,7 +441,7 @@ func docsCmdFence(trimmed string) (run, info string) {
 	for n < len(trimmed) && trimmed[n] == trimmed[0] {
 		n++
 	}
-	if n < 3 {
+	if n < 3 || (trimmed[0] == '`' && strings.Contains(trimmed[n:], "`")) {
 		return "", ""
 	}
 	return trimmed[:n], trimmed[n:]
@@ -357,17 +471,30 @@ func docsCmdShellLang(lang string) bool {
 // docsCmdFenceProblems reports the fences of one page that are wrong: one that never closes, and one
 // that a block opened by a fence of the same character and length (or a shorter one) swallowed, so
 // the shell block below it is read as text (a ```text block someone forgot to close). It reads the
-// fences as docsCmdExtract does, so the two never disagree.
+// fences as docsCmdExtract does, so the two never disagree. A fence in a blockquote ends with the
+// blockquote: a line with fewer > markers than the fence had closes nothing, and the fence never
+// closes (superfences renders it as text).
 func docsCmdFenceProblems(page, markdown string) []string {
 	var msgs []string
-	openRun, openLine := "", 0
+	openRun, openLine, openDepth := "", 0, 0
 	for i, raw := range strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n") {
-		fixed, _ := docsCmdFixOddSpaces(raw)
-		run, info := docsCmdFence(strings.TrimLeft(fixed, " \t"))
+		fixed, _ := docsCmdFixOddSpaces(docsCmdShell{}, raw)
+		limit := -1
+		if openRun != "" {
+			limit = openDepth
+		}
+		rest, depth := docsCmdQuote(fixed, limit)
+		if openRun != "" && depth < openDepth {
+			// The blockquote ended before the fence closed.
+			msgs = append(msgs, fmt.Sprintf("%s:%d: the fence never closes", page, openLine))
+			openRun = ""
+			rest, depth = docsCmdQuote(fixed, -1)
+		}
+		run, info := docsCmdFence(strings.TrimLeft(rest, " \t"))
 		switch {
 		case run == "":
 		case openRun == "":
-			openRun, openLine = run, i+1
+			openRun, openLine, openDepth = run, i+1, depth
 		case run[0] == openRun[0] && len(run) >= len(openRun) && strings.TrimSpace(info) == "":
 			openRun = ""
 		case run[0] == openRun[0] && len(run) >= len(openRun) && docsCmdFenceLang(info) != "":
@@ -383,11 +510,14 @@ func docsCmdFenceProblems(page, markdown string) []string {
 // docsCmdDropBackslash trims a line and cuts the shell continuation it ends with, and reports
 // whether it ended with one. It is lenient on purpose: a bare trailing \ (with no blank before it)
 // continues the line too, and the join adds a blank where the shell adds none, because a docs page
-// writes one argument per line and never splits one. A backslash inside a trailing comment ends
-// nothing: in bash a # starts a comment that runs to the end of the line, backslash included.
+// writes one argument per line and never splits one. An odd run of trailing backslashes continues
+// the line; an even run is escaped backslashes, and ends it. A backslash inside a trailing comment
+// ends nothing: in bash a # starts a comment that runs to the end of the line, backslash included.
 func docsCmdDropBackslash(text string) (string, bool) {
 	text = strings.TrimRight(text, " \t")
-	if !strings.HasSuffix(text, `\`) || docsCmdStripComment(text) != text {
+	// An even run of trailing backslashes is escaped backslashes, not a continuation.
+	n := len(text) - len(strings.TrimRight(text, `\`))
+	if n%2 == 0 || docsCmdStripComment(text) != text {
 		return text, false
 	}
 	return strings.TrimRight(strings.TrimSuffix(text, `\`), " \t"), true
@@ -415,14 +545,16 @@ func docsCmdStripComment(text string) string {
 // several: the parts are cut at every ;, && and ||, at a | with a blank on either side (a | between
 // two words, auto|quick, names alternatives), and at a single & that belongs to no &>, >& or <&;
 // each part is cut at its first redirection. A part's leading environment assignments, the shell's
-// words before it (do tnctl …, if tnctl …, xargs -n1 tnctl …, sudo tnctl …) and the ) that closes a
+// words before it (do tnctl …, if tnctl …, xargs -n1 tnctl …, sudo tnctl …, a case pattern
+// list) tnctl …), the assignments after them (FOO=1 sudo BAR=2 tnctl …) and the ) that closes a
 // subshell are dropped, and it is a command only when its first word is tnctl. A tnctl inside a
-// command substitution is not checked: the substitution is one placeholder token.
+// command substitution is no segment of its own: the substitution is one token here, and
+// docsCmdSubs and docsCmdCheck read it on its own.
 func docsCmdSegments(text string) [][]string {
 	var out [][]string
 	for _, part := range docsCmdSplitOps(docsCmdStripComment(text)) {
 		part = docsCmdCutRedirect(part)
-		toks := docsCmdDropCloser(docsCmdDropAssignments(docsCmdDropKeywords(docsCmdTokens(part))))
+		toks := docsCmdDropCloser(docsCmdDropKeywords(docsCmdDropAssignments(docsCmdTokens(part))))
 		if len(toks) > 0 && toks[0] == "tnctl" {
 			out = append(out, toks)
 		}
@@ -458,7 +590,7 @@ func docsCmdSplitOps(text string) []string {
 
 // docsCmdOpAt is the length of the operator that separates two commands at text[i], 0 when there is
 // none: ; && || anywhere, a | with a blank on either side or at the end (a | between two words,
-// auto|quick, names alternatives), and a & that is no part of &&, &> or >&.
+// auto|quick, names alternatives), and a & that is no part of &&, &>, >& or <&.
 func docsCmdOpAt(text string, i int) int {
 	blank := func(j int) bool { return j < 0 || j >= len(text) || text[j] == ' ' || text[j] == '\t' }
 	next := func(j int) byte {
@@ -509,7 +641,9 @@ func docsCmdCutRedirect(text string) string {
 }
 
 // docsCmdDropAssignments drops the leading environment assignments of a command, so COUNCIL=ops
-// tnctl chat scout and X=$(tnctl config get bot) tnctl chat scout are the commands they run.
+// tnctl chat scout and X=$(tnctl config get bot) tnctl chat scout are the commands they run. A line
+// that is only an assignment from a substitution (id=$(tnctl chat threads scout --json)) holds no
+// segment of its own: docsCmdHasCmd finds the tnctl inside it, and docsCmdCheck checks it there.
 func docsCmdDropAssignments(toks []string) []string {
 	for len(toks) > 0 {
 		i := strings.IndexByte(toks[0], '=')
@@ -521,11 +655,28 @@ func docsCmdDropAssignments(toks []string) []string {
 	return toks
 }
 
+// docsCmdWrapperValueOpts holds, per command wrapper, the options whose value may be the next word
+// (GNU xargs, sudo, env, timeout, watch, bash exec). An option whose value is optional and attached only
+// (xargs -i, -e, -l) is not here.
+var docsCmdWrapperValueOpts = map[string]map[string]bool{
+	"xargs": {"-I": true, "-L": true, "-n": true, "-P": true, "-d": true, "-E": true, "-s": true, "-a": true,
+		"--arg-file": true, "--delimiter": true, "--max-args": true, "--max-procs": true, "--max-chars": true,
+		"--process-slot-var": true},
+	"sudo": {"-u": true, "-g": true, "-U": true, "-C": true, "-D": true, "-p": true, "-r": true, "-t": true,
+		"-T": true, "-R": true, "--user": true, "--group": true, "--other-user": true, "--close-from": true,
+		"--chdir": true, "--prompt": true, "--role": true, "--type": true, "--command-timeout": true, "--chroot": true},
+	"env":     {"-u": true, "-C": true, "--unset": true, "--chdir": true},
+	"timeout": {"-s": true, "-k": true, "--signal": true, "--kill-after": true},
+	"watch":   {"-n": true, "--interval": true},
+	"exec":    {"-a": true},
+}
+
 // docsCmdDropKeywords drops the shell words that may come before a command in a list or a loop (do
-// tnctl …, if tnctl …, ! tnctl …, time tnctl …), and the words a command wrapper runs it through
-// (xargs -n1 tnctl …, sudo tnctl …, env FOO=1 tnctl …, timeout 10 tnctl …), with the assignments
-// after them. Only a wrapper's options, numbers and {} are skipped, so sudo mv tnctl /usr/local/bin/
-// stays no command.
+// tnctl …, if tnctl …, ! tnctl …, time tnctl …), a case pattern (list) tnctl …, *) tnctl …), and the
+// words a command wrapper runs it through (xargs -n1 tnctl …, sudo tnctl …, env FOO=1 tnctl …,
+// timeout 10s tnctl …, watch -n 0.5 tnctl …), with the assignments after them. Only a wrapper's
+// options (with the value of one that takes it apart, docsCmdWrapperValueOpts), numbers and {} are
+// skipped, so sudo mv tnctl /usr/local/bin/ stays no command.
 func docsCmdDropKeywords(toks []string) []string {
 	for len(toks) > 0 {
 		switch toks[0] {
@@ -534,11 +685,21 @@ func docsCmdDropKeywords(toks []string) []string {
 			continue
 		case "xargs", "watch", "sudo", "env", "nohup", "exec", "timeout":
 			// The wrapped command is the first word that is no option, number or {} of the wrapper.
+			// An option that takes a value written apart from it (xargs -I %, sudo -u root) skips
+			// that value too.
 			j := 1
-			for j < len(toks) && (strings.HasPrefix(toks[j], "-") || toks[j] == "{}" || strings.Trim(toks[j], "0123456789") == "") {
+			for j < len(toks) && (strings.HasPrefix(toks[j], "-") || toks[j] == "{}" || docsCmdNumber(toks[j])) {
+				if docsCmdWrapperValueOpts[toks[0]][toks[j]] && j+1 < len(toks) {
+					j++
+				}
 				j++
 			}
 			toks = docsCmdDropAssignments(toks[j:])
+			continue
+		}
+		if strings.HasSuffix(toks[0], ")") && !strings.Contains(toks[0], "(") {
+			// A case pattern, list) tnctl … or *) tnctl …: the command follows it.
+			toks = docsCmdDropAssignments(toks[1:])
 			continue
 		}
 		if strings.HasPrefix(toks[0], "(") && len(toks[0]) > 1 {
@@ -548,6 +709,15 @@ func docsCmdDropKeywords(toks []string) []string {
 		return toks
 	}
 	return toks
+}
+
+// docsCmdNumber reports whether tok is a number or a duration a wrapper takes: 10, 0.5, 10s, 5m,
+// 1.5h, 2d.
+func docsCmdNumber(tok string) bool {
+	if n := len(tok); n > 1 && strings.IndexByte("smhd", tok[n-1]) >= 0 {
+		tok = tok[:n-1]
+	}
+	return strings.Trim(tok, "0123456789.") == "" && strings.ContainsAny(tok, "0123456789")
 }
 
 // docsCmdDropCloser drops the ) that closes a subshell, (tnctl council role list) or ( … ), from the
@@ -616,10 +786,14 @@ func docsCmdTokens(text string) []string {
 
 // docsCmdCheck walks every tnctl command of one line down the tree of root and returns one message
 // per problem, in order: a subcommand, argument or flag that tnctl does not have, more positional
-// arguments than the command takes, a flag tnctl hides, -o on a command that takes --json instead, a
-// quote or $( that never closes, or a non-breaking space the shell reads as part of a word. It runs
-// nothing.
+// arguments than the command takes, a flag tnctl hides, -o on a command that takes --json instead,
+// -o json on council role export, a quote or $( that never closes, a non-breaking space the shell
+// reads as part of a word, or a here-document whose delimiter never comes. The tnctl commands inside
+// a command substitution of the line are checked the same way. It runs nothing.
 func docsCmdCheck(root *cobra.Command, c docsCmdLine) []string {
+	if c.unended != "" {
+		return []string{fmt.Sprintf("%s:%d: a here-document whose delimiter %q never comes: the rest of the block is read as its body", c.page, c.line, c.unended)}
+	}
 	var msgs []string
 	if c.odd {
 		msgs = append(msgs, fmt.Sprintf("%s:%d: a non-breaking or zero-width space: the shell reads it as part of a word", c.page, c.line))
@@ -630,19 +804,95 @@ func docsCmdCheck(root *cobra.Command, c docsCmdLine) []string {
 	for _, toks := range docsCmdSegments(c.text) {
 		msgs = append(msgs, docsCmdWalk(root, c, toks)...)
 	}
+	for _, sub := range docsCmdSubs(docsCmdStripComment(c.text)) {
+		inner := c
+		inner.text, inner.odd = sub, false
+		msgs = append(msgs, docsCmdCheck(root, inner)...)
+	}
 	return msgs
+}
+
+// docsCmdSubs returns the texts of the outermost command substitutions of text, $( … ) and ` … `,
+// the ones bash runs: outside single quotes, inside double quotes or outside any, and not behind a
+// backslash. A ' inside "…" and a " inside '…' are plain characters. A $( … ) ends at the ) that
+// closes it as docsCmdShell counts it, so a ) inside a quote in it ("1) restart") closes nothing.
+// docsCmdCheck reads a nested substitution when it checks the outer one; an unclosed one is left to
+// docsCmdOpen.
+func docsCmdSubs(text string) []string {
+	var out []string
+	var quote byte // ' or " when the scan is inside that quote, 0 outside
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case c == '\\' && quote != '\'':
+			i++
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case c == '"':
+			if quote == '"' {
+				quote = 0
+			} else {
+				quote = '"'
+			}
+		case c == '\'' && quote == 0:
+			quote = '\''
+		case c == '$' && i+1 < len(text) && text[i+1] == '(':
+			sh := docsCmdShell{sub: 1}
+			j := i + 2
+			for ; j < len(text); j++ {
+				if sh.step(text[j]); sh.sub == 0 {
+					break
+				}
+			}
+			if j < len(text) {
+				out = append(out, text[i+2:j])
+			}
+			i = j
+		case c == '`':
+			j := i + 1
+			for j < len(text) && text[j] != '`' {
+				if text[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j < len(text) {
+				out = append(out, text[i+1:j])
+			}
+			i = j
+		}
+	}
+	return out
+}
+
+// docsCmdHasCmd reports whether text holds a tnctl command, itself or in a command substitution.
+func docsCmdHasCmd(text string) bool {
+	if len(docsCmdSegments(text)) > 0 {
+		return true
+	}
+	for _, sub := range docsCmdSubs(docsCmdStripComment(text)) {
+		if docsCmdHasCmd(sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // docsCmdWalk walks one command's tokens (toks[0] is tnctl) down the tree of root and returns one
 // message per problem: a subcommand, argument or flag tnctl would refuse, more positional arguments
-// than the command the walk ends on takes, or a flag the command does not have. It runs nothing.
+// than the command the walk ends on takes, a flag the command does not have, a hidden flag, -o on a
+// command that takes --json, or -o json on council role export. It runs nothing.
 func docsCmdWalk(root *cobra.Command, c docsCmdLine, toks []string) []string {
+	toks = docsCmdJoinSpaced(toks)
 	var msgs, flagToks []string
 	cur := root
 	walking := true
 	badSub, anySub := false, false
+	subPh := ""      // the placeholder in a subcommand slot that stopped the walk
 	var pos []string // the positional arguments the line gives, for the too-many check
-	concrete := true // every one is one the page means: no placeholder, no | and no --
+	concrete := true // every one is one the page means: no placeholder that is no one word, no | and no unknown
 	outVal := ""     // the value the line gives the root's -o/--output flag, "" when none
 	// unknownSub is the message for a word cur refuses: a subcommand tnctl does not have, or a
 	// positional argument on a command that takes none.
@@ -664,12 +914,13 @@ loop:
 				flagToks = append(flagToks, docsCmdDashParts(toks[i])...)
 			}
 		case tok == "--":
-			// -- ends the flags: nothing after it is a flag or a word of the command.
+			// -- ends the flags: nothing after it is a flag or a word of the command. The words after
+			// it reach Args too, so the positional words before it are a lower bound: a too-many
+			// result on them stays real, and the words after it are not counted.
 			if walking && i+1 < len(toks) && !docsCmdIsPlaceholder(toks[i+1]) && docsCmdRefusesWord(cur, toks[i+1]) {
 				badSub = true
 				msgs = append(msgs, unknownSub(toks[i+1]))
 			}
-			concrete = false
 			break loop
 		case docsCmdIsFlagToken(tok):
 			flagToks = append(flagToks, tok)
@@ -690,18 +941,21 @@ loop:
 					flagToks = append(flagToks, docsCmdDashParts(next)...)
 				}
 				if v, ok := docsCmdOutputValue(docsCmdTrimFlag(tok)); ok && v == "" {
-					outVal = next
+					outVal = strings.TrimRight(next, "]})")
 				}
 			}
 		case docsCmdIsPlaceholder(tok):
 			// The flags of such a line belong to some subcommand (council role <command> --bot
-			// <bot>), so any of them may name a flag down there. A quoted word is a real argument (a
-			// name with spaces), counted for the too-many check; any other placeholder leaves the
-			// count unknown.
-			if walking && cur.HasSubCommands() && docsCmdRefusesWord(cur, tok) {
+			// <bot>), so any of them may name a flag down there. A quoted word and a <name> for one
+			// word are real arguments, counted for the too-many check (council roster use <name>
+			// <bot>); any other placeholder (the group's subcommand slot, <file|->, [prompt...], $VAR)
+			// leaves the count unknown.
+			slot := walking && cur.HasSubCommands() && docsCmdRefusesWord(cur, tok)
+			if slot {
 				anySub = true
+				subPh = tok
 			}
-			if docsCmdIsQuoted(tok) {
+			if docsCmdIsQuoted(tok) || (!slot && docsCmdIsOneWord(tok)) {
 				pos = append(pos, tok)
 			} else {
 				concrete = false
@@ -711,6 +965,12 @@ loop:
 		case !walking:
 			// A plain word after the walk left the tree is a positional argument of the command it
 			// ended on, counted for the too-many check.
+			if anySub && !badSub && docsCmdWordPlaceholder(subPh) && docsCmdSub(cur, tok) != nil {
+				// A word placeholder fills the subcommand slot, so the real subcommand after it is only
+				// a positional argument, and the group refuses it (council roster <name> add).
+				badSub = true
+				msgs = append(msgs, fmt.Sprintf("%s:%d: %s: a placeholder before the subcommand %q", c.page, c.line, cur.CommandPath(), tok))
+			}
 			pos = append(pos, tok)
 			flagToks = append(flagToks, docsCmdDashParts(tok)...)
 		default:
@@ -726,7 +986,10 @@ loop:
 			}
 			if strings.Contains(tok, "|") && strings.Trim(tok, "|") != "" && cur.HasSubCommands() && docsCmdRefusesWord(cur, tok) {
 				// The subcommand slot names alternatives (roster add|remove): walk each of them
-				// and return the union of their messages, in order and without duplicates.
+				// and return the union of their messages, in order and without duplicates. A word of
+				// pipes alone (a spaced || inside a bracket or a group, which the split never cuts)
+				// names no alternatives: it is refused as a word, and without the guard above the
+				// union would be empty and drop every message of the line.
 				var alt []string
 				seen := map[string]bool{}
 				for _, part := range strings.Split(tok, "|") {
@@ -806,6 +1069,47 @@ loop:
 // byte and starts and ends with the same quote.
 func docsCmdIsQuoted(tok string) bool {
 	return len(tok) > 1 && (tok[0] == '"' || tok[0] == '\'') && tok[len(tok)-1] == tok[0]
+}
+
+// docsCmdIsOneWord reports whether tok is a placeholder for one word: <name>, with no | or ellipsis.
+func docsCmdIsOneWord(tok string) bool {
+	return len(tok) > 2 && tok[0] == '<' && tok[len(tok)-1] == '>' && !strings.ContainsAny(tok, "|") &&
+		!strings.Contains(tok, "...") && !strings.Contains(tok, "…")
+}
+
+// docsCmdJoinSpaced joins the words of a placeholder with spaces in it (<robot type>, <one line job>)
+// into one token: the page means one value, though bash would split it. A token that opens a < and
+// does not close it takes the tokens after it up to the first one with a >. The letter after the <
+// leaves an input redirect (<) and a here-document (<<EOF) alone.
+func docsCmdJoinSpaced(toks []string) []string {
+	var out []string
+	for i := 0; i < len(toks); i++ {
+		tok := toks[i]
+		if len(tok) > 1 && tok[0] == '<' && docsCmdIsASCIILetter(tok[1]) && !strings.Contains(tok, ">") {
+			for j := i + 1; j < len(toks); j++ {
+				if strings.Contains(toks[j], ">") {
+					tok = strings.Join(toks[i:j+1], " ")
+					i = j
+					break
+				}
+			}
+		}
+		out = append(out, tok)
+	}
+	return out
+}
+
+// docsCmdWordPlaceholder reports whether a placeholder stands for one word on the command line (a
+// <name> or a quoted word), not for flags, a variable, an elision or a shell expansion.
+func docsCmdWordPlaceholder(tok string) bool {
+	if docsCmdIsQuoted(tok) && !strings.ContainsAny(tok, "$`") {
+		return true
+	}
+	if !strings.HasPrefix(tok, "<") || !strings.HasSuffix(tok, ">") {
+		return false
+	}
+	l := strings.ToLower(tok)
+	return !strings.Contains(l, "flag") && !strings.Contains(l, "option") && !strings.HasPrefix(l, "<-")
 }
 
 // docsCmdRefusesWord reports whether c refuses word: it is the root (cobra's legacyArgs refuses any
@@ -984,9 +1288,13 @@ func docsCmdIsFlagToken(tok string) bool {
 }
 
 // docsCmdTypoDash reports whether tok starts with a typographic dash (‐ ‑ ‒ – — ― −) where a flag's
-// - belongs.
+// - belongs. A token that is one dash and nothing else is a word, as an ASCII - is: pflag reads it as
+// an argument (a word of a chat prompt set off by an em dash, or a flag's value).
 func docsCmdTypoDash(tok string) bool {
 	for _, d := range []string{"\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2015", "\u2212"} {
+		if tok == d {
+			return false
+		}
 		if strings.HasPrefix(tok, d) {
 			return true
 		}
@@ -1173,29 +1481,67 @@ func docsCmdAltFlag(tok string) string {
 }
 
 // docsCmdInlineRe is an inline code span that starts with tnctl: the docs quote many commands in
-// prose, and they are checked as the commands they are.
-var docsCmdInlineRe = regexp.MustCompile("`(tnctl [^`]+)`")
+// prose, and they are checked as the commands they are. A non-breaking or zero-width space after
+// tnctl (docsCmdOddLen) is one the shell would not split at: the span is found all the same, and
+// docsCmdInline reports the space.
+var docsCmdInlineRe = regexp.MustCompile("`(tnctl[ \\x{00a0}\\x{2007}\\x{202f}\\x{200b}\\x{feff}][^`]+)`")
 
 // docsCmdInlineSkip are the inline code spans that start with tnctl but are no command a page asks
-// anyone to run: the refusal the serve command prints, and the name of an older release.
+// anyone to run: the refusal the serve command prints. A release name (docsCmdInlineVersionRe) is
+// skipped too.
 var docsCmdInlineSkip = map[string]bool{
 	"tnctl council serve runs only inside a TeknoirBot": true,
-	"tnctl v0.0.9-beta": true,
+}
+
+// docsCmdInlineVersionRe is an inline span that names a release, such as `tnctl v0.3.0` or
+// `tnctl v0.0.9-beta`: a version, not a command.
+var docsCmdInlineVersionRe = regexp.MustCompile(`^tnctl v[0-9]+\.[0-9]+(\.[0-9]+)?\S*$`)
+
+// docsCmdHintWordRe is the plain word that follows a hint's verb: "lists its councils", "makes it the
+// default", "lists them:".
+var docsCmdHintWordRe = regexp.MustCompile(`^[a-z]+[.,:;]?$`)
+
+// docsCmdCutHint cuts the clause tnctl's own hints end a council command with ("tnctl council roster
+// list --bot scout lists its councils", "… --bot scout makes it the default", "… --templates lists each
+// member's slug and scope"), so the span is checked as the command it names. It cuts only a tnctl
+// council command, at a bare lists, makes or saves followed by a plain word, so a quoted "lists the
+// pods" or a chat prompt is never cut. A bare lists, makes or saves followed by a plain word in a
+// council command hides the flags after it; no council command takes such a positional argument.
+func docsCmdCutHint(span string) string {
+	toks := docsCmdTokens(span)
+	if len(toks) < 2 || toks[1] != "council" {
+		return span
+	}
+	for k := 2; k+1 < len(toks); k++ {
+		switch toks[k] {
+		case "lists", "makes", "saves":
+			if docsCmdHintWordRe.MatchString(toks[k+1]) {
+				return strings.Join(toks[:k], " ")
+			}
+		}
+	}
+	return span
 }
 
 // docsCmdInline returns the commands a run of prose lines quotes in inline code (docsCmdInlineRe).
-// A span's line breaks and blanks are collapsed (a span wrapped over two lines is one command) and a
-// table cell's \| is read as |. Its line number is the line the span starts on: startLine is the
-// 1-based line number of lines[0].
+// A span's line breaks and blanks are collapsed (a span wrapped over two lines is one command), and a
+// non-breaking or zero-width space in it is reported (docsCmdFixOddSpaces). A \| stays as written:
+// MkDocs shows it with its backslash in a code span, in a table cell too, and a bare | inside
+// backticks does not end a table cell there. A span that names a release, or is a refusal text, is no
+// command, and a hint tnctl prints is checked as the command it names (docsCmdCutHint). Its line
+// number is the line the span starts on: startLine is the 1-based line number of lines[0]. The lines
+// come as the page has them, so a span's own odd spaces are still in them.
 func docsCmdInline(page string, startLine int, lines []string) []docsCmdLine {
 	text := strings.Join(lines, "\n")
 	var out []docsCmdLine
 	for _, m := range docsCmdInlineRe.FindAllStringSubmatchIndex(text, -1) {
-		span := strings.Join(strings.Fields(strings.ReplaceAll(text[m[2]:m[3]], `\|`, "|")), " ")
-		if docsCmdInlineSkip[span] {
+		fixed, odd := docsCmdFixOddSpaces(docsCmdShell{}, text[m[2]:m[3]])
+		span := strings.Join(strings.Fields(fixed), " ")
+		if docsCmdInlineSkip[span] || docsCmdInlineVersionRe.MatchString(span) {
 			continue
 		}
-		out = append(out, docsCmdLine{page: page, line: startLine + strings.Count(text[:m[0]], "\n"), text: span})
+		span = docsCmdCutHint(span)
+		out = append(out, docsCmdLine{page: page, line: startLine + strings.Count(text[:m[0]], "\n"), text: span, odd: odd})
 	}
 	return out
 }
@@ -1633,8 +1979,13 @@ func TestDocsCouncilParser(t *testing.T) {
 			page: bash("tnctl --debug council role list"),
 		},
 		{
-			name: "a flag after a placeholder owns no value",
+			name: "a value flag after a placeholder swallows a flag, which is still checked",
 			page: bash("tnctl chat <bot> --thread --jsno"),
+			want: []string{`case.md:2: tnctl chat: unknown flag "--jsno"`},
+		},
+		{
+			name: "a flag after a placeholder is checked",
+			page: bash("tnctl chat <bot> --jsno"),
 			want: []string{`case.md:2: tnctl chat: unknown flag "--jsno"`},
 		},
 		{
@@ -1699,8 +2050,10 @@ func TestDocsCouncilParser(t *testing.T) {
 			},
 		},
 		{
+			// The commands inside a substitution are checked like any other: role list takes --json,
+			// so --templates --json is the form to show (-o name here would be refused).
 			name: "a command substitution",
-			page: bash("tnctl council role get $(tnctl council role list --templates -o name)"),
+			page: bash("tnctl council role get $(tnctl council role list --templates --json | jq -r '.available[0].slug')"),
 		},
 		{
 			name: "a substitution as a flag value",
@@ -1712,11 +2065,11 @@ func TestDocsCouncilParser(t *testing.T) {
 		},
 		{
 			name: "a nested substitution with a pipe",
-			page: bash("tnctl council role get $(echo $(tnctl council role list --templates -o name | head -1))"),
+			page: bash("tnctl council role get $(echo $(tnctl council role list --templates --json | jq -r '.available[0].slug' | head -1))"),
 		},
 		{
 			name: "a backtick substitution",
-			page: bash("tnctl council role get `tnctl council role list --templates -o name`"),
+			page: bash("tnctl council role get `tnctl council role list --templates --json | jq -r '.available[0].slug'`"),
 		},
 		{
 			name: "a flag after a substitution",
@@ -1905,6 +2258,7 @@ func TestDocsCouncilParser(t *testing.T) {
 		{
 			name: "a placeholder is no concrete argument",
 			page: bash("tnctl council role new <name> extra"),
+			want: []string{`case.md:2: tnctl council role new: too many arguments: "extra"`},
 		},
 		{
 			name: "a double dash is a value flag's value",
@@ -2184,13 +2538,26 @@ func TestDocsCouncilParser(t *testing.T) {
 			page: "says `tnctl council serve runs only inside a TeknoirBot`.\n",
 		},
 		{
+			// MkDocs (Python-Markdown tables) shows a code span's \| with its backslash, and a bare |
+			// inside backticks does not end the cell. These four replace the two escaped-pipe cases
+			// that read \| as |.
 			name: "an escaped pipe in a table cell",
 			page: "| `tnctl council roster list\\|get --bot B` | x |\n",
+			want: []string{`case.md:1: tnctl council roster: unknown subcommand "list\\"`},
 		},
 		{
-			name: "an escaped pipe with a typo",
-			page: "| `tnctl council roster list\\|gett` | x |\n",
+			name: "a bare pipe in a table cell",
+			page: "| `tnctl council roster list|get --bot B` | x |\n",
+		},
+		{
+			name: "a bare pipe with a typo in a table cell",
+			page: "| `tnctl council roster list|gett` | x |\n",
 			want: []string{`case.md:1: tnctl council roster: unknown subcommand "gett"`},
+		},
+		{
+			name: "an escaped pipe in a list item",
+			page: "- `tnctl council roster add\\|remove <c> <m>`\n",
+			want: []string{`case.md:1: tnctl council roster: unknown subcommand "add\\"`},
 		},
 		{
 			name: "a span after a fence keeps its line",
@@ -2198,8 +2565,605 @@ func TestDocsCouncilParser(t *testing.T) {
 			want: []string{`case.md:4: tnctl council role list: unknown flag "--nope"`},
 		},
 		{
+			name: "a span on a later line of prose after a fence",
+			page: "intro `tnctl council role list`\n```bash\ntnctl council role list\n```\nmore\nsee `tnctl council role list --nope`\n",
+			want: []string{`case.md:6: tnctl council role list: unknown flag "--nope"`},
+		},
+		{
 			name: "a span inside a text fence",
 			page: "```text\n`tnctl council rolee list`\n```\n",
+		},
+		// tnctl's own hint lines, quoted in inline code (docsCmdCutHint).
+		{
+			name: "a hint quoted inline",
+			page: "`roster use nope` adds `tnctl council roster list --bot scout lists its councils`.\nA member adds `tnctl council role list --bot scout --templates lists the members scout can use`.\n",
+			cmds: 2,
+		},
+		{
+			name: "a hint quoted inline with a typo",
+			page: "adds `tnctl council rostr list --bot scout lists its councils`.\n",
+			want: []string{`case.md:1: tnctl council: unknown subcommand "rostr"`},
+		},
+		{
+			name: "a quoted hint",
+			page: "adds `tnctl council roster list --bot scout lists its councils` and `tnctl council role list --bot scout --templates lists the members scout can use` and `tnctl council role list -n teknoir-demo --bot scout --templates lists every member` and `tnctl council roster list --bot scout lists them`.\n",
+		},
+		{
+			name: "a quoted hint of another verb",
+			page: "prints `tnctl council roster use <council> --bot scout makes another council the default` and `tnctl council roster add <council> <member> --bot scout --as scout-council saves a copy with that member`.\n",
+		},
+		{
+			name: "a quoted hint of every form",
+			page: "says `tnctl council roster use scout-council --bot scout makes it the default`, `tnctl council role list --bot <bot> --templates lists each member's slug and scope`, `tnctl council role list --bot scout --templates lists each` and `tnctl council role list --templates lists them: part member`.\n",
+		},
+		{
+			name: "a quoted hint with a typo",
+			page: "adds `tnctl council roster lst --bot scout lists its councils`.\n",
+			want: []string{`case.md:1: tnctl council roster: unknown subcommand "lst"`},
+		},
+		{
+			name: "a hint with a bad flag",
+			page: "adds `tnctl council roster list --bott scout lists its councils`.\n",
+			want: []string{`case.md:1: tnctl council roster list: unknown flag "--bott"`},
+		},
+		{
+			name: "a quoted word lists is no hint",
+			page: "run `tnctl council role new \"X\" --job \"lists the pods\" --bot scout --nope`.\n",
+			want: []string{`case.md:1: tnctl council role new: unknown flag "--nope"`},
+		},
+		{
+			name: "a chat prompt is no hint",
+			page: "run `tnctl chat scout lists the pods --jsno`.\n",
+			want: []string{`case.md:1: tnctl chat: unknown flag "--jsno"`},
+		},
+		{
+			name: "a hint verb before a flag is no hint",
+			page: "run `tnctl council roster list lists --bot scout`.\n",
+			want: []string{`case.md:1: tnctl council roster list: unknown subcommand "lists"`},
+		},
+		{
+			name: "a hint's words inside a chat prompt cut nothing",
+			page: bash("tnctl chat scout \"which command lists them\" --nope") +
+				"run `tnctl chat scout \"which command lists them\" --nope`.\n",
+			want: []string{
+				`case.md:2: tnctl chat: unknown flag "--nope"`,
+				`case.md:4: tnctl chat: unknown flag "--nope"`,
+			},
+		},
+		{
+			name: "a hint's ending in the middle of a bash line cuts nothing",
+			page: bash("tnctl council roster list --bot scout lists its councils; tnctl council rostr x"),
+			want: []string{
+				`case.md:2: tnctl council roster list: unknown subcommand "lists"`,
+				`case.md:2: tnctl council: unknown subcommand "rostr"`,
+			},
+		},
+		{
+			name: "a hint line: lists its councils",
+			page: "names them: `tnctl council roster list --bot scout lists its councils`.\n",
+		},
+		{
+			name: "a hint line: lists the members",
+			page: "`tnctl council role list --bot scout --templates lists the members scout can use`\n",
+		},
+		{
+			name: "a hint line from the help, with an apostrophe",
+			page: "`tnctl council role list --bot <bot> --templates lists each member's slug and scope.`\n",
+		},
+		{
+			name: "a hint line: lists the councils",
+			page: "`tnctl council roster list --bot <bot> lists the councils`\n",
+		},
+		{
+			name: "a hint line: makes another the default",
+			page: "`tnctl council roster use <council> --bot scout makes another council the default`\n",
+		},
+		{
+			name: "a hint line with a wrong command",
+			page: "`tnctl council roster lst --bot scout lists its councils`\n",
+			want: []string{`case.md:1: tnctl council roster: unknown subcommand "lst"`},
+		},
+		{
+			name: "a hint line with a wrong flag",
+			page: "`tnctl council role list --bto scout --templates lists the members scout can use`\n",
+			want: []string{`case.md:1: tnctl council role list: unknown flag "--bto"`},
+		},
+		{
+			name: "a quoted version",
+			page: "runs `tnctl v0.3.0` and `tnctl v0.0.9-beta`.\n",
+		},
+		// A word of pipes alone inside a bracket (the guard on the subcommand alternatives).
+		{
+			name: "a doubled pipe inside a bracket",
+			page: bash("tnctl council role [--bot <bot> || --teamspace] list"),
+			want: []string{`case.md:2: tnctl council role: unknown subcommand "||"`},
+		},
+		{
+			name: "a doubled pipe inside a bracket one level up",
+			page: bash("tnctl council [--bot <bot> || --nope] role list"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "||"`},
+		},
+		{
+			name: "a tripled pipe inside a bracket",
+			page: bash("tnctl council role [--help ||| --nope] list"),
+			want: []string{`case.md:2: tnctl council role: unknown subcommand "|||"`},
+		},
+		// Here-documents.
+		{
+			name: "a backslash-quoted here-document delimiter",
+			page: bash("tnctl council apply -f - <<\\EOF\n- name: x\nEOF\ntnctl council rolee list"),
+			want: []string{`case.md:5: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a partly quoted here-document delimiter",
+			page: bash("tnctl council apply -f - <<E'O'F\n- name: x\nEOF\ntnctl council rolee list"),
+			want: []string{`case.md:5: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a here-document that never ends",
+			page: bash("tnctl chat scout <<'EOF'\nhi\nEOF.\ntnctl council rolee list"),
+			want: []string{`case.md:2: a here-document whose delimiter "EOF" never comes: the rest of the block is read as its body`},
+		},
+		{
+			name: "two here-documents on one line",
+			page: bash("cat <<A <<B\nx\nA\ntnctl council role list shows nothing\nB\ntnctl council rolee list"),
+			want: []string{`case.md:7: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a bare << opens no here-document",
+			page: bash("tnctl chat scout <<\ntnctl council rolee list"),
+			want: []string{`case.md:3: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a shift in arithmetic opens no here-document",
+			page: bash("(( x <<= 2 ))\n(( y = 1 << 2 ))\ntnctl council rolee list"),
+			want: []string{`case.md:4: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			// A here-document in a list item (an indented delimiter), the <<- form with a tab-indented
+			// body, and one a closing fence ends: the next block is read again. The unended
+			// here-document of the third block is reported on its own line (16).
+			name: "a here-document in a list item, with <<-, and one a fence ends",
+			page: "1. Apply:\n\n    ```bash\n    tnctl council apply -f - <<'EOF'\n    - name: triage --nope\n    EOF\n    tnctl council rolee list\n    ```\n" +
+				bash("cat <<-EOF | tnctl council apply -f -\n\t- name: x --nope\n\tEOF\ntnctl council rostr list") +
+				bash("tnctl council apply -f - <<'EOF'\n- name: x") +
+				bash("tnctl council rol list"),
+			want: []string{
+				`case.md:7: tnctl council: unknown subcommand "rolee"`,
+				`case.md:13: tnctl council: unknown subcommand "rostr"`,
+				`case.md:16: a here-document whose delimiter "EOF" never comes: the rest of the block is read as its body`,
+				`case.md:20: tnctl council: unknown subcommand "rol"`,
+			},
+		},
+		// Console transcripts: only the "$ " lines are commands.
+		{
+			name: "transcript output is no command",
+			page: "```console\n$ tnctl council roster use nope --bot scout\nError: There is no council 'nope' for scout.\ntnctl council roster list --bot scout lists its councils\nRun the command with --help for usage and examples.\n```\n",
+			cmds: 1,
+		},
+		{
+			name: "transcript output is no continuation",
+			page: "```console\n$ tnctl council role list --bot scout\n  - analyst --x\n```\n",
+			cmds: 1,
+		},
+		{
+			name: "a PS2 continuation",
+			page: "```console\n$ tnctl council role new \"Stream watcher\" \\\n>   --job \"x\" --bot scout --nope\n```\n",
+			want: []string{`case.md:2: tnctl council role new: unknown flag "--nope"`},
+		},
+		{
+			name: "a PS2 here-document ends at > EOF",
+			page: "```console\n$ tnctl chat scout <<'EOF'\n> why --x\n> EOF\n$ tnctl council rolee list\n```\n",
+			want: []string{`case.md:5: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a $ line in a here-document starts no transcript",
+			page: bash("tnctl chat scout <<'EOF'\n$ tnctl council role list\nEOF\ntnctl council rolee list"),
+			want: []string{`case.md:5: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a console fence without prompts is read",
+			page: "```console\ntnctl council rolee list\n```\n",
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "zsh and shell-session fences",
+			page: "```zsh\ntnctl council rolee list\n```\n```shell-session\n$ tnctl council rostr list\n```\n",
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`, `case.md:5: tnctl council: unknown subcommand "rostr"`},
+		},
+		// Fences.
+		{
+			name: "a backtick info string is no fence",
+			page: "```` ```bash ```` blocks.\n\n```bash\ntnctl council rolee list\n```\n",
+			want: []string{`case.md:4: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a fence in a blockquote",
+			page: "> ```bash\n> tnctl council rolee list\n> ```\n",
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a fence in a nested blockquote",
+			page: "> > ```bash\n> > tnctl council role list --nope\n> > ```\n",
+			want: []string{`case.md:2: tnctl council role list: unknown flag "--nope"`},
+		},
+		{
+			name: "a prompt line of a text transcript is no fence",
+			page: "```text\ntokens today: 1 of 5\n> ```\n```\n\n```bash\ntnctl council role list\n```\n",
+			cmds: 1,
+		},
+		{
+			name: "a blockquote ends the fence it opened",
+			page: "> ```bash\n> tnctl council role list\n\n```bash\ntnctl council role list\n```\n",
+			want: []string{"case.md:1: the fence never closes"},
+			cmds: 2,
+		},
+		// The command lines the parser cuts out of a block.
+		{
+			name: "a spaced brace alternative cuts nothing",
+			page: bash("tnctl council role new <name> --job <text> {--bot <bot> | --teamspace} [--dry-runn]"),
+			want: []string{`case.md:2: tnctl council role new: unknown flag "[--dry-runn]"`},
+		},
+		{
+			name: "a brace group is no synopsis",
+			page: bash("{ echo hi; tnctl council rolee list; }"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a command after a synopsis group",
+			page: bash("tnctl chat <bot> (--thread <id> | --new) && tnctl council rolee list"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a command after a brace synopsis group",
+			page: bash("tnctl council role new <name> --job <text> {--bot <bot> | --teamspace} && tnctl council rolee list"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a glued json on the export command",
+			page: bash("tnctl council role export triage --bot scout -ojson\n" +
+				"tnctl council role export triage --bot scout --output=json\n" +
+				"tnctl council role export <name> --bot <bot> [-o json]\n" +
+				"tnctl council role export <name> --bot <bot> [--output json]"),
+			want: []string{
+				"case.md:2: tnctl council role export: -o json is refused here (export prints YAML only; use council role get -o json)",
+				"case.md:3: tnctl council role export: -o json is refused here (export prints YAML only; use council role get -o json)",
+				"case.md:4: tnctl council role export: -o json is refused here (export prints YAML only; use council role get -o json)",
+				"case.md:5: tnctl council role export: -o json is refused here (export prints YAML only; use council role get -o json)",
+			},
+		},
+		{
+			name: "--output on a command that takes --json",
+			page: bash("tnctl council role list --bot scout --output json"),
+			want: []string{`case.md:2: tnctl council role list: -o is ignored here, use --json`},
+		},
+		{
+			name: "a word before a double dash is counted",
+			page: bash("tnctl council roster use ops scout -- x"),
+			want: []string{`case.md:2: tnctl council roster use: too many arguments: "scout"`},
+		},
+		{
+			name: "the words after a double dash are not counted",
+			page: bash("tnctl council roster use ops -- x y z"),
+		},
+		{
+			name: "a redirect after a tab",
+			page: bash("tnctl council role list --bot scout\t>x.txt"),
+		},
+		{
+			name: "an escaped quote in quotes, a quote in a substitution, an open substitution",
+			page: bash("tnctl chat scout \"say \\\" now\" --jsno\ntnctl council role get $(echo ')') --nope\n" +
+				"tnctl council role get $(tnctl council role list --json; tnctl council rolee list"),
+			want: []string{
+				`case.md:2: tnctl chat: unknown flag "--jsno"`,
+				`case.md:3: tnctl council role get: unknown flag "--nope"`,
+				`case.md:4: a quote or $( that never closes`,
+			},
+		},
+		{
+			name: "a quoted prompt over three lines",
+			page: bash("tnctl chat scout \"Check the pods on arm-2\nand restart the ones that crash,\n" +
+				"then report back\" --jsno"),
+			want: []string{`case.md:2: tnctl chat: unknown flag "--jsno"`},
+			cmds: 1,
+		},
+		{
+			name: "a bang, time, a spaced subshell and a loop after a pipe",
+			page: bash("! tnctl council rolee list\ntime tnctl council rostr list\n( tnctl council rol list )\n" +
+				"tnctl council role list --json | while read r; do tnctl council rolee get \"$r\"; done"),
+			want: []string{
+				`case.md:2: tnctl council: unknown subcommand "rolee"`,
+				`case.md:3: tnctl council: unknown subcommand "rostr"`,
+				`case.md:4: tnctl council: unknown subcommand "rol"`,
+				`case.md:5: tnctl council: unknown subcommand "rolee"`,
+			},
+		},
+		{
+			name: "a wrapper's options, numbers and {} are skipped, nothing else",
+			page: bash("watch -n 5 tnctl council rolee list\nxargs -I {} tnctl council rostr get {}\nsudo mv tnctl /usr/local/bin/"),
+			want: []string{
+				`case.md:2: tnctl council: unknown subcommand "rolee"`,
+				`case.md:3: tnctl council: unknown subcommand "rostr"`,
+			},
+		},
+		{
+			// xargs takes the string of --replace glued (--replace={}), so a {} after it would be the
+			// command in a shell. The walk is lenient there: a page that writes it means the tnctl after.
+			name: "a {} before the command is skipped",
+			page: bash("xargs --replace {} tnctl council rolee get {}"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "every other keyword before a command",
+			page: bash("if false; then tnctl council rolea list; fi\n" +
+				"if false; then :; elif tnctl council roleb list; then :; fi\n" +
+				"if false; then :; else tnctl council rolec list; fi\n" +
+				"while tnctl council roled list; do sleep 1; done\n" +
+				"until tnctl council rolee list; do sleep 1; done\n" +
+				"command tnctl council rolef list\n" +
+				"{ tnctl council roleg list; }"),
+			want: []string{
+				`case.md:2: tnctl council: unknown subcommand "rolea"`,
+				`case.md:3: tnctl council: unknown subcommand "roleb"`,
+				`case.md:4: tnctl council: unknown subcommand "rolec"`,
+				`case.md:5: tnctl council: unknown subcommand "roled"`,
+				`case.md:6: tnctl council: unknown subcommand "rolee"`,
+				`case.md:7: tnctl council: unknown subcommand "rolef"`,
+				`case.md:8: tnctl council: unknown subcommand "roleg"`,
+			},
+		},
+		{
+			name: "every other wrapper before a command",
+			page: bash("sudo tnctl council roleh list\n" +
+				"env COUNCIL=ops tnctl council rolei list\n" +
+				"nohup tnctl council rolej list &\n" +
+				"exec tnctl council rolek list\n" +
+				"timeout 10 tnctl council rolel list"),
+			want: []string{
+				`case.md:2: tnctl council: unknown subcommand "roleh"`,
+				`case.md:3: tnctl council: unknown subcommand "rolei"`,
+				`case.md:4: tnctl council: unknown subcommand "rolej"`,
+				`case.md:5: tnctl council: unknown subcommand "rolek"`,
+				`case.md:6: tnctl council: unknown subcommand "rolel"`,
+			},
+		},
+		{
+			name: "a wrapper option with its value apart",
+			page: bash("tnctl council role list --bot scout --json | xargs -I % tnctl council rolee get % --bot scout\n" +
+				"sudo -u anders tnctl council rostr list\n" +
+				"timeout -s KILL 10 tnctl council rolee list\n" +
+				"env -u FOO tnctl council rostr list\n" +
+				"watch -n 0.5 tnctl council rolee list\n" +
+				"tnctl council role list --bot scout --json | xargs -d '\\n' -n 1 tnctl council role get --bot scout"),
+			want: []string{
+				`case.md:2: tnctl council: unknown subcommand "rolee"`,
+				`case.md:3: tnctl council: unknown subcommand "rostr"`,
+				`case.md:4: tnctl council: unknown subcommand "rolee"`,
+				`case.md:5: tnctl council: unknown subcommand "rostr"`,
+				`case.md:6: tnctl council: unknown subcommand "rolee"`,
+			},
+		},
+		{
+			name: "a wrapper option value is no command",
+			page: bash("sudo -u root mv tnctl /usr/local/bin/\nsudo mv tnctl /usr/local/bin/\ntnctl council role list"),
+			cmds: 1,
+		},
+		{
+			name: "an assignment before a wrapper",
+			page: bash("FOO=1 sudo tnctl council rolee list"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a duration before the command",
+			page: bash("timeout 10s tnctl council rolee list"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a fractional interval before the command",
+			page: bash("watch -n 0.5 tnctl council rolee list"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a case pattern",
+			page: bash("case \"$1\" in\n  list) tnctl council rolee list ;;\nesac"),
+			want: []string{`case.md:3: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a wrapper's word that is no number",
+			page: bash("sudo mv tnctl /usr/local/bin/"),
+		},
+		{
+			name: "a typographic dash owns a value",
+			page: bash("tnctl council role get triage \u2014bott scout"),
+			want: []string{`case.md:2: tnctl council role get: unknown flag "` + "\u2014" + `bott"`},
+		},
+		{
+			name: "odd spaces in a comment, on an indented line, and of every kind",
+			page: bash("tnctl council role list # all\u00a0roles\ntnctl council roster add <name> <member>\n    --bot\u00a0<bot> [--scope <scope>]\n" +
+				"tnctl\u202fcouncil role list\ntnctl\u2007council role list\ntnctl\u200bcouncil role list"),
+			want: []string{
+				`case.md:3: a non-breaking or zero-width space: the shell reads it as part of a word`,
+				`case.md:5: a non-breaking or zero-width space: the shell reads it as part of a word`,
+				`case.md:6: a non-breaking or zero-width space: the shell reads it as part of a word`,
+				`case.md:7: a non-breaking or zero-width space: the shell reads it as part of a word`,
+			},
+		},
+		{
+			name: "a typographic dash behind a value",
+			page: bash("tnctl council role new <name> --job <text> [--how <text>|\u2013how-file <file>]"),
+			want: []string{`case.md:2: tnctl council role new: unknown flag "` + "\u2013" + `how-file"`},
+		},
+		{
+			name: "a non-breaking space after tnctl in inline code",
+			page: "Run `tnctl\u00a0council rolee list`.\n",
+			want: []string{
+				`case.md:1: a non-breaking or zero-width space: the shell reads it as part of a word`,
+				`case.md:1: tnctl council: unknown subcommand "rolee"`,
+			},
+			cmds: 1,
+		},
+		{
+			name: "a non-breaking space inside inline code",
+			page: "Run `tnctl council\u00a0role list --nope`.\n",
+			want: []string{
+				`case.md:1: a non-breaking or zero-width space: the shell reads it as part of a word`,
+				`case.md:1: tnctl council role list: unknown flag "--nope"`,
+			},
+		},
+		{
+			name: "a zero-width space in inline code after a stray backtick",
+			page: "A ` sign, then `tnctl council\u200brole list`.\n",
+			want: []string{`case.md:1: a non-breaking or zero-width space: the shell reads it as part of a word`},
+		},
+		{
+			name: "a non-breaking space on the second line of a wrapped inline span",
+			page: "Run `tnctl council\nrole\u00a0 list`.\n",
+			want: []string{`case.md:1: a non-breaking or zero-width space: the shell reads it as part of a word`},
+		},
+		{
+			name: "a non-breaking space in prose and inside quotes in inline code",
+			page: "Run `tnctl chat scout \"hi\u00a0there\"` now.\n",
+			cmds: 1,
+		},
+		{
+			name: "a pipe with a blank after it only",
+			page: bash("tnctl council role get triage -o json| jq ."),
+		},
+		{
+			name: "a command after a pipe with a blank after it only",
+			page: bash("tnctl council role list --json| tnctl council rolee list"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a # inside quotes before a backslash",
+			page: bash("tnctl chat scout \"issue #12\" \\\n  --jsno"),
+			want: []string{`case.md:2: tnctl chat: unknown flag "--jsno"`},
+		},
+		{
+			name: "a # inside a word before a backslash",
+			page: bash("tnctl chat scout a#b \\\n  --jsno"),
+			want: []string{`case.md:2: tnctl chat: unknown flag "--jsno"`},
+		},
+		{
+			name: "an assignment from a substitution",
+			page: bash("id=$(tnctl chat threads scout -o json | jq -r '.[0].id')"),
+			want: []string{`case.md:2: tnctl chat threads: -o is ignored here, use --json`},
+		},
+		{
+			name: "a typo inside a quoted substitution",
+			page: bash("tnctl chat scout --thread \"$(tnctl chat thread scout --json | jq -r '.[0].id')\" --follow"),
+			want: []string{`case.md:2: tnctl chat: unknown subcommand "thread"`},
+		},
+		{
+			name: "a ) in a quoted prompt inside a substitution",
+			page: bash(`answer=$(tnctl chat scout "pick one: 1) restart 2) skip" --json)`),
+			cmds: 1,
+		},
+		{
+			name: "an apostrophe in a prompt before a substitution",
+			page: bash(`tnctl chat scout "what's new" --thread "$(tnctl chat thread scout --json | jq -r '.[0].id')"`),
+			want: []string{`case.md:2: tnctl chat: unknown subcommand "thread"`},
+		},
+		{
+			name: "a substitution inside single quotes is text",
+			page: bash(`tnctl chat scout "what's up?" --json; echo '$(tnctl council rolee list)'`),
+			cmds: 1,
+		},
+		{
+			name: "an arithmetic expansion around a substitution",
+			page: bash(`n=$(( $(tnctl council role list --bot scout --json | jq length) + 1 ))`),
+			cmds: 1,
+		},
+		{
+			name: "a bot placeholder as an argument",
+			page: bash("tnctl council roster use <name> <bot>\ntnctl council roster use ops <bot>\ntnctl council roster add <name> <member> <bot>"),
+			want: []string{
+				`case.md:2: tnctl council roster use: too many arguments: "<bot>"`,
+				`case.md:3: tnctl council roster use: too many arguments: "<bot>"`,
+				`case.md:4: tnctl council roster add: too many arguments: "<bot>"`,
+			},
+		},
+		{
+			name: "a placeholder that is no one word leaves the count open",
+			page: bash("tnctl council role new <name> [extra...]\ntnctl council role <command> --bot <bot>\ntnctl council roster apply -f <file|-> <x|y>\ntnctl council roster use <name> $BOT"),
+		},
+		{
+			name: "a placeholder with spaces is one value",
+			page: bash("tnctl council role new <name> --job <one line job> --bot <bot name>\n" +
+				"tnctl council role new Scout --job <one line job> --bot scout\n" +
+				"tnctl council roster add <member> --bot <bot> --scope <bot or teamspace>\n" +
+				"tnctl council roster use <council name> <bot name>"),
+			want: []string{`case.md:5: tnctl council roster use: too many arguments: "<bot name>"`},
+		},
+		{
+			name: "an input redirect is no placeholder",
+			page: bash("tnctl council roster apply -f - < council.yaml\ntnctl council roster apply -f - <<EOF\nEOF"),
+		},
+		{
+			name: "a placeholder before the subcommand",
+			page: bash("tnctl council roster <name> add <member> --bot <bot>\ntnctl council <name> roster add <member>\ntnctl council roster 'ops scout' add <member>"),
+			want: []string{
+				`case.md:2: tnctl council roster: a placeholder before the subcommand "add"`,
+				`case.md:3: tnctl council: a placeholder before the subcommand "roster"`,
+				`case.md:4: tnctl council roster: a placeholder before the subcommand "add"`,
+			},
+		},
+		{
+			name: "flags, a variable or an elision before the subcommand",
+			page: bash("tnctl [flags] council role list\ntnctl council [flags] role list\ntnctl council <global-flags> role list\ntnctl council $OPTS roster list\ntnctl council \u2026 role list"),
+		},
+		{
+			name: "a lone em dash in a prompt",
+			page: bash("tnctl chat scout what changed \u2014 and why"),
+		},
+		{
+			name: "a lone dash is a word, not a flag",
+			page: bash("tnctl council role list \u2014 --bot scout"),
+			want: []string{`case.md:2: tnctl council role list: unknown subcommand "` + "\u2014" + `"`},
+		},
+		{
+			name: "a lone dash is a flag's value",
+			page: bash("tnctl council role list --bot \u2014"),
+		},
+		{
+			name: "a lone dash in the subcommand slot is refused",
+			page: bash("tnctl council \u2014 role list"),
+			want: []string{`case.md:2: tnctl council: unknown subcommand "` + "\u2014" + `"`},
+		},
+		{
+			name: "an escaped backslash ends no line",
+			page: bash("tnctl chat scout foo\\\\\ntnctl council rolee list"),
+			want: []string{`case.md:3: tnctl council: unknown subcommand "rolee"`},
+			cmds: 2,
+		},
+		{
+			name: "three backslashes continue the line",
+			page: bash("tnctl chat scout foo\\\\\\\n  --jsno"),
+			want: []string{`case.md:2: tnctl chat: unknown flag "--jsno"`},
+			cmds: 1,
+		},
+		{
+			name: "a << inside a quote the line above opened",
+			page: bash("tnctl chat scout \"compare a\nand b << c\"\ntnctl council rolee list"),
+			want: []string{`case.md:4: tnctl council: unknown subcommand "rolee"`},
+		},
+		{
+			name: "a non-breaking space inside a quote the line above opened",
+			page: bash("tnctl chat scout \"why does\namr-02\u00a0restart?\""),
+		},
+		{
+			name: "a # inside a quote the line above opened, then a here-document",
+			page: bash("tnctl chat scout \"why\n#1 and 2\" <<EOF\ntnctl council rolee list\nEOF"),
+		},
+		{
+			name: "a non-breaking space after a quote closes on the next line",
+			page: bash("tnctl chat scout \"why\ndoes\"\u00a0--nope"),
+			want: []string{"case.md:2: a non-breaking or zero-width space: the shell reads it as part of a word", `case.md:2: tnctl chat: unknown flag "--nope"`},
+		},
+		{
+			name: "an open quote above a tnctl line with a here-document",
+			page: bash("tnctl chat scout \"oops\ntnctl chat scout <<EOF\ntnctl council rolee list\nEOF"),
+			want: []string{"case.md:2: a quote or $( that never closes"},
 		},
 		{
 			name: "CRLF line endings",
@@ -2221,6 +3185,33 @@ func TestDocsCouncilParser(t *testing.T) {
 				t.Errorf("messages\n got: %q\nwant: %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDocsCouncilSubHasFlagSkipsCobraCommands pins, on a tree of its own, that docsCmdSubHasFlag never
+// counts the flags of cobra's help and completion commands of the root. cobra adds those to the real
+// root only when a command runs, so a check on rootCmd would depend on the order of the tests.
+func TestDocsCouncilSubHasFlagSkipsCobraCommands(t *testing.T) {
+	root := &cobra.Command{Use: "tnctl"}
+	comp := &cobra.Command{Use: "completion"}
+	comp.Flags().Bool("no-descriptions", false, "")
+	help := &cobra.Command{Use: "help", Run: func(*cobra.Command, []string) {}}
+	help.Flags().Bool("only-on-help", false, "")
+	council := &cobra.Command{Use: "council"}
+	council.Flags().Bool("bot-flag", false, "")
+	deep := &cobra.Command{Use: "help", Run: func(*cobra.Command, []string) {}} // a real subcommand that happens to be called help
+	deep.Flags().Bool("deep-help-flag", false, "")
+	council.AddCommand(deep)
+	root.AddCommand(comp, help, council)
+	for _, tok := range []string{"--no-descriptions", "--only-on-help"} {
+		if docsCmdSubHasFlag(root, tok) {
+			t.Errorf("docsCmdSubHasFlag(root, %q) = true: cobra's own help/completion command counted", tok)
+		}
+	}
+	for _, tok := range []string{"--bot-flag", "--deep-help-flag"} {
+		if !docsCmdSubHasFlag(root, tok) {
+			t.Errorf("docsCmdSubHasFlag(root, %q) = false: a real subcommand's flag not counted", tok)
+		}
 	}
 }
 
