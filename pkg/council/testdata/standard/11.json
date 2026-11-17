@@ -476,6 +476,58 @@
       }
     },
     {
+      "type": "tool_call",
+      "data": {
+        "id": "tu_1",
+        "input": {
+          "tasks": [
+            {
+              "member": "pilot",
+              "task": "x",
+              "why": "the refusal's test"
+            }
+          ]
+        },
+        "member": "captain",
+        "tool": "convene_council"
+      }
+    },
+    {
+      "type": "tool_result",
+      "data": {
+        "id": "tu_1",
+        "member": "captain",
+        "ok": false,
+        "summary": "\"pilot\" is not a member (fleet or coder)"
+      }
+    },
+    {
+      "type": "tool_call",
+      "data": {
+        "id": "tu_2",
+        "input": {
+          "tasks": [
+            {
+              "member": "",
+              "task": "x",
+              "why": "the refusal's test"
+            }
+          ]
+        },
+        "member": "captain",
+        "tool": "convene_council"
+      }
+    },
+    {
+      "type": "tool_result",
+      "data": {
+        "id": "tu_2",
+        "member": "captain",
+        "ok": false,
+        "summary": "a task has no member (fleet or coder)"
+      }
+    },
+    {
       "type": "text_delta",
       "data": {
         "member": "captain",

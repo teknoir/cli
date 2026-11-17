@@ -2037,6 +2037,40 @@ func TestChatFinalStartsAParagraphAfterCaptainText(t *testing.T) {
 	}
 }
 
+// A convene the platform refuses is a failed tool call like any other, so the lead's tool call ends
+// the text streamed before it: the next round's text is the answer, and the final does not print it
+// a second time.
+func TestChatRefusedConvenePrintsTheFinalOnce(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	const answer = "r2 is degraded because the edge is overloaded."
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "text_delta", `"member":"captain","text":"Let me ask the council."`),
+			frame(2, "tool_call", `"member":"captain","id":"tu_2","tool":"convene_council","input":{"tasks":[]}`),
+			frame(3, "tool_result", `"member":"captain","id":"tu_2","ok":false,"summary":"A Coder task needs the person to ask."`),
+			frame(4, "text_delta", `"member":"captain","text":"`+answer+`"`),
+			frame(5, "final", `"text":"`+answer+`"`),
+			frame(6, "turn_end", `"state":"done"`),
+		})
+	})
+	out, _, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(out, answer); n != 1 {
+		t.Errorf("stdout %q: the answer is printed %d times, want 1", out, n)
+	}
+	// The call's progress line on stderr ends stdout's open line first.
+	if want := "Let me ask the council.\n" + answer + "\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+}
+
 // A malformed frame is skipped where it is, and the turn goes on: it is not a reconnect.
 func TestChatSkipsAMalformedFrame(t *testing.T) {
 	noBotMode(t)

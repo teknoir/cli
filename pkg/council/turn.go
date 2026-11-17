@@ -1092,8 +1092,10 @@ func (t *turn) runToolBlocks(ctx context.Context, r *runRole, task int, blocks [
 	results := make([]anthropic.ContentBlockParamUnion, 0, len(blocks))
 	ev := make([]evidence, 0, len(blocks))
 	for _, b := range blocks {
-		// The plan event stands for a convene_council call: it posts no tool_call of its own.
-		emit := b.Name != toolConvene
+		// The plan event stands for an accepted convene_council call: it posts no tool_call of its
+		// own. A refused convene posts one like any failed call.
+		_, refused := overrides[b.ID]
+		emit := b.Name != toolConvene || refused
 		if emit {
 			data := map[string]any{"member": r.wire, "id": b.ID, "tool": b.Name, "input": eventInput(b.Input)}
 			if task >= 0 {

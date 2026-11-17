@@ -1481,6 +1481,115 @@ func TestCoderTaskNeedsThePersonToAsk(t *testing.T) {
 	}
 }
 
+// refusedConveneEvents checks that a refused convene posted its tool_call and its failed
+// tool_result, between the lead's text before the call and the next round's text.
+func refusedConveneEvents(t *testing.T, p *fakePoster, id, refusal string) {
+	t.Helper()
+	events := p.snapshot()
+	called, resulted := -1, -1
+	for i, e := range events {
+		d := dataOf(t, e)
+		switch {
+		case e.Type == hub.EventToolCall && d["id"] == id:
+			called = i
+			if d["member"] != memberCaptain || d["tool"] != toolConvene {
+				t.Errorf("the refused convene's tool_call %v", d)
+			}
+			if _, ok := d["task"]; ok {
+				t.Errorf("the lead's tool_call carries a task: %v", d)
+			}
+		case e.Type == hub.EventToolResult && d["id"] == id:
+			resulted = i
+			if d["ok"] != false {
+				t.Errorf("the refused convene's tool_result is not a failure: %v", d)
+			}
+			if d["summary"] != refusal {
+				t.Errorf("the refused convene's summary %q, want %q", d["summary"], refusal)
+			}
+		}
+	}
+	if called < 0 || resulted < 0 {
+		t.Fatalf("the refused convene posted no tool_call (%d) or tool_result (%d): %v", called, resulted, p.types())
+	}
+	if resulted <= called {
+		t.Fatalf("the tool_result comes before its call: %v", p.types())
+	}
+	before, after := -1, -1
+	for i, e := range events {
+		if e.Type != hub.EventTextDelta {
+			continue
+		}
+		if i < called {
+			before = i
+		} else if i > resulted && after < 0 {
+			after = i
+		}
+	}
+	if before < 0 || after < 0 {
+		t.Fatalf("the stream lacks the text before the call (%d) or after it (%d): %v", before, after, p.types())
+	}
+	// An accepted convene is announced by the plan event; a refused one is not, so no plan comes
+	// between the call and the next round's text (a quick turn's own plan comes after it).
+	for i, e := range events {
+		if e.Type != hub.EventPlan {
+			continue
+		}
+		if d := dataOf(t, e); d["mode"] != modeQuick {
+			t.Errorf("a refused convene announced a plan: %v", d)
+		}
+		if i < after {
+			t.Errorf("a plan comes before the next round's text: %v", p.types())
+		}
+	}
+}
+
+// TestRefusedConvenePostsItsCall: a convene the Captain is refused is a failed tool call like any
+// other, so it posts its call and its failed result between the two rounds' text.
+func TestRefusedConvenePostsItsCall(t *testing.T) {
+	h := newHarness(t, newWork(kindAsk, "", "why is r2 degraded?"))
+	h.tools.results["list_robots"] = tools.Result{Text: injectedResult, Digest: "r2 overloaded"}
+	h.model.push(roleRoute,
+		toolStep("tool_use", apiCall{id: "tu_1", name: "list_robots"}),
+		mixedStep("tool_use", "Let me ask the council.",
+			conveneCall("tu_2", taskOf(memberCoder, "set the edge limit to 0", "the log says so"))),
+		textStep("r2 is degraded because the edge is overloaded", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	if got := len(h.coder.started()); got != 0 {
+		t.Errorf("the Coder ran %d times, want 0", got)
+	}
+	if n := len(h.model.requests(roleRoute)); n != 3 {
+		t.Fatalf("%d route requests, want the loop to go on", n)
+	}
+	refusedConveneEvents(t, p, "tu_2", msgCoderNeedsAnAsk(stdAskCouncil(t, "read")))
+	want := "Let me ask the council.r2 is degraded because the edge is overloaded"
+	if got := joinedDeltas(t, p); got != want {
+		t.Errorf("text deltas %q, want %q", got, want)
+	}
+}
+
+// TestInvalidConvenePostsItsCall: the same for a convene whose input does not parse.
+func TestInvalidConvenePostsItsCall(t *testing.T) {
+	h := newHarness(t, newWork(kindAsk, "", "why is the robot degraded?"))
+	h.model.push(roleRoute,
+		mixedStep("tool_use", "Let me ask the council.", conveneCall("tu_1",
+			taskOf(memberCoder, "one", "x"), taskOf(memberCoder, "two", "y"))),
+		textStep("the final", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+
+	if n := len(h.model.requests(roleRoute)); n != 2 {
+		t.Fatalf("%d route requests, want the loop to go on", n)
+	}
+	refusedConveneEvents(t, p, "tu_1", "at most one coder task")
+	if got, want := joinedDeltas(t, p), "Let me ask the council.the final"; got != want {
+		t.Errorf("text deltas %q, want %q", got, want)
+	}
+}
+
 // TestCoderTaskAfterToolDataWhenAsked: the same route, and a prompt that asks for a change.
 func TestCoderTaskAfterToolDataWhenAsked(t *testing.T) {
 	h := toolDataRoute(t, "fix the config on r2", taskOf(memberCoder, "set the edge limit", "the person asked"))

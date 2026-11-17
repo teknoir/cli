@@ -280,6 +280,32 @@
       }
     },
     {
+      "type": "tool_call",
+      "data": {
+        "id": "tu_1",
+        "input": {
+          "tasks": [
+            {
+              "member": "fleet",
+              "task": "the degraded robots",
+              "why": "find the facts"
+            }
+          ]
+        },
+        "member": "captain",
+        "tool": "convene_council"
+      }
+    },
+    {
+      "type": "tool_result",
+      "data": {
+        "id": "tu_1",
+        "member": "captain",
+        "ok": false,
+        "summary": "at access level none only a coder task may be convened"
+      }
+    },
+    {
       "type": "text_delta",
       "data": {
         "member": "captain",
