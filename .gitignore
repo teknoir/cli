@@ -26,3 +26,5 @@ tnctl
 tncli
 
 backup
+# Test logs (scripts/test under a coding agent)
+.test-logs/
