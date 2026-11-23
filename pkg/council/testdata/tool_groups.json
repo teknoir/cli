@@ -1,0 +1,21 @@
+{
+  "get_config": "core_read",
+  "get_device": "core_read",
+  "get_overview": "core_read",
+  "get_problems": "core_read",
+  "get_robot": "core_read",
+  "inspect_logs": "inspect",
+  "inspect_pod": "inspect",
+  "inspect_release": "inspect",
+  "list_devices": "core_read",
+  "list_fleets": "core_read",
+  "list_kinds": "core_read",
+  "list_robot_types": "core_read",
+  "list_robots": "core_read",
+  "list_teamspaces": "core_read",
+  "mqtt_get_sample": "mqtt",
+  "mqtt_read": "mqtt",
+  "mqtt_sample": "mqtt",
+  "prom_query": "metrics",
+  "whoami": "core_read"
+}

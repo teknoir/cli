@@ -75,6 +75,89 @@ func TestBudgetUpgradeKeepsCounts(t *testing.T) {
 	}
 }
 
+// limitTokens lowers the token cap and keeps the calls; a limit at or above the cap changes nothing,
+// and neither does a limit of 0 or less.
+func TestBudgetLimitTokens(t *testing.T) {
+	b := newBudget(capsCouncil)
+	b.limitTokens(100_000)
+	if got := b.limits(); got != (caps{calls: 30, tokens: 100_000}) {
+		t.Errorf("limits = %+v, want 100000 tokens and 30 calls", got)
+	}
+	b.add(model.Usage{Input: 80_000})
+	if ok, what := b.begin(false); ok || what != "tokens" {
+		t.Errorf("a phase call past the lowered cap = %v, %q, want it refused with tokens", ok, what)
+	}
+
+	for _, limit := range []int64{0, -1, 500_000, 600_000} {
+		b := newBudget(capsQuick)
+		b.limitTokens(limit)
+		if got := b.limits(); got != capsQuick {
+			t.Errorf("limitTokens(%d) changed capsQuick to %+v", limit, got)
+		}
+	}
+}
+
+// upgrade keeps the council's own cap: it lowers the turn's new caps when they are above it, and
+// never raises a cap the council did not set.
+func TestBudgetUpgradeKeepsRosterCap(t *testing.T) {
+	b := newBudget(capsQuick)
+	b.limitTokens(60_000)
+	b.upgrade(capsCouncil)
+	if got := b.limits(); got != (caps{calls: 30, tokens: 60_000}) {
+		t.Errorf("limits = %+v, want 60000 tokens and 30 calls", got)
+	}
+
+	b = newBudget(capsQuick)
+	b.limitTokens(300_000)
+	b.upgrade(capsCouncil)
+	if got := b.limits().tokens; got != 300_000 {
+		t.Errorf("tokens = %d, want the council's 300000", got)
+	}
+
+	// A council cap above capsQuick's does not raise it before the upgrade.
+	b = newBudget(capsQuick)
+	b.limitTokens(200_000)
+	if got := b.limits().tokens; got != capsQuick.tokens {
+		t.Errorf("tokens before the upgrade = %d, want capsQuick's %d", got, capsQuick.tokens)
+	}
+	b.upgrade(capsCouncil)
+	if got := b.limits().tokens; got != 200_000 {
+		t.Errorf("tokens after the upgrade = %d, want the council's 200000", got)
+	}
+}
+
+// The answer reserve is a quarter of the cap when that is less than 20 000.
+func TestBudgetReserveIsAQuarterOfASmallCap(t *testing.T) {
+	b := newBudget(caps{calls: 8, tokens: 10_000})
+	if ok, what := b.begin(false); !ok {
+		t.Fatalf("the first phase call refused with %q", what)
+	}
+	b.add(model.Usage{Input: 7_500})
+	if ok, what := b.begin(false); ok || what != "tokens" {
+		t.Errorf("a phase call at 7500 of 10000 = %v, %q, want it refused with tokens", ok, what)
+	}
+
+	b = newBudget(caps{calls: 8, tokens: 10_000})
+	if !b.step(model.Usage{Input: 7_499}) {
+		t.Error("a step below the quarter-of-the-cap reserve was refused")
+	}
+	if b.step(model.Usage{Input: 1}) {
+		t.Error("a step past the quarter-of-the-cap reserve was accepted")
+	}
+
+	// The Standard caps keep the 20 000 reserve.
+	b = newBudget(capsQuick)
+	b.add(model.Usage{Input: 129_999})
+	if ok, what := b.begin(false); !ok {
+		t.Fatalf("a phase call at 129999 of 150000 refused with %q", what)
+	}
+	b = newBudget(capsQuick)
+	b.add(model.Usage{Input: 130_000})
+	if ok, what := b.begin(false); ok || what != "tokens" {
+		t.Errorf("a phase call at 130000 of 150000 = %v, %q, want it refused with tokens", ok, what)
+	}
+}
+
 func TestBudgetParallelBegin(t *testing.T) {
 	b := newBudget(capsCouncil)
 	const n = 50

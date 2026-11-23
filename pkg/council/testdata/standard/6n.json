@@ -1,0 +1,29 @@
+{
+  "requests": [],
+  "coderTasks": [],
+  "toolCalls": [],
+  "events": [
+    {
+      "type": "turn_start",
+      "data": {
+        "mode": "member"
+      }
+    },
+    {
+      "type": "usage",
+      "data": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "calls": 0,
+        "input": 0,
+        "output": 0
+      }
+    }
+  ],
+  "finish": {
+    "state": "failed",
+    "final": "",
+    "errCode": "no_access",
+    "errMsg": "At access level none, Fleet has no tools to use."
+  }
+}

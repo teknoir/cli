@@ -107,8 +107,18 @@ func (s *Set) Close() error {
 	return errors.Join(errs...)
 }
 
-// allowed reports whether name may be called at level. An unknown level counts as LevelNone.
-func (s *Set) allowed(level, name string) bool {
+// allowed reports whether name may be called at level by a member whose own tool list is allow: the
+// level's rule, and the tool named in the member's list. An unknown level counts as LevelNone.
+func (s *Set) allowed(level string, allow []string, name string) bool {
+	if !s.levelAllows(level, name) {
+		return false
+	}
+	return slices.Contains(allow, name)
+}
+
+// levelAllows reports whether name is a tool of this server that level may call at all, whatever
+// the member's own list says.
+func (s *Set) levelAllows(level, name string) bool {
 	if _, ok := s.tools[name]; !ok {
 		return false
 	}
@@ -122,23 +132,27 @@ func (s *Set) allowed(level, name string) bool {
 	}
 }
 
-// Names is the tools allowed at level, sorted. An unknown level counts as LevelNone.
+// Names is every tool allowed at level, sorted, whatever a member's own list says. An unknown level
+// counts as LevelNone.
 func (s *Set) Names(level string) []string {
 	out := make([]string, 0, len(s.names))
 	for _, name := range s.names {
-		if s.allowed(level, name) {
+		if s.levelAllows(level, name) {
 			out = append(out, name)
 		}
 	}
 	return out
 }
 
-// For is the allowed tools at level as Anthropic tool params, sorted by name. The last tool carries
-// the cache breakpoint: the list is the same on every call of a member.
-func (s *Set) For(level string) []anthropic.ToolUnionParam {
-	names := s.Names(level)
+// For is the tools a member at level whose own list is allow may use, sorted by name. The last tool
+// carries the cache breakpoint: the list is the same on every call of a member.
+func (s *Set) For(level string, allow []string) []anthropic.ToolUnionParam {
+	names := s.names
 	out := make([]anthropic.ToolUnionParam, 0, len(names))
 	for _, name := range names {
+		if !s.allowed(level, allow, name) {
+			continue
+		}
 		tool := &anthropic.ToolParam{Name: name, InputSchema: inputSchema(s.tools[name])}
 		if d := s.tools[name].Description; d != "" {
 			tool.Description = anthropic.String(d)
@@ -233,12 +247,17 @@ type Result struct {
 	UpstreamTotal int
 }
 
-// Call runs one tool. A tool that is unknown, or not allowed at level, is refused without a call;
-// so is an input that is not a JSON object. A failed call is a Result with IsError set, so the
-// model sees it and can try something else; only an ended ctx is an error.
-func (s *Set) Call(ctx context.Context, level, name string, input json.RawMessage) (Result, error) {
-	if !s.allowed(level, name) {
+// Call runs one tool for a member at level whose own list is allow. A tool that is unknown, or not
+// allowed at level, is refused without a call with the level's refusal; one the level allows but the
+// member's list does not is refused as not a tool of this member. An input that is not a JSON object
+// is refused too. A failed call is a Result with IsError set, so the model sees it and can try
+// something else; only an ended ctx is an error.
+func (s *Set) Call(ctx context.Context, level string, allow []string, name string, input json.RawMessage) (Result, error) {
+	if !s.levelAllows(level, name) {
 		return errorResult(fmt.Sprintf("%q is not a tool a council member at level %q may call", name, level)), nil
+	}
+	if !slices.Contains(allow, name) {
+		return errorResult(fmt.Sprintf("%q is not a tool this council member may call", name)), nil
 	}
 	args := map[string]any{}
 	if trimmed := bytes.TrimSpace(input); len(trimmed) == 0 || json.Unmarshal(trimmed, &args) != nil || args == nil {

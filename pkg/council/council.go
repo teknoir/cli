@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand"
 	"net/http"
 	"os"
@@ -20,11 +21,8 @@ import (
 	"github.com/teknoir/cli/pkg/council/tools"
 )
 
-// The council's members.
-const (
-	memberCaptain = "captain"
-	memberCritic  = "critic"
-)
+// memberCaptain is the lead's wire id (D9).
+const memberCaptain = "captain"
 
 // The states a turn is finished with, as K3 takes them.
 const (
@@ -58,9 +56,10 @@ const (
 	msgEventsRejected = "The platform refused this turn's progress."
 	msgRestarting     = "The bot restarted during this turn."
 	msgPlatformDown   = "The bot could not read who it is on the platform."
-	msgNoAccess       = "At access level none, Fleet has no tools to use."
-	msgNoAnswer       = "The Captain gave no answer."
-	msgNoBudget       = "The Captain ran out of budget before answering."
+	// msgBadCouncil is the turn's failure when the council it was sent cannot run; the reason follows.
+	msgBadCouncil = "The council for this turn is not valid: "
+	// msgNoAccess is the member turn's failure at access level none: the role's name follows.
+	msgNoAccess = "At access level none, "
 )
 
 // The limits of the daemon.
@@ -74,10 +73,15 @@ type Model interface {
 	Stream(ctx context.Context, req model.Request, onText func(string)) (*anthropic.Message, model.Usage, error)
 }
 
-// Tools are the tools of tnctl's own MCP server, per access level.
+// Tools are the tools of tnctl's own MCP server, per access level and per council member: a member
+// may use the tools its level allows and its own list names.
 type Tools interface {
-	For(level string) []anthropic.ToolUnionParam
-	Call(ctx context.Context, level, name string, input json.RawMessage) (tools.Result, error)
+	// Names is every tool the level allows, sorted, whatever a member's own list says.
+	Names(level string) []string
+	// For is the tools a member at level whose own list is allow may use, as Anthropic's params.
+	For(level string, allow []string) []anthropic.ToolUnionParam
+	// Call runs one tool for a member at level whose own list is allow.
+	Call(ctx context.Context, level string, allow []string, name string, input json.RawMessage) (tools.Result, error)
 }
 
 // Coder runs one coder task on the bot's computer.
@@ -134,6 +138,10 @@ type Config struct {
 	// KeyFile is the file the bot's key is read from, named in the log when the key is missing or
 	// empty. Empty takes $TNCTL_BOT_KEY_FILE, the variable cmd/council.go reads the key from.
 	KeyFile string
+	// Skills is the kit the council's guides come from: skills/<name>/SKILL.md. nil is KitFS of
+	// DefaultKitDir, the bot's own kit directory first and tnctl's embedded kit second. Tests set it
+	// to a fixed FS, so what the prompts say does not depend on the machine.
+	Skills fs.FS
 
 	// The rest is for tests; zero values take the defaults.
 
@@ -171,6 +179,9 @@ func (c *Config) defaults() {
 	if c.KeyFile == "" {
 		// The same variable cmd/council.go reads the bot's key from: bot mode's TNCTL_BOT_KEY_FILE.
 		c.KeyFile = strings.TrimSpace(os.Getenv("TNCTL_BOT_KEY_FILE"))
+	}
+	if c.Skills == nil {
+		c.Skills = KitFS(DefaultKitDir)
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -217,10 +228,15 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// DefaultKitDir is where a bot's computer installs the agent kit's guides.
+const DefaultKitDir = "/etc/teknoirbot/kit"
+
 // Daemon serves the council of one TeknoirBot: it takes turns from the platform's work queue and
 // answers them.
 type Daemon struct {
 	cfg Config
+	// book is the guides of the council's kit, read once when the daemon is built.
+	book *skillBook
 	// slots bounds the model calls in flight; it is a channel so waiting can end with a context.
 	slots chan struct{}
 	// stopping is closed when Serve stops; the turns select on it.
@@ -264,11 +280,20 @@ func New(cfg Config) (*Daemon, error) {
 	cfg.defaults()
 	return &Daemon{
 		cfg:      cfg,
+		book:     newSkillBook(cfg.Skills),
 		slots:    make(chan struct{}, cfg.ModelSlots),
 		stopping: make(chan struct{}),
 		turns:    make(map[*turn]struct{}),
 	}, nil
 }
+
+// SkillNames is the guides the book carries, in the order the caps advertise them: the known kit
+// order first, then any other guide the book kept. The caps' skills header comes from it, and a
+// snapshot's role skills are checked against the same names (validateSnapshot takes them as its
+// skills argument). read_skill (its enum and its name check) and the prompts' digest follow each
+// role's own Skills, which name guides from this list, so an extra guide is served to a role whose
+// council names it, and to no other.
+func (d *Daemon) SkillNames() []string { return d.book.names() }
 
 // Serve takes turns from the work queue until ctx ends, then stops: it cancels every running turn,
 // each of which finishes as bot_restarting, and returns nil when they are done or at StopGrace.

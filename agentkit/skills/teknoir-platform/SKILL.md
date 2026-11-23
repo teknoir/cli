@@ -3,7 +3,7 @@ name: teknoir-platform
 description: "Start here for any Teknoir work. What the platform is, whether you are a person or a TeknoirBot, which tnctl command answers which question, the exit codes and what to do on each, the safety rules, and where the other Teknoir skills take over. Use it when a task names Teknoir, a teamspace, a robot, a device, a fleet, a TeknoirBot or tnctl, before loading teknoir-robots, teknoir-config, teknoir-debug, teknoir-mqtt-streams, teknoir-k3s-apps or teknoir-council. Not for the steps of one task: after this skill, load the sibling skill the task needs."
 license: Apache-2.0
 metadata:
-  teknoir-kit-version: "0.2.0"
+  teknoir-kit-version: "0.3.0"
 ---
 
 # The Teknoir platform
@@ -210,11 +210,13 @@ own message saying so (the result names no error code).
 bytes or whose answer does not fit is spilled to a capture that `mqtt_read` pages through, or reads one JSON
 field of with `path`; an index that leaves messages out of its list says `truncated`).
 
-These tools write nothing to the platform; `mqtt_get_sample` keeps the samples it spills as `0600` files in its own capture directory, deleted after 30 minutes or when the session ends. Started as `tnctl mcp --council` (a person's own agent only), the server
-also has the `council_*` tools, which hand work to a TeknoirBot's council (skill `teknoir-council`).
-Every other write goes through `tnctl`, so that the TeknoirBot's permission rules and the platform's
-own checks see it. If the server is not registered, use the `tnctl` commands in the
-table above; they answer the same questions.
+These tools write nothing to the platform; `mqtt_get_sample` keeps the samples it spills as `0600`
+files in its own capture directory, deleted after 30 minutes or when the session ends. Started as
+`tnctl mcp --council` (a person's own agent only), the server also has the `council_*` tools (skill
+`teknoir-council`): `council_ask` and `council_run` hand work to a TeknoirBot's council and spend its
+budget; `council_info`, `council_roles` and `council_result` only read. Every other write goes through
+`tnctl`, so that the TeknoirBot's permission rules and the platform's own checks see it. If the server
+is not registered, use the `tnctl` commands in the table above; they answer the same questions.
 
 ## `tnctl api`
 
@@ -284,10 +286,14 @@ enabling either; device credentials; the settings, workspace, Observatory, MQTT 
 pages; managing bots; turning Connect access on or off; resetting every override at once. `inspect`
 needs `creator` because it runs through the robot's Shell.
 
-Also refused inside a bot: every command that opens a tunnel or holds a device login (`ssh`, `exec`,
-`logs`, `port-forward`, `socks-proxy`, `wg`, `ansible`, `ansible-playbook`, `ansible-inventory`,
-`bootstrap`, `login`, `domain`, `add`), and `ns <teamspace>`. `--wait=applied` and `--wait=ready` need
-a device shell: use `--wait=published`.
+Also refused inside a bot, with exit 6: every command that opens a tunnel or holds a device login (`ssh`, `exec`,
+`logs`, `port-forward`, `socks-proxy`, `wg`, `wg-proxy`, `ansible`, `ansible-playbook`, `ansible-inventory`,
+`bootstrap`, `login`, `domain`, `add`), `ns <teamspace>`, `chat` (a person's chat with a bot) and a person's
+`council role|roster|apply` (skill `teknoir-council`). Their `--help` still prints, but `ansible` and
+`ansible-playbook` pass every flag on, so they refuse even `--help` and an unknown flag. A call that tnctl rejects
+before the refusal, such as one with an unknown flag or, for some of them, the wrong number of arguments, fails with
+that error instead (exit 2, or 1 for some argument counts). `--wait=applied` and `--wait=ready` need a device shell:
+use `--wait=published`.
 
 **Asking for a different level.** A bot cannot raise its own access. Tell the person, in these words:
 

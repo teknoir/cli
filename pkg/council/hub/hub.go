@@ -88,7 +88,7 @@ type WorkTurn struct {
 	ThreadID string    `json:"threadId"`
 	Index    int       `json:"index"`
 	Kind     string    `json:"kind"`   // ask | member
-	Member   string    `json:"member"` // "", fleet, coder
+	Member   string    `json:"member"` // "" on an ask turn, else the slug of the member the turn was sent to
 	Prompt   string    `json:"prompt"`
 	Options  Options   `json:"options"`
 	Origin   string    `json:"origin"`
@@ -98,12 +98,52 @@ type WorkTurn struct {
 	LeaseSeconds int `json:"leaseSeconds"`
 	// Deadline is when the turn must be finished, in epoch milliseconds.
 	Deadline int64 `json:"deadline"`
+	// Council is the council of this turn, when the platform sent one (proto 2). nil is an older
+	// platform, a bot that announced no capabilities, or a council that could not be read (then
+	// CouncilErr says why).
+	Council *Snapshot `json:"council,omitempty"`
+	// CouncilErr is why the council could not be read; intake fails the turn bad_turn with it. A
+	// council the bot cannot read is the platform's mistake about this turn, not a work-queue error:
+	// it must not cost the bot the turn.
+	CouncilErr error `json:"-"`
+}
+
+// UnmarshalJSON decodes a turn, keeping a council it cannot read as CouncilErr instead of failing
+// the turn's decode: a mistyped council would otherwise make Next report an error, and the bot
+// would never answer the turn it was given.
+func (w *WorkTurn) UnmarshalJSON(b []byte) error {
+	// plain has no methods on it, so decoding the rest of the turn cannot recurse into this one; the
+	// Council field here shadows plain's, so the council is taken as its raw JSON.
+	type plain WorkTurn
+	outer := struct {
+		plain
+		Council json.RawMessage `json:"council"`
+	}{}
+	if err := json.Unmarshal(b, &outer); err != nil {
+		return err
+	}
+	*w = WorkTurn(outer.plain)
+	w.Council, w.CouncilErr = nil, nil
+	raw := bytes.TrimSpace(outer.Council)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	var s Snapshot
+	if err := json.Unmarshal(raw, &s); err != nil {
+		w.CouncilErr = fmt.Errorf("the council is not readable: %w", err)
+		return nil
+	}
+	w.Council = &s
+	return nil
 }
 
 // Options are the settings of a turn.
 type Options struct {
 	Mode   string `json:"mode"`
 	Effort string `json:"effort"`
+	// Thorough is the person's Thorough toggle for this turn: an expensive mode that applies to one
+	// turn only.
+	Thorough bool `json:"thorough,omitempty"`
 }
 
 // Author is who asked.
@@ -271,6 +311,11 @@ type Client struct {
 	version  string
 	http     *http.Client
 	councilH string
+
+	// mu guards caps, which SetCaps replaces and Next reads: SetCaps may race with a poll.
+	mu sync.Mutex
+	// caps are the capability headers a K1 sends; nil until SetCaps accepted them.
+	caps *capsSet
 }
 
 // New returns the hub client of a TeknoirBot. It refuses a base that may not carry the bot's key,
@@ -307,9 +352,10 @@ func noRedirect(httpClient *http.Client) *http.Client {
 	return &c
 }
 
-// do sends one request and reads its answer. A non-2xx answer is returned as an *Error, with its
-// body; a 2xx one is left to the caller.
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, body any) (int, []byte, error) {
+// do sends one request and reads its answer. extra are headers of that message only (the
+// capability headers of a K1). A non-2xx answer is returned as an *Error, with its body; a 2xx one
+// is left to the caller.
+func (c *Client) do(ctx context.Context, method, path string, query url.Values, body any, extra http.Header) (int, []byte, error) {
 	key, err := botapi.Key(c.keyFile)
 	if err != nil {
 		return 0, nil, err
@@ -334,6 +380,11 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent())
 	req.Header.Set("X-Teknoir-Council", c.councilH)
+	for k, vs := range extra {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -408,7 +459,8 @@ func (c *Client) Next(ctx context.Context, free int) (*WorkTurn, error) {
 	q := url.Values{"wait": {"25"}, "free": {strconv.Itoa(free)}}
 	ctx, cancel := context.WithTimeout(ctx, workTimeout)
 	defer cancel()
-	status, raw, err := c.do(ctx, http.MethodGet, "/council/work", q, nil)
+	// Only K1 carries the capabilities: K2 and K3 are about one turn the platform already checked.
+	status, raw, err := c.do(ctx, http.MethodGet, "/council/work", q, nil, c.capsHeader())
 	if err != nil {
 		return nil, err
 	}
@@ -891,7 +943,7 @@ func (p *Poster) sendBatch(ctx context.Context, b *batch) {
 	path := "/council/turns/" + url.PathEscape(p.turn.ID) + "/events"
 
 	attemptCtx, cancel := context.WithTimeout(ctx, p.reqTimeout)
-	_, _, err := p.c.do(attemptCtx, http.MethodPost, path, nil, body)
+	_, _, err := p.c.do(attemptCtx, http.MethodPost, path, nil, body, nil)
 	cancel()
 
 	p.mu.Lock()
@@ -1054,7 +1106,7 @@ func (p *Poster) sendFinish(ctx context.Context, fr *finishReq) {
 	path := "/council/turns/" + url.PathEscape(p.turn.ID) + "/finish"
 
 	attemptCtx, cancel := context.WithTimeout(ctx, p.reqTimeout)
-	_, _, err := p.c.do(attemptCtx, http.MethodPost, path, nil, body)
+	_, _, err := p.c.do(attemptCtx, http.MethodPost, path, nil, body, nil)
 	cancel()
 
 	p.mu.Lock()

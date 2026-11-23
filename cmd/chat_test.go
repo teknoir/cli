@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -193,17 +194,19 @@ const (
 	quickResumed = "Hello there, and more."
 )
 
-// quickFrames is a quick turn's events for turn trn_1: the Captain's text, the final, the usage, the
-// end.
+// quickFrames is a quick turn's events for turn trn_1, in the order the daemon and the platform send
+// them: the Captain's text, then the quick plan (pkg/council askTurn emits it after the answer), the
+// usage, the final and the end.
 func quickFrames(final string) []string {
 	return []string{
 		frame(1, "turn_queued", `"index":1,"kind":"ask","member":null`),
-		frame(2, "turn_start", `"mode":"quick"`),
+		frame(2, "turn_start", `"mode":"auto"`),
 		frame(3, "text_delta", `"member":"captain","text":"`+final[:len(final)/2]+`"`),
 		frame(4, "text_delta", `"member":"captain","text":"`+final[len(final)/2:]+`"`),
-		frame(5, "final", `"text":"`+final+`"`),
+		frame(5, "plan", `"mode":"quick","tasks":[]`),
 		frame(6, "usage", `"calls":2,"input":100,"output":40,"cacheRead":0,"cacheWrite":0,"ms":1500`),
-		frame(7, "turn_end", `"state":"done"`),
+		frame(7, "final", `"text":"`+final+`"`),
+		frame(8, "turn_end", `"state":"done"`),
 	}
 }
 
@@ -268,6 +271,35 @@ func TestChatOneShotOnATerminalPrintsDeltas(t *testing.T) {
 	}
 	if want := quickFinal + "\n"; out != want {
 		t.Errorf("stdout %q, want %q (the final printed once)", out, want)
+	}
+}
+
+// A council's plan comes before its members work, so the lead's text before it is not the answer:
+// the plan by itself starts the answer afresh (a member_done does too; this turn has none), and a
+// final that repeats only what the lead wrote after the plan is not printed a second time.
+func TestChatCouncilPlanStartsTheAnswerAfresh(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "turn_start", `"mode":"auto"`),
+			frame(2, "text_delta", `"member":"captain","text":"Asking fleet."`),
+			frame(3, "plan", `"mode":"council","tasks":[{"member":"fleet","name":"Fleet","task":"look"}]`),
+			frame(4, "text_delta", `"member":"captain","text":"`+quickFinal+`"`),
+			frame(5, "final", `"text":"`+quickFinal+`"`),
+			frame(6, "turn_end", `"state":"done"`),
+		})
+	})
+	out, _, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out, quickFinal) != 1 || !strings.HasPrefix(out, "Asking fleet.") || !strings.HasSuffix(out, quickFinal+"\n") {
+		t.Errorf("stdout %q: want the lead's first text, then the answer once", out)
 	}
 }
 
@@ -1160,6 +1192,38 @@ func TestChatTurnOpen(t *testing.T) {
 	}
 }
 
+// A turn the platform refuses for the bot's state or the open-turn limit prints the platform's own
+// sentence, without "(HTTP n)", with the exit code of its status.
+func TestChatTurnRefusedForTheBotsState(t *testing.T) {
+	cases := []struct {
+		code, msg string
+		status    int
+		exit      int
+	}{
+		{"bot_not_ready", "The bot is starting.", 409, codeConflict},
+		{"bot_not_ready", "The bot is being removed.", 409, codeConflict},
+		{"bot_suspended", "Resume the bot to chat.", 409, codeConflict},
+		{"too_many_turns", "Too many open turns on this bot. Wait for one to finish.", 429, codeRateLimit},
+	}
+	for _, c := range cases {
+		t.Run(c.msg, func(t *testing.T) {
+			noBotMode(t)
+			setTTY(t, false, false)
+			p := newChatAPI(t)
+			p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+			p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+			p.on("POST", "/bots/scout/chat/threads/thr_new/turns", c.status, councilErrBody(c.code, c.msg, ""))
+			_, _, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+			if err == nil || exitCodeOf(err) != c.exit {
+				t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+			}
+			if err.Error() != c.msg {
+				t.Errorf("error %q, want %q", err, c.msg)
+			}
+		})
+	}
+}
+
 // A bot's text never drives the terminal: escapes and control characters are dropped, newlines and
 // tabs kept.
 func TestChatCleansTheBotsText(t *testing.T) {
@@ -1233,7 +1297,7 @@ func TestChatREPL(t *testing.T) {
 		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, errs)
 	}
 	// the bot's line, its members and the budget come first
-	if !strings.Contains(out, "scout (creator, online) — council tnctl/v0.3.0") {
+	if !strings.Contains(out, "scout (creator, online) — computer: tnctl/v0.3.0") {
 		t.Errorf("stdout %q", out)
 	}
 	if !strings.Contains(out, "tokens today: 123456 of 5000000") {
@@ -1685,6 +1749,10 @@ func TestChatREPLCtrlCCancelsTheTurnAndKeepsGoing(t *testing.T) {
 	if n := strings.Count(out, "> "); n < 3 {
 		t.Errorf("the prompt came back %d times, want at least 3 (the turn was cancelled): %q", n, out)
 	}
+	// the cancelled turn's text ends its line: the next prompt starts a line of its own
+	if !strings.Contains(out, "start\n> ") {
+		t.Errorf("stdout %q: the prompt after the cancelled turn is not on a line of its own", out)
+	}
 	turns := p.seen("POST", "/bots/scout/chat/threads/thr_new/turns")
 	if len(turns) != 2 || !strings.Contains(turns[1].Body, `"prompt":"second"`) {
 		t.Errorf("turns %+v", turns)
@@ -1881,7 +1949,7 @@ func TestChatInfoAndThreadIDAreCleaned(t *testing.T) {
 	if strings.ContainsAny(out, "\x1b") || strings.ContainsAny(errs, "\x1b") {
 		t.Errorf("an escape reached the terminal: stdout %q, stderr %q", out, errs)
 	}
-	if !strings.Contains(out, "scout (creator, online) — council v1") {
+	if !strings.Contains(out, "scout (creator, online) — computer: v1") {
 		t.Errorf("stdout %q", out)
 	}
 	if !strings.Contains(errs, "thread thr_") {
@@ -1969,6 +2037,40 @@ func TestChatFinalStartsAParagraphAfterCaptainText(t *testing.T) {
 	}
 }
 
+// A convene the platform refuses is a failed tool call like any other, so the lead's tool call ends
+// the text streamed before it: the next round's text is the answer, and the final does not print it
+// a second time.
+func TestChatRefusedConvenePrintsTheFinalOnce(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	const answer = "r2 is degraded because the edge is overloaded."
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "text_delta", `"member":"captain","text":"Let me ask the council."`),
+			frame(2, "tool_call", `"member":"captain","id":"tu_2","tool":"convene_council","input":{"tasks":[]}`),
+			frame(3, "tool_result", `"member":"captain","id":"tu_2","ok":false,"summary":"A Coder task needs the person to ask."`),
+			frame(4, "text_delta", `"member":"captain","text":"`+answer+`"`),
+			frame(5, "final", `"text":"`+answer+`"`),
+			frame(6, "turn_end", `"state":"done"`),
+		})
+	})
+	out, _, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(out, answer); n != 1 {
+		t.Errorf("stdout %q: the answer is printed %d times, want 1", out, n)
+	}
+	// The call's progress line on stderr ends stdout's open line first.
+	if want := "Let me ask the council.\n" + answer + "\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+}
+
 // A malformed frame is skipped where it is, and the turn goes on: it is not a reconnect.
 func TestChatSkipsAMalformedFrame(t *testing.T) {
 	noBotMode(t)
@@ -2020,7 +2122,7 @@ func TestChatUsageErrors(t *testing.T) {
 		want string
 	}{
 		{"bad mode", []string{"chat", "scout", "--mode", "fast", "hi"}, "--mode must be auto, quick or council"},
-		{"bad member", []string{"chat", "scout", "--member", "captain", "hi"}, "--member must be fleet or coder"},
+		{"bad member", []string{"chat", "scout", "--member", "Captain", "hi"}, "--member is a member's slug, such as triage, or <scope>/<slug> with scope bot, teamspace or template, not \"Captain\""},
 		{"bad effort", []string{"chat", "scout", "--effort", "max", "hi"}, "--effort must be low, medium or high"},
 		{"member with mode", []string{"chat", "scout", "--member", "fleet", "--mode", "council", "hi"}, "--member and --mode cannot be used together"},
 		{"new with thread", []string{"chat", "scout", "--new", "--thread", "thr_1", "hi"}, "--new and --thread cannot be used together"},
@@ -2250,5 +2352,196 @@ func TestCleanBotText(t *testing.T) {
 		if got := cleanBotText(in); got != want {
 			t.Errorf("cleanBotText(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The done line counts the tokens the bot's budget and its tokens today count (input, cache writes
+// and output); the tokens read from the prompt cache follow apart, and only when there are some.
+func TestChatSummaryCountsTheBudgetsTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		u    api.ChatUsage
+		want string
+	}{
+		{"no cache", api.ChatUsage{Calls: 2, Input: 100, Output: 40, MS: 1500}, "done in 1.5s, 2 calls, 140 tokens\n"},
+		{"cache reads apart", api.ChatUsage{Calls: 8, Input: 9000, Output: 2130, CacheRead: 96200, CacheWrite: 11000, MS: 41200},
+			"done in 41.2s, 8 calls, 22130 tokens (+96200 cached)\n"},
+		{"cache writes counted", api.ChatUsage{Calls: 1, Input: 10, Output: 5, CacheWrite: 85, MS: 900}, "done in 0.9s, 1 call, 100 tokens\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var errs strings.Builder
+			p := &chatTurnPrinter{out: io.Discard, errw: &errs}
+			p.summary(&c.u)
+			if got := errs.String(); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// cutLine ends a cut line with "…" within its length, and leaves a short one whole.
+func TestChatCutLine(t *testing.T) {
+	cases := []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"short", 80, "short"},
+		{strings.Repeat("a", 80), 80, strings.Repeat("a", 80)},
+		{strings.Repeat("a", 81), 80, strings.Repeat("a", 79) + "…"},
+		{"check the pods  of amr-02", 17, "check the pods…"},
+		{"åäö" + strings.Repeat("x", 10), 5, "åäöx…"},
+	}
+	for _, c := range cases {
+		if got := cutLine(c.in, c.n); got != c.want {
+			t.Errorf("cutLine(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
+		}
+		if utf8.RuneCountInString(cutLine(c.in, c.n)) > c.n {
+			t.Errorf("cutLine(%q, %d) is longer than %d", c.in, c.n, c.n)
+		}
+	}
+}
+
+// A lead that writes before a tool call: the final is the text of its last model call alone, so it is
+// compared with the text after the call and not printed a second time. The tool call's line on stderr
+// ends the line the first text left open.
+func TestChatLeadToolCallStartsTheAnswerAfresh(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	p := newChatAPI(t)
+	p.on("GET", "/bots/scout/chat", 200, chatInfoBody)
+	p.on("POST", "/bots/scout/chat/threads", 201, chatThreadNew)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		writeFrames(w, []string{
+			frame(1, "turn_start", `"mode":"auto"`),
+			frame(2, "text_delta", `"member":"captain","text":"Let me check the robots."`),
+			frame(3, "tool_call", `"member":"captain","id":"c1","tool":"list_robots","input":{}`),
+			frame(4, "text_delta", `"member":"captain","text":"`+quickFinal+`"`),
+			frame(5, "plan", `"mode":"quick","tasks":[]`),
+			frame(6, "final", `"text":"`+quickFinal+`"`),
+			frame(7, "turn_end", `"state":"done"`),
+		})
+	})
+	out, _, err := runCLI(t, p.env(t), "chat", "scout", "hello bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Let me check the robots.\n" + quickFinal + "\n"; out != want {
+		t.Errorf("stdout %q, want %q (the answer printed once)", out, want)
+	}
+}
+
+// chatOneScreen runs turn trn_1 of thr_new with stdout and stderr on one buffer, as one terminal shows
+// them, and returns that screen and the turn's error.
+func chatOneScreen(t *testing.T, p *chatAPI, sigs <-chan os.Signal) (string, error) {
+	t.Helper()
+	fl, _, _, err := p.env(t).fleet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	screen := &syncBuf{}
+	pr := &chatTurnPrinter{out: screen, errw: screen, tty: true}
+	err = runChatTurn(context.Background(), fl, "scout", "thr_new", "trn_1", 0, pr, sigs)
+	return screen.String(), err
+}
+
+// On one terminal a line on stderr starts a line of its own after the lead's open text, a final the
+// screen already shows only ends its line, and the turn's end adds no blank line.
+func TestChatTurnOnOneTerminal(t *testing.T) {
+	const usage = `"calls":2,"input":100,"output":40,"cacheRead":0,"cacheWrite":0,"ms":1500`
+	cases := []struct {
+		name   string
+		frames []string
+		want   string
+	}{
+		{"a quick turn with a tool call of the lead", []string{
+			frame(1, "turn_start", `"mode":"auto"`),
+			frame(2, "text_delta", `"member":"captain","text":"Let me check the robots."`),
+			frame(3, "tool_call", `"member":"captain","id":"c1","tool":"list_robots","input":{}`),
+			frame(4, "text_delta", `"member":"captain","text":"Two pods are running."`),
+			frame(5, "plan", `"mode":"quick","tasks":[]`),
+			frame(6, "usage", usage),
+			frame(7, "final", `"text":"Two pods are running."`),
+			frame(8, "turn_end", `"state":"done"`),
+		}, "Let me check the robots.\n· captain → list_robots\nTwo pods are running.\n· quick\ndone in 1.5s, 2 calls, 140 tokens\n"},
+		{"a quick turn whose text ends its line", []string{
+			frame(1, "text_delta", `"member":"captain","text":"Hello there.\n"`),
+			frame(2, "plan", `"mode":"quick","tasks":[]`),
+			frame(3, "final", `"text":"Hello there."`),
+			frame(4, "turn_end", `"state":"done"`),
+		}, "Hello there.\n· quick\n"},
+		{"a failed turn", []string{
+			frame(1, "text_delta", `"member":"captain","text":"start"`),
+			frame(2, "error", `"code":"model_error","message":"boom"`),
+			frame(3, "usage", usage),
+			frame(4, "turn_end", `"state":"failed"`),
+		}, "start\n· error: model_error: boom\ndone in 1.5s, 2 calls, 140 tokens\n"},
+		{"a council turn", []string{
+			frame(1, "text_delta", `"member":"captain","text":"Asking fleet."`),
+			frame(2, "plan", `"mode":"council","tasks":[{"member":"fleet","name":"Fleet","task":"look"}]`),
+			frame(3, "tool_call", `"member":"fleet","id":"c1","tool":"get_problems","input":{}`),
+			frame(4, "member_done", `"member":"fleet","name":"Fleet"`),
+			frame(5, "text_delta", `"member":"captain","text":"Two pods."`),
+			frame(6, "final", `"text":"Two pods."`),
+			frame(7, "turn_end", `"state":"done"`),
+		}, "Asking fleet.\n· council: Fleet\n· Fleet → get_problems\n· Fleet done\nTwo pods.\n"},
+		{"a final that differs", []string{
+			frame(1, "text_delta", `"member":"captain","text":"a draft"`),
+			frame(2, "final", `"text":"the answer"`),
+			frame(3, "turn_end", `"state":"done"`),
+		}, "a draft\n\nthe answer\n"},
+		{"members, then a final with no text after them", []string{
+			frame(1, "text_delta", `"member":"captain","text":"Asking fleet."`),
+			frame(2, "plan", `"mode":"council","tasks":[{"member":"fleet","name":"Fleet","task":"look"}]`),
+			frame(3, "member_done", `"member":"fleet","name":"Fleet"`),
+			frame(4, "final", `"text":"the answer"`),
+			frame(5, "turn_end", `"state":"done"`),
+		}, "Asking fleet.\n· council: Fleet\n· Fleet done\n\nthe answer\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			noBotMode(t)
+			setTTY(t, false, true)
+			p := newChatAPI(t)
+			p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+				writeFrames(w, c.frames)
+			})
+			if got, _ := chatOneScreen(t, p, nil); got != c.want {
+				t.Errorf("screen\n%q\nwant\n%q", got, c.want)
+			}
+		})
+	}
+}
+
+// A Ctrl-C after the lead began: the watcher's cancelling… starts a line of its own, and the turn's
+// end adds no blank line after it. With -race, this is the watcher reading the printer's state.
+func TestChatCtrlCOnOneTerminal(t *testing.T) {
+	noBotMode(t)
+	setTTY(t, false, true)
+	sigs := make(chan os.Signal, 1)
+	p := newChatAPI(t)
+	p.on("POST", "/bots/scout/chat/threads/thr_new/turns/trn_1/cancel", 202, chatTurnBody)
+	p.onStream("/bots/scout/chat/threads/thr_new/events", func(w http.ResponseWriter, r *http.Request, conn int) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, frame(1, "text_delta", `"member":"captain","text":"start"`))
+		w.(http.Flusher).Flush()
+		time.Sleep(50 * time.Millisecond)
+		sigs <- os.Interrupt
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) && len(p.seen("POST", "/bots/scout/chat/threads/thr_new/turns/trn_1/cancel")) == 0 {
+			time.Sleep(2 * time.Millisecond)
+		}
+		_, _ = io.WriteString(w, frame(2, "turn_end", `"state":"cancelled"`))
+		w.(http.Flusher).Flush()
+	})
+	got, err := chatOneScreen(t, p, sigs)
+	if err == nil || err.Error() != "the turn was cancelled" {
+		t.Errorf("err %v, want the turn was cancelled", err)
+	}
+	if want := "start\ncancelling…\n"; got != want {
+		t.Errorf("screen %q, want %q", got, want)
 	}
 }

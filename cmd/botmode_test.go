@@ -347,10 +347,30 @@ func TestBotModeRefusesTheCommandsItMayNotRun(t *testing.T) {
 		{"domain"},
 		{"chat", "scout", "hello"},
 		{"chat", "threads", "scout"},
+		{"council", "role"},
+		{"council", "role", "list"},
+		{"council", "role", "get", "x"},
+		{"council", "role", "export", "x"},
+		{"council", "apply", "-f", "x.yaml"},
+		{"council", "role", "apply", "-f", "x.yaml"},
+		{"council", "role", "new", "Watcher", "--job", "watches", "--bot", "scout"},
+		{"council", "role", "archive", "x"},
+		{"council", "roster"},
+		{"council", "roster", "list", "--bot", "scout"},
+		{"council", "roster", "get", "ops", "--bot", "scout"},
+		{"council", "roster", "use", "ops", "--bot", "scout"},
+		{"council", "roster", "add", "ops", "triage", "--bot", "scout"},
+		{"council", "roster", "remove", "ops", "triage", "--bot", "scout"},
+		{"council", "roster", "delete", "ops", "--bot", "scout"},
+		{"council", "roster", "apply", "-f", "x.yaml"},
 	}
 	// chat's refusal names its own reason: a bot does not chat with itself.
 	ownText := map[string]string{
 		"chat": `"tnctl chat" is not available to a TeknoirBot: a bot does not use the person chat.`,
+	}
+	// The council's person commands say so too: a bot runs only "council serve".
+	for _, p := range []string{"council role", "council role list", "council role get", "council role export", "council role new", "council role archive", "council role apply", "council apply", "council roster", "council roster list", "council roster get", "council roster use", "council roster add", "council roster remove", "council roster delete", "council roster apply"} {
+		ownText[p] = `"tnctl ` + p + `" is not available to a TeknoirBot: only a person reads and changes a bot's council.`
 	}
 	// The commands do more than tnctl when cobra hands them the arguments: none of them may run.
 	for _, args := range cases {
@@ -383,6 +403,14 @@ func TestBotModeRefusesTheCommandsItMayNotRun(t *testing.T) {
 			if len(args) > 1 && args[0] == "add" {
 				path = "add domain"
 			}
+			if args[0] == "council" {
+				// The group and the subcommand, without the member or the flags the command would read.
+				n := 0
+				for n < min(3, len(args)) && !strings.HasPrefix(args[n], "-") {
+					n++
+				}
+				path = strings.Join(args[:n], " ")
+			}
 			want := `"tnctl ` + path + `" is not available to a TeknoirBot: it cannot open tunnels or hold device logins. For logs use "tnctl inspect logs".`
 			if own, ok := ownText[path]; ok {
 				want = own
@@ -394,6 +422,28 @@ func TestBotModeRefusesTheCommandsItMayNotRun(t *testing.T) {
 				t.Errorf("%d requests were sent", n)
 			}
 		})
+	}
+}
+
+// A bot may read the council's help and run its daemon: only the person commands are refused.
+func TestBotModeAllowsCouncilServeAndHelp(t *testing.T) {
+	p := newBotAPI(t)
+	botEnv(t, p)
+	out, _, err := runRealRoot(t, "council")
+	if err != nil {
+		t.Fatalf("council in bot mode: %v", err)
+	}
+	if !strings.Contains(out, "tnctl council role") {
+		t.Errorf("council's help: %q", out)
+	}
+	// botPreRun lets council serve through, so serve's own --max-turns check answers: exit 2, not
+	// the refusal's 6.
+	_, _, err = runRealRoot(t, "council", "serve", "--max-turns", "3")
+	if err == nil || exitCodeOf(err) != codeUsage {
+		t.Errorf("council serve --max-turns 3: exit %d, %v", exitCodeOf(err), err)
+	}
+	if n := p.count(); n != 0 {
+		t.Errorf("%d requests were sent", n)
 	}
 }
 

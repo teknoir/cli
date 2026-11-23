@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"github.com/teknoir/cli/agentkit"
 	"github.com/teknoir/cli/pkg/council/coder"
 	"github.com/teknoir/cli/pkg/council/hub"
 	"github.com/teknoir/cli/pkg/council/model"
@@ -18,6 +21,13 @@ import (
 )
 
 // ---------- the scripted model ----------
+
+// The Standard council's member slugs, as a test names them. The daemon itself names only the built-in
+// Coder (memberCoder): every other member comes from the turn's council.
+const (
+	slugFleet = "fleet"
+	slugCoder = "coder"
+)
 
 // The roles a scripted answer is matched to, from the request's system prompt.
 const (
@@ -28,19 +38,57 @@ const (
 	roleUnknown = "unknown"
 )
 
-// roleOf is the member a request is for.
+// standardFleetRounds is the Standard Fleet's budget.maxToolRounds in legacy_standard.json and
+// testdata/standard_snapshot_*.json: the tests' own copy of it, so that no production default is
+// what they count against (TestLegacyStandardBudget matches the two).
+const (
+	standardFleetRounds = 10
+	standardFleetTokens = 120_000
+)
+
+// roleOf is the member a request is for. The Standard roles keep their names, because the golden
+// files record them; every other request is named by the schema it answers and the name of the role
+// its prompt starts with, so a council of the test's own is scripted by its own slugs.
 func roleOf(req model.Request) string {
 	switch {
-	case strings.Contains(req.System, "You are Fleet"):
+	case strings.HasPrefix(req.System, "You are Fleet, "):
 		return roleFleet
-	case strings.Contains(req.System, "You are the Critic"):
+	case strings.HasPrefix(req.System, "You are the Critic of "):
 		return roleCritic
-	case strings.Contains(req.System, "The council has reported"):
-		return roleAnswer
-	case strings.Contains(req.System, "You are the Captain"):
+	case strings.HasPrefix(req.System, "You are the Captain of "):
+		if strings.Contains(req.System, "The council has reported") {
+			return roleAnswer
+		}
 		return roleRoute
+	case reflect.DeepEqual(req.Format, any(reportSchema)):
+		// A member: "You are <Name>, <persona> of the council of the TeknoirBot …".
+		return "member:" + between(req.System, "You are ", ", ")
+	case reflect.DeepEqual(req.Format, any(critiqueSchema)):
+		// A reviewer: "You are the <Name> of the council of a TeknoirBot."
+		return "reviewer:" + between(req.System, "You are the ", " of the council")
+	case strings.HasPrefix(req.System, "You are the "):
+		// A lead of another council: "You are the <Name> of the council of the TeknoirBot …".
+		if strings.Contains(req.System, "The council has reported") {
+			return "lead-answer:" + between(req.System, "You are the ", " of the council")
+		}
+		return "lead-route:" + between(req.System, "You are the ", " of the council")
 	}
 	return roleUnknown
+}
+
+// between is the text of s between the first head and the first tail after it, or "" when either is
+// missing. It is how a test reads a role's name out of its prompt.
+func between(s, head, tail string) string {
+	i := strings.Index(s, head)
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+len(head):]
+	j := strings.Index(rest, tail)
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }
 
 // scriptStep is one scripted answer.
@@ -253,13 +301,27 @@ func (m *fakeModel) count() int {
 	return len(m.reqs)
 }
 
+// leftover is how many scripted answers of each role the fake never gave: a script that does not
+// match the flow the council ran.
+func (m *fakeModel) leftover() map[string]int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]int, len(m.steps))
+	for role, q := range m.steps {
+		if n := len(q); n > 0 {
+			out[role] = n
+		}
+	}
+	return out
+}
+
 // ---------- the tools ----------
 
 // testToolNames are the tools each level may use.
 var testToolNames = map[string][]string{
 	"none":    {"whoami"},
 	"read":    {"whoami", "list_robots"},
-	"creator": {"whoami", "list_robots", "inspect_pods"},
+	"creator": {"whoami", "list_robots", "inspect_pod"},
 }
 
 // toolCallRec is one tool call the fake saw.
@@ -273,14 +335,48 @@ type fakeTools struct {
 	mu      sync.Mutex
 	calls   []toolCallRec
 	results map[string]tools.Result
+	// queues are results for one tool, one per call in order: the first is given to the first
+	// call, and once it is used up the tool answers from results as usual.
+	queues map[string][]tools.Result
+	// catalog is the tools each level may use, when the test has its own: a test that needs a tool
+	// the Standard catalog has not sets it, and testToolNames stays the shared default.
+	catalog map[string][]string
 }
 
-func newFakeTools() *fakeTools { return &fakeTools{results: map[string]tools.Result{}} }
+// namesAt is the catalog at level: the test's own when it set one, else testToolNames.
+func (f *fakeTools) namesAt(level string) []string {
+	if f.catalog != nil {
+		return f.catalog[level]
+	}
+	return testToolNames[level]
+}
 
-func (f *fakeTools) For(level string) []anthropic.ToolUnionParam {
-	names := testToolNames[level]
+func newFakeTools() *fakeTools {
+	return &fakeTools{results: map[string]tools.Result{}, queues: map[string][]tools.Result{}}
+}
+
+// queueResults gives a tool one result per call, in order, before its default result.
+func (f *fakeTools) queueResults(name string, results ...tools.Result) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queues[name] = append(f.queues[name], results...)
+}
+
+// Names is a sorted copy of the fake catalog at level.
+func (f *fakeTools) Names(level string) []string {
+	out := append([]string{}, f.namesAt(level)...)
+	slices.Sort(out)
+	return out
+}
+
+// For keeps the fake catalog's own order, filtered by allow: the golden files record that order.
+func (f *fakeTools) For(level string, allow []string) []anthropic.ToolUnionParam {
+	names := f.namesAt(level)
 	out := make([]anthropic.ToolUnionParam, 0, len(names))
 	for _, n := range names {
+		if !slices.Contains(allow, n) {
+			continue
+		}
 		out = append(out, anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{Name: n}})
 	}
 	if n := len(out); n > 0 {
@@ -289,10 +385,26 @@ func (f *fakeTools) For(level string) []anthropic.ToolUnionParam {
 	return out
 }
 
-func (f *fakeTools) Call(ctx context.Context, level, name string, input json.RawMessage) (tools.Result, error) {
+func (f *fakeTools) Call(ctx context.Context, level string, allow []string, name string, input json.RawMessage) (tools.Result, error) {
+	// The same order of checks, and the same refusals, as tools.Set.Call.
+	if !slices.Contains(f.namesAt(level), name) {
+		msg := fmt.Sprintf("%q is not a tool a council member at level %q may call", name, level)
+		return tools.Result{Text: msg, Digest: msg, IsError: true}, nil
+	}
+	if !slices.Contains(allow, name) {
+		msg := fmt.Sprintf("%q is not a tool this council member may call", name)
+		return tools.Result{Text: msg, Digest: msg, IsError: true}, nil
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, toolCallRec{Level: level, Name: name, Input: string(input)})
-	res, ok := f.results[name]
+	var res tools.Result
+	var ok bool
+	if q := f.queues[name]; len(q) > 0 {
+		res, ok = q[0], true
+		f.queues[name] = q[1:]
+	} else {
+		res, ok = f.results[name]
+	}
 	f.mu.Unlock()
 	if ctx.Err() != nil {
 		return tools.Result{}, context.Cause(ctx)
@@ -318,10 +430,12 @@ func (f *fakeTools) called() []string {
 
 // fakeCoder is a scripted Coder.
 type fakeCoder struct {
-	mu     sync.Mutex
-	tasks  []coder.Task
-	report coder.Report
-	run    func(ctx context.Context, task coder.Task) coder.Report
+	mu          sync.Mutex
+	tasks       []coder.Task
+	report      coder.Report
+	run         func(ctx context.Context, task coder.Task) coder.Report
+	inFlight    int
+	maxInFlight int
 }
 
 func newFakeCoder() *fakeCoder {
@@ -331,8 +445,17 @@ func newFakeCoder() *fakeCoder {
 func (c *fakeCoder) Run(ctx context.Context, task coder.Task) coder.Report {
 	c.mu.Lock()
 	c.tasks = append(c.tasks, task)
+	c.inFlight++
+	if c.inFlight > c.maxInFlight {
+		c.maxInFlight = c.inFlight
+	}
 	run := c.run
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.inFlight--
+		c.mu.Unlock()
+	}()
 	if run != nil {
 		return run(ctx, task)
 	}
@@ -343,6 +466,13 @@ func (c *fakeCoder) started() []coder.Task {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]coder.Task{}, c.tasks...)
+}
+
+// maxConcurrent is the most coder tasks that ran at once.
+func (c *fakeCoder) maxConcurrent() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.maxInFlight
 }
 
 // ---------- the hub and the posters ----------
@@ -629,6 +759,10 @@ func newWork(kind, member, prompt string) *hub.WorkTurn {
 	}
 }
 
+// testBook is the guides of the council's tests: the kit embedded in tnctl, so what a prompt says
+// about guides does not depend on the machine the test runs on.
+func testBook() *skillBook { return newSkillBook(agentkit.FS) }
+
 // newHarness is a harness with one turn queued and small durations.
 func newHarness(t *testing.T, work *hub.WorkTurn) *testHarness {
 	t.Helper()
@@ -648,6 +782,7 @@ func newHarness(t *testing.T, work *hub.WorkTurn) *testHarness {
 		Logf:   h.logs.logf,
 		Sleep:  func(context.Context, time.Duration) error { return nil },
 		Now:    time.Now,
+		Skills: agentkit.FS,
 
 		MergeEvery:  2 * time.Millisecond,
 		MergeBytes:  1 << 20,

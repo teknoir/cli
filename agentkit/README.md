@@ -40,9 +40,9 @@ With no `--agent` the kit is installed for all three. Skills go to `~/.claude/sk
 ### The council server
 
 `--council` (with `--mcp`) registers `tnctl mcp --council` instead of the read-only `tnctl mcp`: the read
-tools plus `council_info`, `council_ask`, `council_run` and `council_result`, which hand work to a
-TeknoirBot's council (skill `teknoir-council`). An install switches between the two forms without
-`--force`.
+tools plus `council_info`, `council_roles`, `council_ask`, `council_run` and `council_result`, which hand
+work to a TeknoirBot's council (skill `teknoir-council`); `council_ask` and `council_run` start work on
+the bot, the others only read. An install switches between the two forms without `--force`.
 
 ```bash
 tnctl agent install --agent claude --mcp --council
@@ -102,7 +102,7 @@ See [`docs/commands/agent.md`](../docs/commands/agent.md).
 | `teknoir-debug` | Why a robot or workload is unhealthy: problems, `tnctl inspect`, logs, PromQL, `scripts/triage.sh`. |
 | `teknoir-mqtt-streams` | Reading, processing and publishing devices' MQTT telemetry with `tnctl mqtt stream`: sampling, the relay, a processor template. |
 | `teknoir-k3s-apps` | Building an app in a TeknoirBot's computer and running it on its k3s, or delivering it to robots. |
-| `teknoir-council` | Leading a TeknoirBot's council from your own agent with the `council_*` tools: when to ask one member, when to ask the bot, how to judge and wait for the reports. |
+| `teknoir-council` | Leading a TeknoirBot's council from your own agent with the `council_*` tools: which member to ask (`council_roles`), which of the bot's councils to ask (`council_run`'s `roster`), how to judge and wait for the reports. |
 
 Also in the kit:
 

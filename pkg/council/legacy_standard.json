@@ -1,0 +1,131 @@
+{
+  "proto": 2,
+  "hash": "sha256:9e8ed5996168632744381381e6cecbc47476ba96d8ca94a38a6f4e89a15762f9",
+  "roster": {
+    "id": "tpl:standard",
+    "name": "standard",
+    "displayName": "Standard",
+    "version": 1
+  },
+  "level": "creator",
+  "thorough": false,
+  "unattended": false,
+  "budget": null,
+  "lead": {
+    "id": "tpl:captain",
+    "version": 1,
+    "slug": "captain",
+    "name": "Captain",
+    "persona": null,
+    "description": "leads the council: routes each question, convenes members and writes the answer.",
+    "instructions": "",
+    "kind": "lead",
+    "runtime": "inproc",
+    "model": "sonnet",
+    "effort": "high",
+    "level": "creator",
+    "groups": [
+      "core_read",
+      "metrics",
+      "mqtt",
+      "inspect",
+      "results"
+    ],
+    "tools": [
+      "inspect_pod",
+      "list_robots",
+      "whoami"
+    ],
+    "results": true,
+    "skills": [
+      "teknoir-platform",
+      "teknoir-robots",
+      "teknoir-config",
+      "teknoir-debug",
+      "teknoir-mqtt-streams",
+      "teknoir-k3s-apps",
+      "teknoir-council"
+    ],
+    "budget": null
+  },
+  "members": [
+    {
+      "id": "tpl:fleet",
+      "version": 1,
+      "slug": "fleet",
+      "name": "Fleet",
+      "persona": "the fact finder",
+      "description": "finds facts on the platform with read tools (robots, devices, problems, configuration, metrics, MQTT samples, pods and logs).",
+      "instructions": "Answer the task with facts from the read tools: never guess a value.",
+      "kind": "member",
+      "runtime": "inproc",
+      "model": "haiku",
+      "effort": "medium",
+      "level": "creator",
+      "groups": [
+        "core_read",
+        "metrics",
+        "mqtt",
+        "inspect",
+        "results"
+      ],
+      "tools": [
+        "inspect_pod",
+        "list_robots",
+        "whoami"
+      ],
+      "results": true,
+      "skills": [
+        "teknoir-platform",
+        "teknoir-robots",
+        "teknoir-config",
+        "teknoir-debug",
+        "teknoir-mqtt-streams",
+        "teknoir-k3s-apps",
+        "teknoir-council"
+      ],
+      "budget": {
+        "maxToolRounds": 10,
+        "maxTokens": 120000
+      }
+    },
+    {
+      "id": "tpl:coder",
+      "version": 1,
+      "slug": "coder",
+      "name": "Coder",
+      "persona": null,
+      "description": "writes and runs code on the bot's computer (scripts, stream processors, small HTML dashboards, apps in the guest namespace \"apps\", image builds to the bot's registry) and can run tnctl as the bot.",
+      "instructions": "",
+      "kind": "member",
+      "runtime": "coder",
+      "model": "sonnet",
+      "effort": "high",
+      "level": "creator",
+      "groups": [],
+      "tools": [],
+      "results": false,
+      "skills": [],
+      "budget": null
+    }
+  ],
+  "reviewer": {
+    "id": "tpl:critic",
+    "version": 1,
+    "slug": "critic",
+    "name": "Critic",
+    "persona": null,
+    "description": "checks the members' reports before you answer.",
+    "instructions": "",
+    "kind": "reviewer",
+    "runtime": "inproc",
+    "model": "sonnet",
+    "effort": "medium",
+    "level": "none",
+    "groups": [],
+    "tools": [],
+    "results": false,
+    "skills": [],
+    "budget": null
+  }
+}

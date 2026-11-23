@@ -175,7 +175,7 @@ These flags are available to all subcommands:
 - `--device`: Target device ID.
 - `--config`: Path to a specific config file (default `~/.tnctl.yaml`).
 - `--debug`: Enable verbose debug output (on stderr).
-- `-o, --output`: Output format of `robots`, `robot` and `config`: `table` (default), `json` or `yaml`.
+- `-o, --output`: Output format of the commands that support it: table, json or yaml (default table); other commands ignore it. council role export prints YAML only; chat, chat threads, council role list, council roster list and mqtt stream|sample take --json instead. Data goes to stdout, progress to stderr.
 
 ## Configuration
 

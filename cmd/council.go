@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/teknoir/cli/agentkit"
 	"github.com/teknoir/cli/pkg/council"
 	"github.com/teknoir/cli/pkg/council/coder"
 	"github.com/teknoir/cli/pkg/council/hub"
@@ -18,18 +19,30 @@ import (
 // councilWorkDir is where the Coder works by default.
 const councilWorkDir = "/work"
 
-// newCouncilCmd is the hidden council command of a TeknoirBot.
+// newCouncilCmd is "tnctl council": a person's commands for a TeknoirBot's council, and the daemon the
+// bot itself runs.
 func newCouncilCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
-		Use:   "council",
-		Short: "Run the council of a TeknoirBot",
-		Long: `Run the council of a TeknoirBot: the Captain, Fleet, the Coder and the Critic.
+		Use:          "council",
+		Short:        "Read and change a TeknoirBot's council: its members and councils",
+		SilenceUsage: true,
+		Long: `A council is the set of members that answers a chat with a TeknoirBot: a lead (the Captain)
+plans each turn, members each do one job, and a reviewer (the Critic, or Skeptic), when the
+council has one, checks the members' reports when the turn needs it, not on every turn.
 
-Inside a TeknoirBot's computer the council takes the chat turns the platform queues for it and
-answers them. It runs the bot's own key, on the bot's own computer; it is not a person's command.`,
-		Hidden: true,
+  tnctl council role list|get|export   the members a bot's councils can use
+  tnctl council role new|archive       make a member from its job in words, or archive one
+  tnctl council roster list|get|use    a bot's councils, one council's members, the default
+  tnctl council roster add|remove      change a council's members (--as saves a copy)
+  tnctl council roster delete          delete one of the bot's own councils
+  tnctl council apply -f <file>        apply members and councils from YAML (an export, edited)
+
+These are a person's commands: a TeknoirBot cannot run them (it runs only tnctl council serve,
+inside its computer).`,
+		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+		Args: councilGroupArgs,
 	}
-	c.AddCommand(newCouncilServeCmd(e))
+	c.AddCommand(newCouncilServeCmd(e), newCouncilRoleCmd(e), newCouncilApplyCmd(e), newCouncilRosterCmd(e))
 	return c
 }
 
@@ -37,10 +50,12 @@ answers them. It runs the bot's own key, on the bot's own computer; it is not a 
 func newCouncilServeCmd(e *cliEnv) *cobra.Command {
 	var maxTurns int
 	var workDir string
+	var kitDir string
 	cmd := &cobra.Command{
 		Use:          "serve",
 		Short:        "Take chat turns from the platform and answer them",
 		Args:         cobra.NoArgs,
+		Hidden:       true,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if maxTurns < 1 || maxTurns > 2 {
@@ -55,16 +70,18 @@ func newCouncilServeCmd(e *cliEnv) *cobra.Command {
 			}
 			ctx, stop := signalContext(cmd.Context())
 			defer stop()
-			return serveCouncil(ctx, e, cmd, apiBase, ns, keyFile, maxTurns, workDir)
+			return serveCouncil(ctx, e, cmd, apiBase, ns, keyFile, maxTurns, workDir, kitDir)
 		},
 	}
 	cmd.Flags().IntVar(&maxTurns, "max-turns", 2, "how many turns to run at once: 1 or 2")
 	cmd.Flags().StringVar(&workDir, "work-dir", councilWorkDir, "the directory the Coder works in")
+	cmd.Flags().StringVar(&kitDir, "kit-dir", council.DefaultKitDir, "the directory the agent kit's guides are installed in")
+	_ = cmd.Flags().MarkHidden("kit-dir")
 	return cmd
 }
 
 // serveCouncil builds the council's clients and serves until ctx ends.
-func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, ns, keyFile string, maxTurns int, workDir string) error {
+func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, ns, keyFile string, maxTurns int, workDir, kitDir string) error {
 	logf := func(format string, args ...any) {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "council: "+format+"\n", args...)
 	}
@@ -104,16 +121,28 @@ func serveCouncil(ctx context.Context, e *cliEnv, cmd *cobra.Command, apiBase, n
 		Tools:    ts,
 		Coder:    runner,
 		Whoami:   whoami,
+		Skills:   council.KitFS(kitDir),
 		MaxTurns: maxTurns,
 		Logf:     logf,
 	})
 	if err != nil {
 		return err
 	}
+	// The platform checks a turn's council against what this computer can do before it queues the
+	// turn. A bot that cannot announce its capabilities runs the Standard council, as it does today.
+	if err := h.SetCaps(councilCaps(ts, d)); err != nil {
+		logf("caps not sent: %v", err)
+	}
 	if err := d.Serve(ctx); err != nil {
 		return classify(err)
 	}
 	return nil
+}
+
+// councilCaps is what this computer announces on every K1: the tools its MCP server offers, the
+// guides its own book carries and the kit it installed.
+func councilCaps(ts *tools.Set, d *council.Daemon) hub.Caps {
+	return hub.Caps{Proto: 2, Kit: agentkit.Version, Tools: ts.Names(tools.LevelCreator), Skills: d.SkillNames()}
 }
 
 func init() { rootCmd.AddCommand(newCouncilCmd(defaultEnv)) }

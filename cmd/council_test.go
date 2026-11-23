@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/teknoir/cli/pkg/council"
 )
 
 // councilArgs runs "tnctl council ..." with the council command under a test root.
@@ -47,14 +49,20 @@ func TestCouncilServeMaxTurns(t *testing.T) {
 	}
 }
 
-// TestCouncilCmdHidden keeps the command out of the help of its parent, and gives serve its flags.
-func TestCouncilCmdHidden(t *testing.T) {
+// TestCouncilCmdVisible is a person's command group, with the bot's serve daemon hidden below it.
+func TestCouncilCmdVisible(t *testing.T) {
+	noBotMode(t)
 	root := newCouncilCmd(defaultEnv)
-	if !root.Hidden {
-		t.Error("council is not hidden")
+	if root.Hidden {
+		t.Error("council is hidden")
+	}
+	if root.RunE == nil {
+		t.Error("council is not runnable")
 	}
 	var serve *cobra.Command
+	subs := map[string]*cobra.Command{}
 	for _, c := range root.Commands() {
+		subs[c.Name()] = c
 		if c.Name() == "serve" {
 			serve = c
 		}
@@ -62,7 +70,108 @@ func TestCouncilCmdHidden(t *testing.T) {
 	if serve == nil {
 		t.Fatal("council has no serve subcommand")
 	}
+	if !serve.Hidden {
+		t.Error("serve is not hidden")
+	}
 	if serve.Flags().Lookup("max-turns") == nil || serve.Flags().Lookup("work-dir") == nil {
 		t.Error("serve lacks --max-turns or --work-dir")
+	}
+	// The kit dir is a flag of the image's own, not of a person's: it is hidden, and defaults to
+	// where the image installs the guide set.
+	kit := serve.Flags().Lookup("kit-dir")
+	if kit == nil {
+		t.Fatal("serve lacks --kit-dir")
+	}
+	if kit.Hidden != true {
+		t.Error("--kit-dir is not hidden")
+	}
+	if kit.DefValue != council.DefaultKitDir {
+		t.Errorf("--kit-dir defaults to %q, want %q", kit.DefValue, council.DefaultKitDir)
+	}
+	role := subs["role"]
+	if role == nil {
+		t.Fatal("council has no role subcommand")
+	}
+	got := map[string]bool{}
+	for _, c := range role.Commands() {
+		got[c.Name()] = true
+	}
+	for _, want := range []string{"list", "get", "export", "new", "archive", "apply"} {
+		if !got[want] {
+			t.Errorf("council role has no %s subcommand", want)
+		}
+	}
+	if subs["apply"] == nil {
+		t.Error("council has no apply subcommand")
+	}
+	roster := subs["roster"]
+	if roster == nil {
+		t.Fatal("council has no roster subcommand")
+	}
+	gotRoster := map[string]bool{}
+	for _, c := range roster.Commands() {
+		gotRoster[c.Name()] = true
+	}
+	for _, want := range []string{"list", "get", "use", "add", "remove", "delete", "apply"} {
+		if !gotRoster[want] {
+			t.Errorf("council roster has no %s subcommand", want)
+		}
+	}
+	if want := "List, read and change a bot's councils, and pick its default"; roster.Short != want {
+		t.Errorf("council roster Short %q, want %q", roster.Short, want)
+	}
+
+	out, _, err := councilArgs(t, &cliEnv{})
+	if err != nil {
+		t.Fatalf("council: %v", err)
+	}
+	if !strings.Contains(out, "tnctl council role") {
+		t.Errorf("council's help does not name its role commands: %q", out)
+	}
+	if want := "Read and change a TeknoirBot's council: its members and councils"; root.Short != want {
+		t.Errorf("council Short %q, want %q", root.Short, want)
+	}
+	wantLong := "A council is the set of members that answers a chat with a TeknoirBot: a lead (the Captain)\n" +
+		"plans each turn, members each do one job, and a reviewer (the Critic, or Skeptic), when the\n" +
+		"council has one, checks the members' reports when the turn needs it, not on every turn.\n" +
+		"\n" +
+		"  tnctl council role list|get|export   the members a bot's councils can use\n" +
+		"  tnctl council role new|archive       make a member from its job in words, or archive one\n" +
+		"  tnctl council roster list|get|use    a bot's councils, one council's members, the default\n" +
+		"  tnctl council roster add|remove      change a council's members (--as saves a copy)\n" +
+		"  tnctl council roster delete          delete one of the bot's own councils\n" +
+		"  tnctl council apply -f <file>        apply members and councils from YAML (an export, edited)\n" +
+		"\n" +
+		"These are a person's commands: a TeknoirBot cannot run them (it runs only tnctl council serve,\n" +
+		"inside its computer)."
+	if root.Long != wantLong {
+		t.Errorf("council Long:\n%q\nwant:\n%q", root.Long, wantLong)
+	}
+	if want := "List, read, make and archive the members a bot's councils can use"; role.Short != want {
+		t.Errorf("council role Short %q, want %q", role.Short, want)
+	}
+	// A mistyped subcommand is a usage error with cobra's suggestions; the hidden serve is never one.
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"aply"}, `unknown command "aply" for "tnctl council": did you mean apply?`},
+		{[]string{"rol"}, `unknown command "rol" for "tnctl council": did you mean role?`},
+		{[]string{"rle"}, `unknown command "rle" for "tnctl council": did you mean role?`},
+		{[]string{"serv"}, `unknown command "serv" for "tnctl council"`},
+		{[]string{"role", "lsit"}, `unknown command "lsit" for "tnctl council role": did you mean list?`},
+		{[]string{"role", "lst"}, `unknown command "lst" for "tnctl council role": did you mean list or get?`},
+		{[]string{"role", "exprt"}, `unknown command "exprt" for "tnctl council role": did you mean export?`},
+		{[]string{"role", "archve"}, `unknown command "archve" for "tnctl council role": did you mean archive?`},
+		{[]string{"rster"}, `unknown command "rster" for "tnctl council": did you mean roster?`},
+		{[]string{"roser"}, `unknown command "roser" for "tnctl council": did you mean role or roster?`},
+		{[]string{"roster", "lst"}, `unknown command "lst" for "tnctl council roster": did you mean list, get or use?`},
+		{[]string{"roster", "remve"}, `unknown command "remve" for "tnctl council roster": did you mean remove?`},
+		{[]string{"roster", "delte"}, `unknown command "delte" for "tnctl council roster": did you mean delete?`},
+	} {
+		_, _, err = councilArgs(t, &cliEnv{}, c.args...)
+		if err == nil || exitCodeOf(err) != codeUsage || err.Error() != c.want {
+			t.Errorf("council %v: exit %d, %v; want exit 2 %q", c.args, exitCodeOf(err), err, c.want)
+		}
 	}
 }

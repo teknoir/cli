@@ -316,7 +316,7 @@ func TestRawAndStoppedReports(t *testing.T) {
 	if r.Confidence != confidenceLow || r.Findings == nil || r.Proposals == nil || r.OpenQuestions == nil {
 		t.Errorf("the raw report = %+v", r)
 	}
-	s := stoppedReport("timeout")
+	s := stoppedReport("Fleet", "timeout")
 	if s.Summary != "Fleet stopped: timeout." || s.Confidence != confidenceLow || s.Findings == nil {
 		t.Errorf("the stopped report = %+v", s)
 	}
