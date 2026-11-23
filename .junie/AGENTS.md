@@ -9,6 +9,7 @@
 - **Modern Go**: Use Go 1.23+ features. Follow "Go Modern Language Guidelines".
 - **CLI Framework**: Always use `spf13/cobra` for commands and `spf13/viper` for configuration.
 - **Binary Naming**: Ensure all documentation and scripts refer to the tool as `tnctl`.
+- **Tests**: run `scripts/test` (go test flags and packages pass through, default `./...`); under an agent it prints only failures and totals and writes the full log to `.test-logs/`.
 
 ## Domain Handling
 - When a user provides a base domain (e.g., `teknoir.cloud`) via the `--domain` or `-d` flag, the CLI should internally derive the authentication endpoint by prefixing it with `auth.` (e.g., `auth.teknoir.cloud`).
