@@ -234,7 +234,11 @@ func TestCriticRunsWhenAMemberSawPartOfAResult(t *testing.T) {
 func TestCriticSkippedWhenTheTurnNeedsItNot(t *testing.T) {
 	h := newHarness(t, newWork(kindAsk, "", "how many robots are degraded?"))
 	h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x"))))
-	h.model.push(roleFleet, textStep(reportJSON("one robot is degraded"), "end_turn"))
+	// The report calls no tool, so Fleet is nudged once and answers the same report again (+1: the
+	// no-tool nudge); the report is still complete, so the Critic is still not needed.
+	h.model.push(roleFleet,
+		textStep(reportJSON("one robot is degraded"), "end_turn"),
+		textStep(reportJSON("one robot is degraded"), "end_turn"))
 	h.model.push(roleAnswer, textStep("the final", "end_turn"))
 	h.start(t)
 	p := h.waitFinish(t)
@@ -284,8 +288,11 @@ func TestCriticRunsOnLowConfidence(t *testing.T) {
 func TestCriticRunsOnAReportTheMemberDidNotFinish(t *testing.T) {
 	h := newHarness(t, newWork(kindAsk, "", "how many robots are degraded?"))
 	h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x"))))
+	// None of the answers is a report: the first calls no tool and is nudged (+1: the no-tool nudge),
+	// and the forced retry after it is no report either.
 	h.model.push(roleFleet,
 		textStep("not json", "end_turn"),
+		textStep("still not json", "end_turn"),
 		textStep("still not json", "end_turn"))
 	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
 	h.model.push(roleAnswer, textStep("the final", "end_turn"))

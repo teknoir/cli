@@ -590,7 +590,12 @@ func TestCustomRoster(t *testing.T) {
 	)))
 	h.model.push("member:Probe", toolStep("tool_use", apiCall{id: "tu_p", name: "inspect_pod", input: map[string]any{}}),
 		textStep(reportJSON("the pod is healthy", "tu_p"), "end_turn"))
-	h.model.push("member:Reader", textStep(reportJSON("two robots are degraded"), "end_turn"))
+	// Reader's first answer calls no tool, so it is nudged once and answers the same report again
+	// (+1: the no-tool nudge). Planner's role works on the reports, not the platform's data, so it
+	// is not nudged.
+	h.model.push("member:Reader",
+		textStep(reportJSON("two robots are degraded"), "end_turn"),
+		textStep(reportJSON("two robots are degraded"), "end_turn"))
 	h.model.push("member:Planner", textStep(reportJSON("roll the image forward"), "end_turn"))
 	h.model.push("lead-answer:Chief", textStep("the pod is healthy, so the image is the problem", "end_turn"))
 	h.start(t)
@@ -775,9 +780,10 @@ func TestCustomRoster(t *testing.T) {
 		t.Errorf("the convene enum = %v", got)
 	}
 	// No reviewer, so no critique request and no critique event.
-	// The route, Probe's tool round and report, Reader's and Planner's reports, and the answer.
-	if n := h.model.count(); n != 6 {
-		t.Errorf("%d requests, want route, four member calls and the answer", n)
+	// The route, Probe's tool round and report, Reader's report and its no-tool nudge (+1), Planner's
+	// report, and the answer.
+	if n := h.model.count(); n != 7 {
+		t.Errorf("%d requests, want route, five member calls and the answer", n)
 	}
 	if n := len(p.ofType(hub.EventCritique)); n != 0 {
 		t.Errorf("%d critique events, want none", n)

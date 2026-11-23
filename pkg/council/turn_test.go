@@ -230,6 +230,12 @@ func TestCouncilTurn(t *testing.T) {
 		&scriptStep{msg: apiMessage([]map[string]any{{"type": "text", "text": reportJSON("fleet one")}}, "end_turn"), block: barrier, entered: e1},
 		&scriptStep{msg: apiMessage([]map[string]any{{"type": "text", "text": reportJSON("fleet two")}}, "end_turn"), block: barrier, entered: e2},
 	)
+	// Each Fleet task answers its first call without a tool, so each is nudged once (+1: the no-tool
+	// nudge, per task): the nudged answer is the report the synthesis gets.
+	h.model.push(roleFleet,
+		textStep(reportJSON("fleet one"), "end_turn"),
+		textStep(reportJSON("fleet two"), "end_turn"),
+	)
 	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
 	h.model.push(roleAnswer, textStep("the final answer", "end_turn"))
 	h.start(t)
@@ -338,7 +344,11 @@ func TestCouncilModeWithoutConvene(t *testing.T) {
 	work.Options.Mode = modeCouncil
 	h := newHarness(t, work)
 	h.model.push(roleRoute, textStep("I will look", "end_turn"))
-	h.model.push(roleFleet, textStep(reportJSON("fleet's report"), "end_turn"))
+	// Fleet's first answer calls no tool, so it is nudged once and the second answer is its report
+	// (+1: the no-tool nudge).
+	h.model.push(roleFleet,
+		textStep(reportJSON("fleet's report"), "end_turn"),
+		textStep(reportJSON("fleet's report"), "end_turn"))
 	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
 	h.model.push(roleAnswer, textStep("the final", "end_turn"))
 	h.start(t)
@@ -350,9 +360,10 @@ func TestCouncilModeWithoutConvene(t *testing.T) {
 	if len(tasks) != 1 || tasks[0].(map[string]any)["member"] != slugFleet {
 		t.Fatalf("plan %v", plan)
 	}
-	// The Fleet task is the prompt itself.
+	// The Fleet task is the prompt itself. Fleet answers twice: its report, then the no-tool nudge
+	// (+1).
 	fleet := h.model.requests(roleFleet)
-	if len(fleet) != 1 || !strings.Contains(paramText(fleet[0].Messages[0]), "what is the state of the fleet?") {
+	if len(fleet) != 2 || !strings.Contains(paramText(fleet[0].Messages[0]), "what is the state of the fleet?") {
 		t.Errorf("fleet request: %v", fleet)
 	}
 	if p.result().Final != "the final" {
@@ -445,8 +456,11 @@ func TestInvalidConvene(t *testing.T) {
 func TestFleetInvalidReport(t *testing.T) {
 	h := newHarness(t, newWork(kindAsk, "", "why is the robot degraded?"))
 	h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x"))))
+	// Three answers: the first calls no tool and is nudged (+1: the no-tool nudge), the nudged answer
+	// is no report either, and the forced retry is the last one.
 	h.model.push(roleFleet,
 		textStep("this is not JSON", "end_turn"),
+		textStep("still not JSON", "end_turn"),
 		textStep("still not JSON", "end_turn"))
 	h.model.push(roleCritic, textStep(critiqueAnswer(), "end_turn"))
 	h.model.push(roleAnswer, textStep("the final", "end_turn"))
@@ -454,14 +468,15 @@ func TestFleetInvalidReport(t *testing.T) {
 	p := h.waitFinish(t)
 	h.stop(t)
 
+	// 3: the invalid answer, its no-tool nudge (+1), and the forced retry.
 	fleet := h.model.requests(roleFleet)
-	if len(fleet) != 2 {
+	if len(fleet) != 3 {
 		t.Fatalf("%d fleet requests", len(fleet))
 	}
-	if !fleet[1].ToolChoiceNone {
+	if !fleet[2].ToolChoiceNone {
 		t.Error("the retry does not force an answer")
 	}
-	retry := paramText(fleet[1].Messages[len(fleet[1].Messages)-1])
+	retry := paramText(fleet[2].Messages[len(fleet[2].Messages)-1])
 	if !strings.Contains(retry, "That was not a valid report:") {
 		t.Errorf("the retry prompt %q", retry)
 	}
@@ -999,7 +1014,11 @@ func TestTurnLostWhileRoute(t *testing.T) {
 
 func TestMemberTurnFleet(t *testing.T) {
 	h := newHarness(t, newWork(kindMember, slugFleet, "which robots are degraded?"))
-	h.model.push(roleFleet, textStep(reportJSON("the fleet's facts"), "end_turn"))
+	// The first answer calls no tool, so Fleet is nudged once and the second answer is its report
+	// (+1: the no-tool nudge).
+	h.model.push(roleFleet,
+		textStep(reportJSON("the fleet's facts"), "end_turn"),
+		textStep(reportJSON("the fleet's facts"), "end_turn"))
 	h.start(t)
 	p := h.waitFinish(t)
 	h.stop(t)
@@ -1136,7 +1155,11 @@ func TestFailedCallStillCostsTokens(t *testing.T) {
 func TestSynthesisModelError(t *testing.T) {
 	h := newHarness(t, newWork(kindAsk, "", "why is the robot degraded?"))
 	h.model.push(roleRoute, toolStep("tool_use", conveneCall("tu_1", taskOf(slugFleet, "the facts", "x"))))
-	h.model.push(roleFleet, textStep(reportJSON("the fleet's report"), "end_turn"))
+	// Fleet's first answer calls no tool, so it is nudged once and the second answer is its report
+	// (+1: the no-tool nudge).
+	h.model.push(roleFleet,
+		textStep(reportJSON("the fleet's report"), "end_turn"),
+		textStep(reportJSON("the fleet's report"), "end_turn"))
 	h.model.push(roleAnswer, &scriptStep{err: errors.New("connection reset")})
 	h.start(t)
 	p := h.waitFinish(t)
@@ -1612,15 +1635,19 @@ func TestCoderTaskAfterToolDataWhenAsked(t *testing.T) {
 func TestFleetTaskAfterToolData(t *testing.T) {
 	h := toolDataRoute(t, "why is r2 degraded?", taskOf(slugFleet, "the robot's problems", "find the facts"))
 	// A Fleet report with no proposal and no truncation skips the Critic (D17), so only the report
-	// and the answer are scripted.
-	h.model.push(roleFleet, textStep(reportJSON("fleet's report"), "end_turn"))
+	// and the answer are scripted. The report calls no tool, so Fleet is nudged once and answers the
+	// same report again (+1: the no-tool nudge).
+	h.model.push(roleFleet,
+		textStep(reportJSON("fleet's report"), "end_turn"),
+		textStep(reportJSON("fleet's report"), "end_turn"))
 	h.model.push(roleAnswer, textStep("the final", "end_turn"))
 	h.start(t)
 	h.waitFinish(t)
 	h.stop(t)
 
-	if got := len(h.model.requests(roleFleet)); got != 1 {
-		t.Errorf("Fleet ran %d times, want 1", got)
+	// 2: the report and its no-tool nudge.
+	if got := len(h.model.requests(roleFleet)); got != 2 {
+		t.Errorf("Fleet ran %d times, want 2", got)
 	}
 	if got := len(h.coder.started()); got != 0 {
 		t.Errorf("the Coder ran %d times, want 0", got)
