@@ -2,7 +2,7 @@
 # Copy it next to your code as `Dockerfile`, put your packages in requirements.txt, and build with
 #   teknoirbot-build . <app>
 # The base image is pinned by tag: a moving tag would make a rebuild produce a different image.
-FROM public.ecr.aws/docker/library/python:3.12.7-slim
+FROM public.ecr.aws/docker/library/python:3.15.2-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
