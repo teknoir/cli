@@ -1049,6 +1049,12 @@ const (
 	notRunCut = "Not run: the answer was cut off."
 )
 
+// noToolNudge is the user message a data member gets when it answers its first call without calling
+// any tool: it then wrote the report from memory instead of reading the platform data its tools
+// offer (staging 2026-11-23, a member that answered "I have not yet answered … no tool has been
+// called" twice in one call).
+const noToolNudge = "You called no tool. Read the facts you need with your tools first, then answer with the report JSON."
+
 // notRun is an error tool_result for each of blocks from index from on: the API refuses an
 // assistant message whose tool_use has no tool_result after it.
 func notRun(blocks []toolUse, from int, why string) []anthropic.ContentBlockParamUnion {
@@ -1438,6 +1444,10 @@ func (t *turn) memberTask(workCtx context.Context, role *runRole, factsF promptF
 	// unfinished: the member's last answer was forced by its round or token limit, or cut at max_tokens with
 	// tool calls it never ran; its report then counts as incomplete (7.5).
 	unfinished := false
+	// nudged: the one extra call a data member may be given after it answered without a tool. A data
+	// member that answers its first call without a tool read nothing it was given the tools for, so it
+	// is told once more to call them first; at most one extra call, and its next answer is the report.
+	nudged := false
 	for {
 		force := rounds >= maxRounds || own >= maxOwn
 		unfinished = force
@@ -1460,6 +1470,18 @@ func (t *turn) memberTask(workCtx context.Context, role *runRole, factsF promptF
 		}
 		blocks := toolUses(msg)
 		if force || len(blocks) == 0 || msg.StopReason == anthropic.StopReasonMaxTokens {
+			// The nudge: the guard against a data member that writes its report without reading the
+			// facts its tools exist for (the defect in noToolNudge), and it costs at most one extra
+			// call, because a second tool-less answer is taken as the report. A member whose token
+			// budget the first answer spent is not nudged: the nudged call would be forced to answer
+			// without tools.
+			if !force && len(blocks) == 0 && msg.StopReason != anthropic.StopReasonMaxTokens &&
+				rounds == 0 && !nudged && own < maxOwn && role.dataRole() && len(role.Tools) > 0 {
+				nudged = true
+				req.Messages = append(req.Messages, msg.ToParam(),
+					anthropic.NewUserMessage(anthropic.NewTextBlock(noToolNudge)))
+				continue
+			}
 			break
 		}
 		results, evs, ok := t.runToolBlocks(workCtx, role, index, blocks, nil)

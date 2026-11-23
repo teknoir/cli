@@ -358,7 +358,9 @@ func scenarioMemberFleetHistory(t *testing.T) *testHarness {
 		{Prompt: "and the fleet?", Final: "two robots", Author: &hub.Author{Email: "c@d.e", DisplayName: "Chris"}},
 	}
 	h := goldenHarness(t, work)
-	h.model.pushUsed(roleFleet, textStep(reportJSON("one robot is degraded"), "end_turn"))
+	// The answer has no tool call, so Fleet gets the one no-tool nudge, and its second answer is the report.
+	h.model.pushUsed(roleFleet, textStep(reportJSON("one robot is degraded"), "end_turn"),
+		textStep(reportJSON("one robot is degraded"), "end_turn"))
 	return h
 }
 
