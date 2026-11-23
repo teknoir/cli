@@ -1117,8 +1117,13 @@ func (t *turn) runToolBlocks(ctx context.Context, r *runRole, task int, blocks [
 		if res.Truncated {
 			t.truncated.Store(true)
 		}
-		// A cut result is kept whole for read_result, and what the model gets says so.
-		text, digest := tools.Render(b.Name, res, t.storeResult(b.Name, res))
+		// A cut result is kept whole for read_result when the role may page it, and what the model gets
+		// says so: any other role gets the header of a result that is not kept.
+		ref := ""
+		if r.offers(toolReadResult) {
+			ref = t.storeResult(b.Name, res)
+		}
+		text, digest := tools.Render(b.Name, res, ref)
 		if emit {
 			data := map[string]any{"member": r.wire, "id": b.ID, "ok": !res.IsError, "summary": digest}
 			if task >= 0 {
@@ -1147,6 +1152,12 @@ func (t *turn) storeResult(name string, res tools.Result) string {
 	return ref
 }
 
+// mayPage reports whether r may read a stored result of tool: the tool is on the role's own list and
+// allowed at the level the role runs at (spec 4.5, 7.7), as a call of that tool would be.
+func (t *turn) mayPage(r *runRole, tool string) bool {
+	return slices.Contains(r.Tools, tool) && slices.Contains(t.d.cfg.Tools.Names(r.runLevel), tool)
+}
+
 // callTool runs one tool: the council's own read_skill and read_result, or one of the MCP server's.
 // A local tool runs under a recover: a bug in one of them must cost the model one tool result, not
 // end the daemon with the turns that run in it.
@@ -1167,8 +1178,18 @@ type localTool func(t *turn, r *runRole, input json.RawMessage) tools.Result
 // localTools are the council's own tools, by name. A variable so that a test can add one: a panic
 // in a tool is tested with a tool of the test's, not by breaking a real one.
 var localTools = map[string]localTool{
-	toolReadResult: func(t *turn, r *runRole, input json.RawMessage) tools.Result { return t.readResult(input) },
-	toolReadSkill:  runReadSkill,
+	toolReadResult: func(t *turn, r *runRole, input json.RawMessage) tools.Result {
+		var in struct {
+			Ref string `json:"ref"`
+		}
+		_ = json.Unmarshal(input, &in)
+		if page, ok := t.results.get(in.Ref); ok && !t.mayPage(r, page.Tool) {
+			// The same answer as an unknown ref: a role learns nothing of results it may not read.
+			return readResultError("no result " + cutUTF8(in.Ref, 64, "…") + " in this turn")
+		}
+		return t.readResult(input)
+	},
+	toolReadSkill: runReadSkill,
 }
 
 // callLocalTool runs the council's own tool and turns its panic into an error result, which is

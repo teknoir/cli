@@ -1133,6 +1133,98 @@ func TestPerRoleTools(t *testing.T) {
 	}
 }
 
+// TestReadResultKeepsToTheToolsOfTheRole: a stored result is paged only by a role that may call the
+// tool that made it, at the level it runs at. The lead holds no inspect group, and the member that
+// may look inside pods cut an inspect_pod result: the lead's read_result of its ref is refused.
+func TestReadResultKeepsToTheToolsOfTheRole(t *testing.T) {
+	work := newWork(kindAsk, "", "why is r2 degraded?")
+	work.Options.Mode = modeCouncil
+	work.Council = customSnapshot(t, func(s *hub.Snapshot) {
+		customRoster(s)
+		s.Lead.Groups = []string{"core_read", "results"}
+		s.Lead.Tools = []string{"list_robots", "whoami"}
+		probe := s.Members[0]
+		probe.Groups, probe.Results = []string{"inspect", "results"}, true
+		s.Members = []hub.RoleSnapshot{probe}
+	})
+	h := goldenHarness(t, work)
+	h.tools.catalog = customTools()
+	h.whoamiAt("creator")
+	const whole = "the whole pod log, which only a role with the inspect group may read"
+	h.tools.queueResults("inspect_pod", cutResult(whole, "the whole"))
+
+	h.model.push("lead-route:Chief", toolStep("tool_use", conveneCall("tu_1", taskOf("probe", "the pod's logs", "it is the question"))))
+	h.model.push("member:Probe",
+		toolStep("tool_use", apiCall{id: "tu_p", name: "inspect_pod", input: map[string]any{}}),
+		textStep(reportJSON("the pod is healthy", "tu_p"), "end_turn"))
+	h.model.push("lead-answer:Chief",
+		toolStep("tool_use", apiCall{id: "tu_r", name: toolReadResult, input: map[string]any{"ref": "r1", "offset": 0}}),
+		textStep("the pod is healthy", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+	noLeftovers(t, h)
+
+	var got map[string]any
+	for _, e := range p.ofType(hub.EventToolResult) {
+		if d := dataOf(t, e); d["id"] == "tu_r" {
+			got = d
+		}
+	}
+	if got == nil {
+		t.Fatal("no tool_result for the lead's read_result")
+	}
+	if got["ok"] != false {
+		t.Errorf("the lead paged a result of inspect_pod, a tool it may not call: %v", got)
+	}
+	if s, _ := got["summary"].(string); strings.Contains(s, "PAGE:") {
+		t.Errorf("the lead was given a page of another role's inspect_pod result: %q", s)
+	}
+}
+
+// TestCutResultOfARoleWithoutResults: a role without the results group is never told to page with
+// read_result, which it is not offered: its cut result's header says the rest is not kept.
+func TestCutResultOfARoleWithoutResults(t *testing.T) {
+	work := newWork(kindAsk, "", "why is r2 degraded?")
+	work.Options.Mode = modeCouncil
+	work.Council = customSnapshot(t, func(s *hub.Snapshot) {
+		customRoster(s)
+		s.Members = s.Members[:1] // Probe: the inspect group alone, no results
+	})
+	h := goldenHarness(t, work)
+	h.tools.catalog = customTools()
+	h.whoamiAt("creator")
+	h.tools.queueResults("inspect_pod", cutResult("the whole pod log", "the whole"))
+	h.model.push("lead-route:Chief", toolStep("tool_use", conveneCall("tu_1", taskOf("probe", "the pod's logs", "it is the question"))))
+	h.model.push("member:Probe",
+		toolStep("tool_use", apiCall{id: "tu_p", name: "inspect_pod", input: map[string]any{}}),
+		textStep(reportJSON("the pod is healthy", "tu_p"), "end_turn"))
+	h.model.push("lead-answer:Chief", textStep("the pod is healthy", "end_turn"))
+	h.start(t)
+	p := h.waitFinish(t)
+	h.stop(t)
+	noLeftovers(t, h)
+
+	if got := toolNames(h.model.requests("member:Probe")[0]); slices.Contains(got, toolReadResult) {
+		t.Fatalf("Probe was offered read_result: %v", got)
+	}
+	seen := false
+	for _, e := range p.ofType(hub.EventToolResult) {
+		d := dataOf(t, e)
+		if d["id"] != "tu_p" {
+			continue
+		}
+		seen = true
+		s, _ := d["summary"].(string)
+		if !strings.HasPrefix(s, "RESULT PARTIAL") || strings.Contains(s, toolReadResult) {
+			t.Errorf("Probe has no read_result, and its cut result says %q", s)
+		}
+	}
+	if !seen {
+		t.Fatal("no tool_result for Probe's inspect_pod")
+	}
+}
+
 // A version-pinned role renders its own instructions: the version is the platform's, and the
 // daemon uses what the snapshot holds.
 func TestPinnedRoleInstructions(t *testing.T) {

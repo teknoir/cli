@@ -172,9 +172,9 @@ type ChatTurn struct {
 	ID       string `json:"id"`
 	ThreadID string `json:"threadId"`
 	Index    int    `json:"index"`
-	// Kind is ask (a person asks the council, or one member) or member (a person's turn in a
-	// conversation with one member: a thread made with a member, from `tnctl chat --member` or
-	// council_ask).
+	// Kind is ask (a person asks the council) or member (one member answers: every turn of a thread
+	// made with a member, from `tnctl chat --member` or council_ask, and an @slug turn in a council
+	// thread).
 	Kind    string          `json:"kind"`
 	Member  *string         `json:"member"`
 	Prompt  string          `json:"prompt"`
@@ -191,8 +191,8 @@ type ChatTurn struct {
 	StartedAt  *int64     `json:"startedAt"`
 	FinishedAt *int64     `json:"finishedAt"`
 
-	// Roster is the council the turn asked; nil for a member turn and when the council cannot be
-	// resolved.
+	// Roster is the council the turn ran on (an @slug turn of a council thread names it too); nil for
+	// the turns of a thread made with a member, and when the council was deleted.
 	Roster *ChatTurnRoster `json:"roster"`
 	// RosterHash is the hash of the council the claim recorded ("sha256:<64 hex>" or "legacy"); nil
 	// until the turn is claimed, and on turns from before Stage 1.
