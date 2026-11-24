@@ -299,8 +299,9 @@ type FleetDeviceCredentials struct {
 	RSAPublic    string `json:"rsaPublic,omitempty"`
 	PublicSSHKey string `json:"publicSshKey,omitempty"`
 	// Registry is the image registry mirror (Harbor pull-through cache) of the device's teamspace, when the
-	// platform sends one. It is the default of `tnctl bootstrap --registry-mirror` and its credential. Nothing
-	// sends it yet (planned, plans/harbor-proxy-staging.md phase 1b): it is ignored when absent.
+	// platform sends one. It is the default of `tnctl bootstrap --registry-mirror` and its credential. The fleet
+	// API sends it to tnctl when the platform has a mirror (Backstage `teknoir.fleet.registryMirror`) and the
+	// teamspace a pull credential; it is ignored when absent.
 	Registry *FleetRegistry `json:"registry,omitempty"`
 }
 
