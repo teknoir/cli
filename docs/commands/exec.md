@@ -128,8 +128,9 @@ with sudo-rs), none against the login. `pam_faillock` does not lock root for the
 `even_deny_root`.
 
 What a lock stops is the login's **password**, for `pam_faillock`'s unlock time after the last failed login:
-`tnctl` root commands (the messages above), `sudo` typed by a person in [`ssh`](ssh.md), and anything else
-that gives sudo that password. A refused attempt during the lock adds nothing to it. It ends by itself (with
+`tnctl` root commands (the messages above), `sudo` typed by a person in [`ssh`](ssh.md), anything else
+that gives sudo that password, and, where `pam_faillock` is in `common-auth`, the login's other password
+logins too (console, `su`, desktop and screen unlock). A refused attempt during the lock adds nothing to it. It ends by itself (with
 `unlock_time=0` it does not, per `pam_faillock`'s manual: root then has to clear it with `faillock --user
 <login> --reset`). It does not stop the login's ssh key: `tnctl ssh` and `tnctl exec` without `--root` still
 work. And it does not touch the device's connection to the platform: MQTT, the TOE and WireGuard do not use

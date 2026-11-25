@@ -466,9 +466,10 @@ func lookHost(name string) (string, error) {
 // fakeDevice is a directory that plays a device: a PATH with only the stand-ins and the few
 // tools the scripts use, and the state of its sudo.
 type fakeDevice struct {
-	t   *testing.T
-	dir string
-	bin string
+	t    *testing.T
+	dir  string
+	bin  string
+	sbin string
 }
 
 // newFakeDevice sets up the stand-ins. shAs is the program that `sh` is on the device (dash on
@@ -510,7 +511,11 @@ func newFakeDevice(t *testing.T, shAs, loginShell, mode, devicePassword string) 
 			t.Fatal(err)
 		}
 	}
-	d := &fakeDevice{t: t, dir: dir, bin: bin}
+	// PAM's helper is setgid shadow on a device: only such a helper is asked.
+	if err := os.Chmod(filepath.Join(sbin, "unix_chkpwd"), 0o755|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	d := &fakeDevice{t: t, dir: dir, bin: bin, sbin: sbin}
 	d.write("mode", mode)
 	d.write("password", devicePassword)
 	me, err := user.Current()
@@ -1084,6 +1089,30 @@ func TestRootRejectedBySudoMayBeALockedLogin(t *testing.T) {
 		if !errors.As(err, &re) || re.reason != c.reason || !strings.Contains(err.Error(), c.frag) || strings.Contains(err.Error(), c.not) {
 			t.Errorf("%s: %v", c.name, err)
 		}
+	}
+}
+
+// A unix_chkpwd without its setuid/setgid bit cannot read the shadow file, and on PAM before 1.4
+// (Ubuntu 18.04 and 20.04, JetPack 4 and 5) it then answers 7 for the right password too. Such a
+// helper is never asked: the password goes to sudo, which takes it.
+func TestRootHelperWithoutSetidIsNotAsked(t *testing.T) {
+	d := newFakeDevice(t, "sh", "sh", "passwd", "the-real-one")
+	d.write("helper-rc", "7") // what such a helper answers, whatever the password
+	if err := os.Chmod(filepath.Join(d.sbin, "unix_chkpwd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.shell("the-real-one").RunRoot(context.Background(), "echo ran")
+	if err != nil || strings.TrimSpace(res.Stdout) != "ran" {
+		t.Fatalf("the right password was not used: %+v %v", res, err)
+	}
+	if got := d.lines("helper-runs"); got != 0 {
+		t.Errorf("a helper without its setuid/setgid bit was asked %d times, want 0", got)
+	}
+	// The same helper with its setgid bit is trusted, and its 7 ends the run.
+	d2 := newFakeDevice(t, "sh", "sh", "passwd", "the-real-one")
+	d2.write("helper-rc", "7")
+	if _, err := d2.shell("the-real-one").RunRoot(context.Background(), "echo never"); err == nil {
+		t.Errorf("a setgid helper's 7 was not taken as a refusal")
 	}
 }
 

@@ -159,6 +159,9 @@ if [ "$3" = ` + rootWithPassword + ` ]; then
   while IFS=: read -r n x; do [ "$n" != "$u" ] || l=1; done <` + passwd + `
   for c in ` + strings.Join(helpers, " ") + `; do
     [ -n "$l" ] && [ -x "$c" ] || continue
+    # Only a helper with its setuid/setgid bit can read the shadow file; without it, PAM
+    # before 1.4 answers 7 (wrong) for the right password too.
+    [ -u "$c" ] || [ -g "$c" ] || continue
     printf "%s\0" "$p" | "$c" "$u" nullok >/dev/null 2>&1; k=$?; break
   done
   [ "$k" != 7 ] || ` + mark("rejected", rootExitRejected) + `
@@ -170,6 +173,8 @@ if [ "$3" = ` + rootWithPassword + ` ]; then
     ` + mark("rejected", rootExitRejected) + `
   }
   unset p
+  # A PAM prompt of its own ends without a line break: start the marker on a line of its own.
+  echo >&2
   echo "` + rootMark + rootMarkAuth + `" >&2
   LC_ALL=C sudo -n -v </dev/null 2>/dev/null || ` + mark("no-ticket", rootExitNoTicket) + `
 fi
