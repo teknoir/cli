@@ -3,6 +3,7 @@
 #
 #   test/sudo-root/run.sh [go test flags]     for example: run.sh -v, run.sh -run 'TestSudoRig/pw'
 #   test/sudo-root/run.sh --matrix [flags]    the four device systems of the README, one after the other
+#   test/sudo-root/run.sh --clean             remove the images this script built (they are kept between runs)
 #
 # Builds a throwaway container with sshd and one login user per sudo state, runs the TestSudoRig
 # tests of ./cmd against it with the real ssh client, and removes the container. Needs docker, go
@@ -15,6 +16,13 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
+
+if [ "${1:-}" = --clean ]; then
+  # Not forced: an image a running rig still uses stays.
+  images=$(docker images --format '{{.Repository}}:{{.Tag}}' 'tnctl-sudo-root-test')
+  [ -z "$images" ] || docker image rm $images
+  exit 0
+fi
 
 if [ "${1:-}" = --matrix ]; then
   shift

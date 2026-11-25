@@ -75,6 +75,12 @@ echo 'PATH=$HOME/bin:$PATH' > /home/bs/.zshenv
 chown -R bs: /home/bs
 # fl-a, fl-b, fl-c: password sudo; the logins the pam_faillock tests count and lock.
 for u in fl-a fl-b fl-c; do add "$u" bash yes; done
+# tp, rp: password sudo that asks for root's password instead of the login's (targetpw, rootpw).
+#         Nobody has root's password here: the login's is the wrong answer, as on such a device.
+add tp bash yes
+rule 50-tp 'Defaults:tp targetpw'
+add rp bash yes
+rule 50-rp 'Defaults:rp rootpw'
 if [ -z "$rs" ]; then
   # rt:    password sudo that wants a terminal (requiretty).
   # li-pw: password sudo that logs the command's input (log_input).

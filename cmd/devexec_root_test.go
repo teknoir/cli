@@ -51,9 +51,15 @@ func TestRootWrapperShape(t *testing.T) {
 			t.Errorf("the wrapper lacks %q", frag)
 		}
 	}
-	// The last sudo is neither exec'ed nor the last command: its ticket belongs to this sh.
-	if !strings.HasSuffix(rootWrapper, "\nLC_ALL=C sudo -n sh -c \"$2\" tnctl-root \"$1\" \"$L\"\nexit $?") {
-		t.Errorf("the wrapper must end in the sudo of the script and an exit:\n%s", rootWrapper)
+	// The last sudo is neither exec'ed nor the last command: its ticket belongs to this sh. The
+	// line before it says that sudo speaks from here on: nothing printed earlier is read as its answer.
+	if !strings.HasSuffix(rootWrapper, "\necho \""+rootMark+"sudo\" >&2\nLC_ALL=C sudo -n sh -c \"$2\" tnctl-root \"$1\" \"$L\"\nexit $?") {
+		t.Errorf("the wrapper must end in the \"sudo\" marker, the sudo of the script and an exit:\n%s", rootWrapper)
+	}
+	// `sudo -v` follows the "ask" marker at once, and its prompt is a marker line of its own that
+	// says whose password sudo asks for
+	if !strings.Contains(rootWrapper, "\n  echo \""+rootMark+"ask\" >&2\n  printf \"%s\\n\" \"$p\" | LC_ALL=C sudo -S -p \"\n"+rootMark+"for %u %p\n\" -v || {\n") {
+		t.Errorf("the wrapper must mark `sudo -v` and give it the prompt that names the user:\n%s", rootWrapper)
 	}
 	sudos := 0
 	for _, line := range strings.Split(rootWrapper, "\n") {
@@ -103,35 +109,56 @@ func TestRootWrapperShape(t *testing.T) {
 	}
 }
 
+// sudoSaid is given sudo's own lines (rootStderr.sudo) and nothing else.
 func TestSudoSaid(t *testing.T) {
 	for _, c := range []struct {
-		stderr string
-		word   sudoWord
-		line   string
+		said string
+		word sudoWord
+		line string
 	}{
 		{"", sudoSilent, ""},
-		{"bash: warning: setlocale: LC_ALL: cannot change locale\n", sudoSilent, ""},
+		{"\n \n", sudoSilent, ""},
 		{"sudo: a password is required\n", sudoAsks, ""},
 		{"sudo: interactive authentication is required\n", sudoAsks, ""}, // sudo-rs
+		{"sudo-rs: interactive authentication is required\n", sudoAsks, ""},
 		{"sudo: unable to resolve host dev-1: Name or service not known\nsudo: a password is required\n", sudoAsks, "sudo: unable to resolve host dev-1: Name or service not known"},
+		// only sudo's whole sentence means that it asks: tnctl sends the password on this word
+		{"pam_example: a password is required\n", sudoOther, "pam_example: a password is required"},
+		{"a password is required\n", sudoOther, "a password is required"},
+		{"sudo: a password is required to read the sudoers\n", sudoOther, "sudo: a password is required to read the sudoers"},
 		{"sudo: sorry, you must have a tty to run sudo\n", sudoNoTTY, ""},
 		{"tn is not in the sudoers file.\n", sudoNotInSudoers, ""},
+		{"tn is not in the sudoers file.  This incident will be reported.\n", sudoNotInSudoers, ""}, // sudo 1.8
 		{"Sorry, user tn may not run sudo on dev-1.\n", sudoNotInSudoers, ""},
 		{"Sorry, user tn is not allowed to execute '/usr/bin/sh -c id' as root on dev-1.\n", sudoNotAllowed, ""},
 		{"sudo: I'm sorry tn. I'm afraid I can't do that\n", sudoNotAllowed, ""}, // sudo-rs
 		{"sudo: account validation failure, is your account locked?\n", sudoAccount, ""},
-		{"Sorry, try again.\n\nsudo: no password was provided\nsudo: 1 incorrect password attempt\n", sudoOther, "Sorry, try again."},
+		{"Your account has expired; please contact your system administrator.\n", sudoAccount, ""}, // pam_unix, through sudo
+		// the line that is shown is the last one tnctl does not know: sudo's warnings come first
+		{"Sorry, try again.\n\nsudo: no password was provided\nsudo: 1 incorrect password attempt\n", sudoOther, "sudo: 1 incorrect password attempt"},
 		{"sudo: unable to resolve host dev-1\n", sudoOther, "sudo: unable to resolve host dev-1"},
+		{"sudo: unable to resolve host dev-1: Name or service not known\nsudo: unable to open /etc/sudoers: Permission denied\n", sudoOther, "sudo: unable to open /etc/sudoers: Permission denied"},
+		{"sudo: unable to resolve host dev-1\nsudo: unable to open /etc/sudoers: Permission denied\nsudo: a password is required\n", sudoAsks, "sudo: unable to open /etc/sudoers: Permission denied"},
+		// a line of sudo's own is taken before what a PAM module printed through it
+		{"sudo: unable to stat /etc/sudoers: No such file or directory\npam_example: bye\n", sudoOther, "sudo: unable to stat /etc/sudoers: No such file or directory"},
+		{"Sorry, try again.\npam_example: bye\n", sudoOther, "Sorry, try again."},
+		{"pam_example: hello\npam_example: bye\n", sudoOther, "pam_example: bye"},
 		{"sudo: " + strings.Repeat("x", 500) + "\n", sudoOther, "sudo: " + strings.Repeat("x", maxSudoLine-6) + "..."},
 	} {
-		if word, line := sudoSaid(c.stderr); word != c.word || line != c.line {
-			t.Errorf("%q: got %d %q, want %d %q", c.stderr, word, line, c.word, c.line)
+		if word, line := sudoSaid(c.said); word != c.word || line != c.line {
+			t.Errorf("%q: got %d %q, want %d %q", c.said, word, line, c.word, c.line)
 		}
 	}
 }
 
 func TestRootVerdict(t *testing.T) {
 	const wrong = "Sorry, try again.\n\nsudo: no password was provided\nsudo: 1 incorrect password attempt\n"
+	// said is an attempt that failed with what sudo said to the command (after the "sudo" marker).
+	said := func(code int, sudo string) rootAttempt { return rootAttempt{code: code, pre: sudo, sudo: sudo} }
+	// gave is an attempt whose wrapper gave up with token after `sudo -v` was given the password.
+	gave := func(token rootReason, sudo string) rootAttempt {
+		return rootAttempt{code: rootExitOf[token], token: string(token), pre: sudo, sudo: sudo, gave: true}
+	}
 	for _, c := range []struct {
 		name string
 		a    rootAttempt
@@ -141,29 +168,48 @@ func TestRootVerdict(t *testing.T) {
 		asks bool
 		frag string
 	}{
-		{"sudo asks, nothing was sent yet", rootAttempt{code: 1, pre: "sudo: a password is required\n"}, rootTry, "", 0, true, ""},
-		{"sudo-rs asks", rootAttempt{code: 1, pre: "sudo: interactive authentication is required\n"}, rootTry, "", 0, true, ""},
-		{"requiretty", rootAttempt{code: 1, pre: "sudo: sorry, you must have a tty to run sudo\n"}, rootTry, rootRefused, sudoNoTTY, false, "only works on a terminal"},
-		{"sudo-rs: not allowed", rootAttempt{code: 1, pre: "sudo: I'm sorry tn. I'm afraid I can't do that\n"}, rootTry, rootRefused, sudoNotAllowed, false, "do not let the device login user run sh as root"},
-		{"a sentence tnctl does not know", rootAttempt{code: 1, pre: "sudo: unable to open /etc/sudoers: Permission denied\n"}, rootTry, rootRefused, sudoOther, false, "did not run the command: sudo: unable to open /etc/sudoers"},
-		{"not sudo's: ssh", rootAttempt{code: 255, pre: "ssh: connect to host dev-1: Connection refused\n"}, rootTry, "", 0, false, ""},
+		{"sudo asks, nothing was sent yet", said(1, "sudo: a password is required\n"), rootTry, "", 0, true, ""},
+		{"sudo-rs asks", said(1, "sudo: interactive authentication is required\n"), rootTry, "", 0, true, ""},
+		{"requiretty", said(1, "sudo: sorry, you must have a tty to run sudo\n"), rootTry, rootRefused, sudoNoTTY, false, "only works on a terminal"},
+		{"sudo-rs: not allowed", said(1, "sudo: I'm sorry tn. I'm afraid I can't do that\n"), rootTry, rootRefused, sudoNotAllowed, false, "do not let the device login user run sh as root"},
+		{"a sentence tnctl does not know", said(1, "sudo: unable to open /etc/sudoers: Permission denied\n"), rootTry, rootRefused, sudoOther, false, "did not run the command: sudo: unable to open /etc/sudoers"},
+		{"the reason is sudo's last line, not its first warning", said(1, "sudo: unable to resolve host dev-1: Name or service not known\nsudo: unable to open /etc/sudoers: Permission denied\n"), rootTry, rootRefused, sudoOther, false, "did not run the command: sudo: unable to open /etc/sudoers"},
 		{"not sudo's: nothing said", rootAttempt{code: 127}, rootTry, "", 0, false, ""},
-		{"exit 0 is no refusal", rootAttempt{pre: "sudo: a password is required\n"}, rootTry, "", 0, false, ""},
-		{"the script ran: its output is its own", rootAttempt{code: 1, ran: true, pre: "sudo: a password is required\n"}, rootTry, "", 0, false, ""},
+		{"exit 0 is no refusal", said(0, "sudo: a password is required\n"), rootTry, "", 0, false, ""},
+		{"the script ran: its output is its own", rootAttempt{code: 1, ran: true, pre: "sudo: a password is required\n", sudo: "sudo: a password is required\n"}, rootTry, "", 0, false, ""},
 		{"the script ran: its exit status is its own", rootAttempt{code: rootExitRejected, ran: true, token: "rejected"}, rootWithPassword, "", 0, false, ""},
+
+		// ssh's own failure (255) is never sudo's answer, whatever was printed until then: not
+		// what ssh and its proxy said, and not a line of sudo's from before the connection broke
+		{"ssh: no connection", rootAttempt{code: 255, pre: "ssh: connect to host dev-1: Connection refused\n"}, rootTry, "", 0, false, ""},
+		{"ssh: the proxy's login has expired", rootAttempt{code: 255, pre: "Your tnctl login has expired. Run: tnctl login\n"}, rootTry, "", 0, false, ""},
+		{"ssh: the connection broke after sudo asked", said(255, "sudo: a password is required\n"), rootTry, "", 0, false, ""},
+		{"ssh: the connection broke after sudo refused", said(255, "sudo: account validation failure, is your account locked?\n"), rootWithPassword, "", 0, false, ""},
+		{"ssh: the connection broke after the wrapper gave up", rootAttempt{code: 255, token: "rejected", gave: true, sudo: wrong}, rootWithPassword, "", 0, false, ""},
+		// What is not sudo's own line is never read, whatever the exit status: sudo's sentences
+		// in the output of ssh, its proxy or the login shell say nothing about sudo. (Each of
+		// these was read as sudo's before: a locked login, forbidden sudoers, "sudo asks".)
+		{"not sudo's: an expired login in the proxy", rootAttempt{code: 1, pre: "Your tnctl login has expired. Run: tnctl login\n"}, rootTry, "", 0, false, ""},
+		{"not sudo's: `is not allowed to execute` in a shell message", rootAttempt{code: 126, pre: "rbash: tn is not allowed to execute sh here\n"}, rootTry, "", 0, false, ""},
+		{"not sudo's: `a password is required` in a banner", rootAttempt{code: 1, pre: "NOTICE: a password is required for console access\n"}, rootTry, "", 0, false, ""},
+		{"not sudo's: sudo's very sentence before the wrapper reached sudo", rootAttempt{code: 1, pre: "sudo: a password is required\n"}, rootTry, "", 0, false, ""},
+		{"a line in sudo's part that only contains the sentence does not ask", said(1, "pam_example: a password is required\n"), rootTry, rootRefused, sudoOther, false, "did not run the command: pam_example: a password is required"},
 
 		{"no sudo", rootAttempt{code: rootExitNoSudo, token: "no-sudo"}, rootTry, rootNoSudo, 0, false, "sudo is not installed"},
 		{"no printf", rootAttempt{code: rootExitNoSudo, token: "no-printf"}, rootWithPassword, rootNoPrintf, 0, false, "built-in printf"},
 		{"no password", rootAttempt{code: rootExitNoPassword, token: "no-password"}, rootWithPassword, rootNoPassword, 0, false, "the platform has none"},
-		{"PAM's helper said no", rootAttempt{code: rootExitRejected, token: "rejected"}, rootWithPassword, rootRejected, 0, false, "did not accept the platform's password"},
-		{"sudo said no", rootAttempt{code: rootExitRejected, token: "rejected", pre: wrong}, rootWithPassword, rootRejected, 0, false, "did not accept the platform's password"},
-		{"the helper said yes, sudo no", rootAttempt{code: rootExitLocked, token: "locked", pre: wrong}, rootWithPassword, rootLocked, 0, false, "may be locked"},
-		{"not in the sudoers, no helper", rootAttempt{code: rootExitRejected, token: "rejected", pre: "Sorry, user tn may not run sudo on dev-1.\n"}, rootWithPassword, rootRefused, sudoNotInSudoers, false, "may not use sudo on dev-1"},
-		{"not in the sudoers, the helper said yes", rootAttempt{code: rootExitLocked, token: "locked", pre: "Sorry, user tn may not run sudo on dev-1.\n"}, rootWithPassword, rootRefused, sudoNotInSudoers, false, "may not use sudo on dev-1"},
-		{"an expired login, no helper", rootAttempt{code: rootExitRejected, token: "rejected", pre: "sudo: account validation failure, is your account locked?\n"}, rootWithPassword, rootLocked, 0, false, "may be locked"},
+		{"PAM's helper said no", rootAttempt{code: rootExitRejected, token: "rejected"}, rootWithPassword, rootRejected, 0, false, "(the password on the device is another one)"},
+		{"sudo said no, and no helper had said yes: wrong or locked", gave(rootRejected, wrong), rootWithPassword, rootRejected, 0, false, "the password on the device is another one, or the login is locked"},
+		{"the helper said yes, sudo no", gave(rootLocked, wrong), rootWithPassword, rootLocked, 0, false, "may be locked"},
+		{"not in the sudoers, no helper", gave(rootRejected, "Sorry, user tn may not run sudo on dev-1.\n"), rootWithPassword, rootRefused, sudoNotInSudoers, false, "may not use sudo on dev-1"},
+		{"not in the sudoers, the helper said yes", gave(rootLocked, "Sorry, user tn may not run sudo on dev-1.\n"), rootWithPassword, rootRefused, sudoNotInSudoers, false, "may not use sudo on dev-1"},
+		{"an expired login, no helper", gave(rootRejected, "sudo: account validation failure, is your account locked?\n"), rootWithPassword, rootLocked, 0, false, "may be locked"},
+		// targetpw, rootpw: sudo's prompt named another user than the login
+		{"sudo asks for root's password, the helper said yes", rootAttempt{code: rootExitLocked, token: "locked", sudo: wrong, gave: true, other: "root"}, rootWithPassword, rootRefused, sudoOtherPassword, false, "asks for the password of root, not for the device login's"},
+		{"sudo asks for root's password, no helper", rootAttempt{code: rootExitRejected, token: "rejected", sudo: wrong, gave: true, other: "root"}, rootWithPassword, rootRefused, sudoOtherPassword, false, "asks for the password of root, not for the device login's"},
 		{"no ticket", rootAttempt{code: rootExitNoTicket, token: "no-ticket"}, rootWithPassword, rootNoTicket, 0, false, "asks for it again"},
-		{"sudoers do not allow sh", rootAttempt{code: 1, pre: "Sorry, user tn is not allowed to execute '/usr/bin/sh -c ...' as root on dev-1.\n"}, rootWithPassword, rootRefused, sudoNotAllowed, false, "do not let the device login user run sh as root"},
-		{"-v was content, the command still needs a password", rootAttempt{code: 1, pre: "sudo: a password is required\n"}, rootWithPassword, rootRefused, sudoAsks, false, "still asks for a password for the command"},
+		{"sudoers do not allow sh", said(1, "Sorry, user tn is not allowed to execute '/usr/bin/sh -c ...' as root on dev-1.\n"), rootWithPassword, rootRefused, sudoNotAllowed, false, "do not let the device login user run sh as root"},
+		{"-v was content, the command still needs a password", said(1, "sudo: a password is required\n"), rootWithPassword, rootRefused, sudoAsks, false, "still asks for a password for the command"},
 		// a marker with another exit status, or one that is not the wrapper's, is no reason
 		{"marker and status disagree", rootAttempt{code: 1, token: "rejected"}, rootWithPassword, "", 0, false, ""},
 		{"an unknown marker", rootAttempt{code: rootExitRejected, token: "something"}, rootWithPassword, "", 0, false, ""},
@@ -186,26 +232,52 @@ func TestRootVerdict(t *testing.T) {
 
 func TestRootStderr(t *testing.T) {
 	run := rootMark + "run\n"
+	ask, auth, sudo := rootMark+"ask\n", rootMark+"auth\n", rootMark+"sudo\n"
+	asksFor := func(login, whose string) string { return "\n" + rootMark + "for " + login + " " + whose + "\n" }
 	for _, c := range []struct {
-		in, out, pre, token string
-		ran                 bool
+		in, out, pre, sudo, token string
+		ran, gave                 bool
+		other                     string
 	}{
-		{"", "", "", "", false},
+		{in: ""},
 		// before the script starts everything is held back, and the markers are taken out
-		{"sudo: a password is required\n", "", "sudo: a password is required\n", "", false},
-		{rootMark + "rejected\n", "", "", "rejected", false},
-		{"noise\n" + rootMark + "no-password\nmore\n", "", "noise\nmore\n", "no-password", false},
-		{"no line end", "", "no line end", "", false},
-		{"mid line " + rootMark + "rejected\n", "", "mid line " + rootMark + "rejected\n", "", false},
+		{in: "sudo: a password is required\n", pre: "sudo: a password is required\n"},
+		{in: rootMark + "rejected\n", token: "rejected"},
+		{in: "noise\n" + rootMark + "no-password\nmore\n", pre: "noise\nmore\n", token: "no-password"},
+		{in: "no line end", pre: "no line end"},
+		{in: "mid line " + rootMark + "rejected\n", pre: "mid line " + rootMark + "rejected\n"},
+		// Only what comes after the wrapper's "sudo" or "ask" marker is sudo's own. What ssh, its
+		// proxy and the login shell printed before is held back all the same, but is not sudo's.
+		{in: "Your tnctl login has expired. Run: tnctl login\n", pre: "Your tnctl login has expired. Run: tnctl login\n"},
+		{in: "motd: a password is required\n" + sudo + "sudo: sorry, you must have a tty to run sudo\n",
+			pre: "motd: a password is required\nsudo: sorry, you must have a tty to run sudo\n", sudo: "sudo: sorry, you must have a tty to run sudo\n"},
+		{in: "rc noise\n" + sudo + "sudo: a password is required\n", pre: "rc noise\nsudo: a password is required\n", sudo: "sudo: a password is required\n"},
+		{in: sudo + "sudo: a password is requ", pre: "sudo: a password is requ", sudo: "sudo: a password is requ"},
 		// what `sudo -v` printed is dropped when it accepted, and kept when it did not
-		{"rc noise\n" + rootMark + "ask\n\nsudo: lecture\n" + rootMark + "auth\n" + run + "out\n", "rc noise\nout\n", "", "", true},
-		{"rc noise\n" + rootMark + "ask\nSorry, try again.\n" + rootMark + "rejected\n", "", "rc noise\nSorry, try again.\n", "rejected", false},
-		{rootMark + "auth\n" + "x\n", "", "x\n", "", false},
+		{in: "rc noise\n" + ask + "\nsudo: lecture\n" + auth + sudo + run + "out\n", out: "rc noise\nout\n", ran: true},
+		{in: "rc noise\n" + ask + "Sorry, try again.\n" + rootMark + "rejected\n", pre: "rc noise\nSorry, try again.\n", sudo: "Sorry, try again.\n", token: "rejected", gave: true},
+		{in: auth + "x\n", pre: "x\n"},
+		// after "auth" the lines are not sudo's until the next sudo speaks
+		{in: ask + "Sorry\n" + auth + "between\n" + rootMark + "no-ticket\n", pre: "between\n", token: "no-ticket", gave: true},
+		{in: ask + auth + sudo + "sudo: a password is required\n", pre: "sudo: a password is required\n", sudo: "sudo: a password is required\n", gave: true},
+		// after the wrapper gave up nothing more is sudo's
+		{in: sudo + "sudo: one\n" + rootMark + "no-sudo\nlater\n", pre: "sudo: one\nlater\n", sudo: "sudo: one\n", token: "no-sudo"},
+		// sudo's prompt says whose password it asks for; it is a marker, not a line. The same user
+		// twice is the normal case; another user is targetpw or rootpw.
+		{in: ask + asksFor("tn", "tn") + "Sorry, try again.\n" + asksFor("tn", "tn") + "\n" + rootMark + "rejected\n", pre: "\nSorry, try again.\n\n\n", sudo: "\nSorry, try again.\n\n\n", token: "rejected", gave: true},
+		{in: ask + asksFor("tn", "root") + "Sorry, try again.\n" + rootMark + "locked\n", pre: "\nSorry, try again.\n", sudo: "\nSorry, try again.\n", token: "locked", gave: true, other: "root"},
+		{in: ask + asksFor("tn", "root") + auth + sudo + "sudo: x\n", pre: "sudo: x\n", sudo: "sudo: x\n", gave: true},
+		// a sudo that fills in nothing is not read
+		{in: ask + asksFor("%u", "%p") + rootMark + "rejected\n", pre: "\n", sudo: "\n", token: "rejected", gave: true},
+		// sudo-rs puts its own words around the prompt
+		{in: ask + "[sudo: " + asksFor("tn", "root") + "] Password: \n" + rootMark + "locked\n", pre: "[sudo: \n] Password: \n", sudo: "[sudo: \n] Password: \n", token: "locked", gave: true, other: "root"},
+		// not sudo's prompt: no sudo was running
+		{in: asksFor("tn", "root") + rootMark + "rejected\n", pre: "\n", token: "rejected"},
 		// from the run line on every byte is the script's, markers included, and nothing waits
-		{run, "", "", "", true},
-		{"warn\n" + run + "50%", "warn\n50%", "", "", true},
-		{run + rootMark + "rejected\n" + rootMark + "run\nsudo: a password is required\n", rootMark + "rejected\n" + rootMark + "run\nsudo: a password is required\n", "", "", true},
-		{rootMark + "no-ticket\n" + run + "x", "x", "", "no-ticket", true},
+		{in: run, ran: true},
+		{in: "warn\n" + sudo + "sudo: unable to resolve host dev-1\n" + run + "50%", out: "warn\nsudo: unable to resolve host dev-1\n50%", ran: true},
+		{in: run + rootMark + "rejected\n" + rootMark + "run\nsudo: a password is required\n" + asksFor("tn", "root"), out: rootMark + "rejected\n" + rootMark + "run\nsudo: a password is required\n" + asksFor("tn", "root"), ran: true},
+		{in: rootMark + "no-ticket\n" + run + "x", out: "x", token: "no-ticket", ran: true},
 	} {
 		// whole, and in pieces: a marker may arrive split
 		for _, step := range []int{len(c.in) + 1, 1, 3} {
@@ -215,9 +287,13 @@ func TestRootStderr(t *testing.T) {
 			for i := 0; i < len(c.in); i += step {
 				_, _ = f.Write([]byte(c.in[i:min(i+step, len(c.in))]))
 			}
-			pre := f.finish()
-			if b.String() != c.out || pre != c.pre || f.token != c.token || f.ran != c.ran || runs != map[bool]int{true: 1}[c.ran] {
-				t.Errorf("%q in steps of %d: got out %q pre %q token %q ran %v (%d), want %q %q %q %v", c.in, step, b.String(), pre, f.token, f.ran, runs, c.out, c.pre, c.token, c.ran)
+			a := f.finish()
+			want := rootAttempt{ran: c.ran, token: c.token, pre: c.pre, sudo: c.sudo, gave: c.gave, other: c.other}
+			if c.ran {
+				want.gave = false // of no interest once the script runs
+			}
+			if b.String() != c.out || a != want || runs != map[bool]int{true: 1}[c.ran] {
+				t.Errorf("%q in steps of %d: got out %q and %+v (%d runs), want %q and %+v", c.in, step, b.String(), a, runs, c.out, want)
 			}
 		}
 	}
@@ -233,19 +309,40 @@ func TestRootStderr(t *testing.T) {
 	f = &rootStderr{w: &b}
 	big := strings.Repeat(strings.Repeat("x", 99)+"\n", 2*maxRootPre/100)
 	_, _ = f.Write([]byte(big + "sudo: a password is required\n"))
-	if pre := f.finish(); len(pre) > maxRootPre || !strings.HasSuffix(pre, "sudo: a password is required\n") || b.String()+pre != big+"sudo: a password is required\n" {
-		t.Errorf("held %d bytes, passed %d", len(pre), b.Len())
+	if a := f.finish(); len(a.pre) > maxRootPre || !strings.HasSuffix(a.pre, "sudo: a password is required\n") || b.String()+a.pre != big+"sudo: a password is required\n" || a.sudo != "" {
+		t.Errorf("held %d bytes, passed %d, sudo's %q", len(a.pre), b.Len(), a.sudo)
+	}
+	// nor of what sudo says: its reason is among its last lines
+	b.Reset()
+	f = &rootStderr{w: &b}
+	_, _ = f.Write([]byte(rootMark + "sudo\n" + big + "sudo: a password is required\n"))
+	if a := f.finish(); len(a.sudo) > maxRootPre || !strings.HasSuffix(a.sudo, "sudo: a password is required\n") {
+		t.Errorf("sudo's part is %d bytes", len(a.sudo))
 	}
 }
 
 // ---------- wgExec against a stand-in for ssh and sudo ----------
 
 // standInSSH is ssh for these tests: it records its arguments and runs the remote command line
-// the way sshd does, with the login shell.
+// the way sshd does, with the login shell. Files in the device's directory make it fail the way
+// ssh does:
+//
+//	ssh-fail   "<run> <exit status>" and then what ssh prints: the run with that number ("all":
+//	           every run) prints it and ends with that status, and the device is never reached.
+//	           255 is ssh's own failure: no connection, or a ProxyCommand (wg-proxy) that gives up.
+//	ssh-break  the connection breaks at the end: the command runs, and ssh ends with 255.
+//	ssh-noise  what the login shell prints before any command (a start file, a banner).
 const standInSSH = `#!/bin/sh
 printf '%s\n' "$@" >> "$FAKE_DIR/ssh-argv"
 for a in "$@"; do last=$a; done
 echo "${last##* }" >> "$FAKE_DIR/ssh-runs"
+n=0; while read -r x; do n=$((n+1)); done < "$FAKE_DIR/ssh-runs"
+if [ -e "$FAKE_DIR/ssh-fail" ]; then
+  { read -r run code; msg=$(cat); } < "$FAKE_DIR/ssh-fail"
+  if [ "$run" = all ] || [ "$run" = "$n" ]; then printf '%s\n' "$msg" >&2; exit "$code"; fi
+fi
+[ -e "$FAKE_DIR/ssh-noise" ] && cat "$FAKE_DIR/ssh-noise" >&2
+if [ -e "$FAKE_DIR/ssh-break" ]; then "$FAKE_LOGIN_SHELL" -c "$last"; exit 255; fi
 exec "$FAKE_LOGIN_SHELL" -c "$last"
 `
 
@@ -262,7 +359,11 @@ exec "$FAKE_LOGIN_SHELL" -c "$last"
 //	notsudoer   the login is not in the sudoers (sudo asks for the password before it says so)
 //	restricted  a rule with the password for other commands than sh
 //	single      NOPASSWD rules for other commands than sh: -v needs no password and keeps no ticket
+//	targetpw    it asks for root's password (targetpw, rootpw): the login's is not the answer
+//	silent      it fails without a word
 //
+// When it asks for a password it prints the prompt it was given (-p), with %u and %p filled in,
+// before every read: the wrapper's prompt is the marker that says whose password sudo wants.
 // With a file "loginput" it reads its stdin for the log when it runs a command (log_input), with
 // a file "warn" it warns before it does anything (a device that cannot resolve its own name).
 // Every call that goes to PAM without a password is in "refused-n": sudo 1.9.9 lets pam_faillock
@@ -272,17 +373,26 @@ d=$FAKE_DIR
 printf '%s\n' "$*" >> "$d/sudo-argv"
 [ "${LC_ALL-}" = C ] || printf '%s\n' "$*" >> "$d/sudo-locale"
 mode=$(cat "$d/mode")
-n=0 S=0 v=0
+n=0 S=0 v=0 prompt=
 while [ $# -gt 0 ]; do
   case $1 in
     -n) n=1 ;;
     -S) S=1 ;;
     -v) v=1 ;;
-    -p) shift ;;
+    -p) shift; prompt=$1 ;;
     *) break ;;
   esac
   shift
 done
+[ "$mode" = silent ] && exit 1
+u=$(id -un); whose=$u
+[ "$mode" = targetpw ] && { whose=root; [ "$u" != root ] || u=tn; }
+ask() {
+  pr=$prompt
+  case $pr in *%u*) pr="${pr%%\%u*}$u${pr#*\%u}" ;; esac
+  case $pr in *%p*) pr="${pr%%\%p*}$whose${pr#*\%p}" ;; esac
+  printf '%s' "$pr" >&2
+}
 [ -e "$d/warn" ] && echo "sudo: unable to resolve host dev-1: Name or service not known" >&2
 asks() { echo x >> "$d/refused-n"; echo "sudo: a password is required" >&2; exit 1; }
 if [ "$mode" = requiretty ]; then echo "sudo: sorry, you must have a tty to run sudo" >&2; exit 1; fi
@@ -294,16 +404,19 @@ if [ $v = 1 ]; then
   [ "$mode" = single ] && exit 0
   [ $open = 1 ] && exit 0
   if [ $S = 0 ] || [ $n = 1 ]; then asks; fi
+  ask
   IFS= read -r pw || { echo "sudo: no password was provided" >&2; exit 1; }
   echo x >> "$d/attempts"
-  if [ "$pw" = "$(cat "$d/password")" ] && [ "$mode" != locked ]; then
+  if [ "$pw" = "$(cat "$d/password")" ] && [ "$mode" != locked ] && [ "$mode" != targetpw ]; then
     if [ "$mode" = notsudoer ]; then echo "Sorry, user tn may not run sudo on dev-1." >&2; exit 1; fi
     [ "$mode" = noticket ] || : > "$ticket"
     echo >&2; echo "sudo: what sudo says while it takes the password" >&2
     exit 0
   fi
   echo "Sorry, try again." >&2
+  ask
   while IFS= read -r pw; do echo x >> "$d/attempts"; done
+  echo >&2
   echo "sudo: no password was provided" >&2
   echo "sudo: 1 incorrect password attempt" >&2
   exit 1
@@ -529,6 +642,12 @@ func TestRootModes(t *testing.T) {
 		{"not in the sudoers, a wrong password", "notsudoer", wrong, helper, rootRejected, 0, false, "try password", 1, 0},
 		{"sudoers that do not allow sh", "restricted", right, helper, rootRefused, sudoNotAllowed, false, "try password", 1, 1},
 		{"NOPASSWD for single commands only", "single", right, helper, rootRefused, sudoAsks, false, "try password", 1, 0},
+		// targetpw, rootpw: sudo asks for root's password. Its prompt says so, which is the reason
+		// given; the login's password has then been offered to sudo once. A password that is not
+		// even the login's never gets that far.
+		{"sudo asks for root's password", "targetpw", right, helper, rootRefused, sudoOtherPassword, false, "try password", 1, 1},
+		{"sudo asks for root's password, no helper", "targetpw", right, noHelper, rootRefused, sudoOtherPassword, false, "try password", 0, 1},
+		{"sudo asks for root's password, a wrong password", "targetpw", wrong, helper, rootRejected, 0, false, "try password", 1, 0},
 	}
 	for _, sh := range shells {
 		for _, c := range cases {
@@ -737,6 +856,259 @@ func TestRootRefusalIsFinal(t *testing.T) {
 		}
 		if got := d.modes(); got != want {
 			t.Errorf("%s: ssh runs %q, want %q", mode, got, want)
+		}
+	}
+}
+
+// sshSaid are lines ssh, its ProxyCommand or a login shell can print that have one of sudo's
+// sentences in them. Each was read as sudo's own word before: "has expired" as a locked login,
+// "is not allowed to execute" as sudoers that forbid sh, "a password is required" as sudo asking,
+// upon which the password was sent.
+var sshSaid = []string{
+	"Your tnctl login has expired. Run: tnctl login",
+	"wg-proxy: user tn is not allowed to execute this request",
+	"channel 0: a password is required",
+	"sudo: a password is required",
+	"sudo: account validation failure, is your account locked?",
+}
+
+// ssh ends with 255 and the script has not started: the device was not reached (no connection,
+// the proxy's login has expired). That is shown in ssh's own words, it is never sudo's answer,
+// and it is not final: the session keeps nothing of it and the next call can work. For
+// StreamRoot (exec --root, logs) and for RunRoot (the --wait probes).
+func TestRootSSHFailureIsNotSudos(t *testing.T) {
+	for _, said := range sshSaid {
+		for _, mode := range []string{"passwd", "nopasswd"} {
+			d := newFakeDevice(t, "sh", "sh", mode, "pw-12345")
+			ex := d.shell("pw-12345")
+			d.write("ssh-fail", "all 255\n"+said+"\n")
+
+			unreached := "cannot reach dev-1 over WireGuard: " + said
+			var out, errb bytes.Buffer
+			code, err := ex.StreamRoot(context.Background(), "echo ran", strings.NewReader(manifest), &out, &errb)
+			if err == nil || isRootError(err) || err.Error() != unreached || code != sshConnectFailed || out.Len() != 0 || errb.Len() != 0 {
+				t.Errorf("%s, %q: stream: code %d err %v\nstdout %q\nstderr %q", mode, said, code, err, out.String(), errb.String())
+			}
+			res, err := ex.RunRoot(context.Background(), "echo ran")
+			if err == nil || isRootError(err) || err.Error() != unreached || res.Stdout != "" {
+				t.Errorf("%s, %q: run: %+v %v", mode, said, res, err)
+			}
+			if ex.rootErr != nil || ex.rootAsks {
+				t.Errorf("%s, %q: the session read ssh's failure as sudo's answer: rootErr %v, sudo asks %v", mode, said, ex.rootErr, ex.rootAsks)
+			}
+			// sudo was not asked twice, and no password was sent
+			if got := d.modes(); got != "try try" {
+				t.Errorf("%s, %q: ssh runs %q, want one `try` per call", mode, said, got)
+			}
+
+			// the connection is back: the same session works
+			if err := os.Remove(filepath.Join(d.dir, "ssh-fail")); err != nil {
+				t.Fatal(err)
+			}
+			out.Reset()
+			errb.Reset()
+			code, err = ex.StreamRoot(context.Background(), "cat", strings.NewReader(manifest), &out, &errb)
+			if err != nil || code != 0 || out.String() != manifest || errb.Len() != 0 {
+				t.Errorf("%s, %q: after the failure: code %d err %v\nstdout %q\nstderr %q", mode, said, code, err, out.String(), errb.String())
+			}
+			if res, err := ex.RunRoot(context.Background(), "echo ran"); err != nil || res.Stdout != "ran\n" {
+				t.Errorf("%s, %q: run after the failure: %+v %v", mode, said, res, err)
+			}
+		}
+	}
+}
+
+// ssh said more than one line (ssh -v, a proxy that explains itself): the first is in the error,
+// and all of it is shown as it came.
+func TestRootSSHFailureIsShownWhole(t *testing.T) {
+	d := newFakeDevice(t, "sh", "sh", "passwd", "pw-12345")
+	ex := d.shell("pw-12345")
+	const said = "wg-proxy: the hub closed the session\nYour tnctl login has expired. Run: tnctl login\n"
+	d.write("ssh-fail", "all 255\n"+said)
+	var out, errb bytes.Buffer
+	code, err := ex.StreamRoot(context.Background(), "echo ran", nil, &out, &errb)
+	if err == nil || err.Error() != "cannot reach dev-1 over WireGuard: wg-proxy: the hub closed the session" || code != sshConnectFailed || out.Len() != 0 || errb.String() != said {
+		t.Errorf("code %d err %v\nstdout %q\nstderr %q", code, err, out.String(), errb.String())
+	}
+	if ex.rootErr != nil || ex.rootAsks {
+		t.Errorf("rootErr %v, sudo asks %v", ex.rootErr, ex.rootAsks)
+	}
+}
+
+// The same when ssh fails in the run that carries the password (sudo asked in the run before):
+// nothing is known about the password, so nothing is final, and the next command sends it again.
+func TestRootSSHFailureWithThePasswordIsNotSudos(t *testing.T) {
+	for _, said := range sshSaid {
+		for _, stream := range []bool{true, false} {
+			d := newFakeDevice(t, "sh", "sh", "passwd", "pw-12345")
+			ex := d.shell("pw-12345")
+			d.write("ssh-fail", "2 255\n"+said+"\n")
+			call := func() (int, string, string, error) {
+				if !stream {
+					res, err := ex.RunRoot(context.Background(), "echo ran")
+					return res.Code, res.Stdout, res.Stderr, err
+				}
+				var out, errb bytes.Buffer
+				code, err := ex.StreamRoot(context.Background(), "echo ran", nil, &out, &errb)
+				return code, out.String(), errb.String(), err
+			}
+			code, out, errs, err := call()
+			// (a captured result keeps what ssh said; a stream has it in the error)
+			wantErrs := map[bool]string{true: "", false: said + "\n"}[stream]
+			if err == nil || isRootError(err) || err.Error() != "cannot reach dev-1 over WireGuard: "+said || code != sshConnectFailed || out != "" || errs != wantErrs {
+				t.Errorf("stream %v, %q: code %d err %v\nstdout %q\nstderr %q", stream, said, code, err, out, errs)
+			}
+			if ex.rootErr != nil || !ex.rootAsks {
+				t.Errorf("stream %v, %q: rootErr %v, sudo asks %v", stream, said, ex.rootErr, ex.rootAsks)
+			}
+			if code, out, errs, err = call(); err != nil || code != 0 || out != "ran\n" || errs != "" {
+				t.Errorf("stream %v, %q: the next call: code %d err %v %q %q", stream, said, code, err, out, errs)
+			}
+			if got := d.modes(); got != "try password password" {
+				t.Errorf("stream %v, %q: ssh runs %q", stream, said, got)
+			}
+			if got := d.lines("attempts"); got != 1 {
+				t.Errorf("stream %v, %q: sudo checked %d passwords, want 1 (the run that failed never reached it)", stream, said, got)
+			}
+		}
+	}
+}
+
+// The connection breaks after sudo has said that it needs a password: ssh ends with 255. That
+// answer is not acted on (the password is not sent into a connection that just broke), and
+// nothing is kept; the next call asks again.
+func TestRootBrokenConnectionIsNotSudos(t *testing.T) {
+	d := newFakeDevice(t, "sh", "sh", "passwd", "pw-12345")
+	ex := d.shell("pw-12345")
+	d.write("ssh-break", "")
+	var out, errb bytes.Buffer
+	code, err := ex.StreamRoot(context.Background(), "echo ran", nil, &out, &errb)
+	if err == nil || isRootError(err) || !strings.Contains(err.Error(), "cannot reach dev-1 over WireGuard") || code != sshConnectFailed || out.Len() != 0 || errb.Len() != 0 {
+		t.Errorf("stream: code %d err %v\nstdout %q\nstderr %q", code, err, out.String(), errb.String())
+	}
+	if res, err := ex.RunRoot(context.Background(), "echo ran"); err == nil || isRootError(err) || !strings.Contains(err.Error(), "cannot reach dev-1 over WireGuard") || res.Stdout != "" {
+		t.Errorf("run: %+v %v", res, err)
+	}
+	if ex.rootErr != nil || ex.rootAsks || d.modes() != "try try" || d.lines("attempts") != 0 {
+		t.Errorf("rootErr %v, sudo asks %v, ssh runs %q, %d passwords given to sudo", ex.rootErr, ex.rootAsks, d.modes(), d.lines("attempts"))
+	}
+	if err := os.Remove(filepath.Join(d.dir, "ssh-break")); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := ex.RunRoot(context.Background(), "echo ran"); err != nil || res.Stdout != "ran\n" {
+		t.Errorf("after the break: %+v %v", res, err)
+	}
+}
+
+// Only sudo's own lines are read as sudo's: the lines after the wrapper's markers. One of sudo's
+// sentences anywhere else in stderr (a proxy or a forced command that ends with another status
+// than 255, the start file of the login shell) is passed on as it came and decides nothing: the
+// password is not sent on its word, and the session keeps no failure.
+func TestRootOnlySudosOwnLinesAreRead(t *testing.T) {
+	// the remote side fails with a status of its own before the wrapper runs
+	for _, said := range sshSaid {
+		d := newFakeDevice(t, "sh", "sh", "passwd", "pw-12345")
+		ex := d.shell("pw-12345")
+		d.write("ssh-fail", "all 1\n"+said+"\n")
+		var out, errb bytes.Buffer
+		code, err := ex.StreamRoot(context.Background(), "echo ran", strings.NewReader(manifest), &out, &errb)
+		if err != nil || code != 1 || out.Len() != 0 || errb.String() != said+"\n" {
+			t.Errorf("%q: stream: code %d err %v\nstdout %q\nstderr %q", said, code, err, out.String(), errb.String())
+		}
+		res, err := ex.RunRoot(context.Background(), "echo ran")
+		if err != nil || res.Code != 1 || res.Stdout != "" || res.Stderr != said+"\n" {
+			t.Errorf("%q: run: %+v %v", said, res, err)
+		}
+		if ex.rootErr != nil || ex.rootAsks || d.modes() != "try try" {
+			t.Errorf("%q: rootErr %v, sudo asks %v, ssh runs %q", said, ex.rootErr, ex.rootAsks, d.modes())
+		}
+	}
+	// The login shell prints sudo's sentence before the wrapper runs, and sudo itself fails
+	// without a word: sudo did not ask, so the password stays where it is.
+	for _, said := range sshSaid {
+		d := newFakeDevice(t, "sh", "sh", "silent", "pw-12345")
+		ex := d.shell("pw-12345")
+		d.write("ssh-noise", said+"\n")
+		var out, errb bytes.Buffer
+		code, err := ex.StreamRoot(context.Background(), "echo ran", strings.NewReader(manifest), &out, &errb)
+		if err != nil || code != 1 || out.Len() != 0 || errb.String() != said+"\n" {
+			t.Errorf("%q: stream: code %d err %v\nstdout %q\nstderr %q", said, code, err, out.String(), errb.String())
+		}
+		if ex.rootErr != nil || ex.rootAsks || d.modes() != "try" || d.lines("helper-runs") != 0 {
+			t.Errorf("%q: rootErr %v, sudo asks %v, ssh runs %q", said, ex.rootErr, ex.rootAsks, d.modes())
+		}
+	}
+	// and with a sudo that does answer, its answer is the one that counts, not the noise before it
+	for mode, want := range map[string]sudoWord{"requiretty": sudoNoTTY, "restricted": sudoNotAllowed} {
+		d := newFakeDevice(t, "sh", "sh", mode, "pw-12345")
+		ex := d.shell("pw-12345")
+		d.write("ssh-noise", "Your tnctl login has expired. Run: tnctl login\nsudo: account validation failure, is your account locked?\n")
+		_, err := ex.RunRoot(context.Background(), "echo ran")
+		var re *rootError
+		if !errors.As(err, &re) || re.reason != rootRefused || re.said != want {
+			t.Errorf("%s: %v", mode, err)
+		}
+	}
+	// a device whose login shell is noisy still works, and the noise is shown once
+	d := newFakeDevice(t, "sh", "sh", "passwd", "pw-12345")
+	ex := d.shell("pw-12345")
+	d.write("ssh-noise", "sudo: a password is required\n")
+	res, err := ex.RunRoot(context.Background(), "echo ran")
+	if err != nil || res.Stdout != "ran\n" || res.Stderr != "sudo: a password is required\n" || d.modes() != "try password" {
+		t.Errorf("a noisy login shell: %+v %v, ssh runs %q", res, err, d.modes())
+	}
+}
+
+// sudo refuses the password and PAM's helper had not said that it is the login's: that is a
+// wrong password or a locked login, and the message says both. Only when the helper itself
+// refused it is "the password on the device is another one" known.
+func TestRootRejectedBySudoMayBeALockedLogin(t *testing.T) {
+	const both, wrongOnly = "the password on the device is another one, or the login is locked after failed attempts", "(the password on the device is another one)"
+	for _, c := range []struct {
+		name, mode, platform string
+		helper               bool
+		reason               rootReason
+		frag, not            string
+	}{
+		{"a wrong password, the helper says so", "passwd", "an-old-one", true, rootRejected, wrongOnly, "locked"},
+		{"a wrong password, no helper", "passwd", "an-old-one", false, rootRejected, both, wrongOnly},
+		{"a locked login, no helper", "locked", "the-real-one", false, rootRejected, both, wrongOnly},
+		{"a locked login, the helper says the password is right", "locked", "the-real-one", true, rootLocked, "although the platform's password for it is right", "another one"},
+	} {
+		d := newFakeDevice(t, "sh", "sh", c.mode, "the-real-one")
+		if !c.helper {
+			d.noHelper()
+		}
+		_, err := d.shell(c.platform).RunRoot(context.Background(), "echo never")
+		var re *rootError
+		if !errors.As(err, &re) || re.reason != c.reason || !strings.Contains(err.Error(), c.frag) || strings.Contains(err.Error(), c.not) {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
+}
+
+// targetpw, rootpw: sudo asks for root's password. tnctl says that, not "locked" (which would
+// send people waiting for a lock to end), and the session does not offer the password again.
+func TestRootSudoAsksForAnotherPassword(t *testing.T) {
+	for _, helper := range []bool{true, false} {
+		d := newFakeDevice(t, "sh", "sh", "targetpw", "pw-12345")
+		if !helper {
+			d.noHelper()
+		}
+		ex := d.shell("pw-12345")
+		for i := 0; i < 3; i++ {
+			res, err := ex.RunRoot(context.Background(), "echo never")
+			var re *rootError
+			if !errors.As(err, &re) || re.reason != rootRefused || re.said != sudoOtherPassword || re.detail != "root" || res.Stdout != "" ||
+				!strings.Contains(err.Error(), "sudo on dev-1 asks for the password of root, not for the device login's (targetpw, rootpw or runaspw in its sudoers)") {
+				t.Errorf("helper %v, call %d: %+v %v", helper, i, res, err)
+			}
+		}
+		if got := d.lines("attempts"); got != 1 {
+			t.Errorf("helper %v: sudo was given the login's password %d times, want once", helper, got)
+		}
+		if got := d.modes(); got != "try password" {
+			t.Errorf("helper %v: ssh runs %q", helper, got)
 		}
 	}
 }
@@ -1072,7 +1444,7 @@ func TestExecRootRefused(t *testing.T) {
 	p := execPlatform(t)
 	for reason, frag := range map[rootReason]string{
 		rootNoPassword: "sudo on vision-station-01 asks for a password, and the platform has none",
-		rootRejected:   "did not accept the platform's password",
+		rootRejected:   "did not accept the platform's password for the device login (the password on the device is another one)",
 		rootNoTicket:   "asks for it again",
 		rootLocked:     "although the platform's password for it is right",
 		rootRefused:    "sudo on vision-station-01 did not run the command: ",
@@ -1083,6 +1455,24 @@ func TestExecRootRefused(t *testing.T) {
 		if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "cannot run the command on vision-station-01: ") || !strings.Contains(err.Error(), frag) || out != "" {
 			t.Errorf("%s: exit %d: %v", reason, exitCodeOf(err), err)
 		}
+	}
+}
+
+// ssh did not reach the device (StreamRoot's "cannot reach" error): exec --root and logs say so
+// in ssh's words and exit 1. It is not reported as a refusal of sudo's.
+func TestExecRootAndLogsUnreached(t *testing.T) {
+	unreached := errors.New("cannot reach vision-station-01 over WireGuard: Your tnctl login has expired. Run: tnctl login")
+	ex := &fakeExec{rootErr: unreached}
+	e, _ := testEnv(t, execPlatform(t), ex)
+	out, _, err := runCLI(t, e, "exec", "--root", "vision-station-01", "--", "id")
+	if exitCodeOf(err) != codeError || err.Error() != "cannot run the command on vision-station-01: "+unreached.Error() || out != "" || strings.Contains(err.Error(), "sudo") {
+		t.Errorf("exec --root: exit %d: %v", exitCodeOf(err), err)
+	}
+	ex = &fakeExec{rootErr: unreached}
+	e, _ = testEnv(t, logsPlatform(t), ex)
+	_, _, err = runCLI(t, e, "logs", "vision-station-01", "Deployment/default/whoami")
+	if exitCodeOf(err) != codeError || err.Error() != "cannot read the logs on vision-station-01: "+unreached.Error() || strings.Contains(err.Error(), "sudo") {
+		t.Errorf("logs: exit %d: %v", exitCodeOf(err), err)
 	}
 }
 

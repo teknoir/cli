@@ -26,10 +26,23 @@ import (
 //
 // The same wrapper serves both modes. Whether the script started is never guessed from its
 // output or exit status: the root shell says so itself with a marker line on stderr before it
-// runs the script (rootStub). Before that line everything on stderr is the wrapper's and sudo's,
-// after it everything is the script's. The payload on stdin is not sent before that line either
+// runs the script (rootStub). Before that line everything on stderr is held back, after it
+// everything is the script's. The payload on stdin is not sent before that line either
 // (feedStdin), so no sudo but the one that runs the script can read it, and a command that sudo
 // refused has taken nothing of it.
+//
+// What is held back is not all sudo's: ssh and its ProxyCommand write there too (a refused
+// connection, "Your tnctl login has expired"), and so does the login shell. So the wrapper also
+// says where sudo speaks: a marker line before each sudo whose words matter ("ask" before
+// `sudo -v`, "sudo" before the sudo of the script). sudo's reason is read from the lines after
+// those markers and from nowhere else (rootStderr.sudo, sudoSaid), and never when ssh itself
+// failed (exit status 255 without the script having started: rootVerdict).
+//
+// What step 1 costs on the device, measured with test/sudo-root: nothing, except with sudo 1.9.9
+// (Ubuntu 22.04), which takes a `sudo -n` that needs a password to PAM as a failed login. Where
+// such a device also has pam_faillock, every tnctl run that sudo does not end up accepting a
+// password from is one failed login, and 3 lock the login (docs/commands/exec.md, "Failed
+// logins"). The session asks that way once, however many root commands it runs.
 
 // Exit statuses of the wrapper when sudo cannot be used. They are only read together with the
 // marker line the wrapper prints on stderr, and only when the script never started, so a command
@@ -50,6 +63,11 @@ const (
 	rootMarkRun  = "run"  // the root shell: the script starts now
 	rootMarkAsk  = "ask"  // the wrapper: what follows is `sudo -v` being given the password
 	rootMarkAuth = "auth" // the wrapper: `sudo -v` accepted it; what it printed is of no interest
+	rootMarkSudo = "sudo" // the wrapper: what follows is the sudo that runs the script
+	// rootMarkFor is not the wrapper's but sudo's: the prompt `sudo -v` is given ("for %u %p").
+	// sudo prints it when it asks, with the login and the user whose password it wants. The two
+	// differ under targetpw, rootpw and runaspw, where the login's password is not the answer.
+	rootMarkFor = "for"
 )
 
 type rootReason string
@@ -106,6 +124,10 @@ var (
 //     printf must be the shell's builtin, or the password would be in a process's arguments.
 //     What sudo says there is kept between the "ask" and "auth" markers: it is the reason when
 //     sudo refuses (not in the sudoers, a locked login), and noise when it accepts.
+//   - The prompt of that sudo is a marker line of its own with %u and %p in it (rootMarkFor):
+//     sudo prints it only when it asks, and it says whose password it asks for. With targetpw or
+//     rootpw that is root's, which tnctl does not have. By then the login's password has been
+//     given to sudo once (the helper found it right for the login); that cannot be known before.
 //   - If sudo refuses a password the helper found right, the login is locked or expired, not
 //     wrong: an exit status of its own.
 //   - Without a terminal sudo keeps the ticket for the parent process. Every sudo here is a child
@@ -121,6 +143,8 @@ var (
 //     puts the login's own LC_ALL back before the script runs.
 //   - No sudo but the last gets the wrapper's stdin: with `Defaults log_input` sudo copies its
 //     stdin for the log and would take the payload that waits there.
+//   - The "sudo" marker before the last sudo starts the lines that are read as sudo's answer to
+//     the command: what ssh, its proxy or the login shell printed before it is not.
 func rootWrapperFor(helpers []string, passwd string) string {
 	mark := func(token string, code int) string {
 		return fmt.Sprintf(`{ echo "%s%s" >&2; exit %d; }`, rootMark, token, code)
@@ -139,7 +163,9 @@ if [ "$3" = ` + rootWithPassword + ` ]; then
   done
   [ "$k" != 7 ] || ` + mark("rejected", rootExitRejected) + `
   echo "` + rootMark + rootMarkAsk + `" >&2
-  printf "%s\n" "$p" | LC_ALL=C sudo -S -p "" -v || {
+  printf "%s\n" "$p" | LC_ALL=C sudo -S -p "
+` + rootMark + rootMarkFor + ` %u %p
+" -v || {
     [ "$k" != 0 ] || ` + mark("locked", rootExitLocked) + `
     ` + mark("rejected", rootExitRejected) + `
   }
@@ -147,6 +173,7 @@ if [ "$3" = ` + rootWithPassword + ` ]; then
   echo "` + rootMark + rootMarkAuth + `" >&2
   LC_ALL=C sudo -n -v </dev/null 2>/dev/null || ` + mark("no-ticket", rootExitNoTicket) + `
 fi
+echo "` + rootMark + rootMarkSudo + `" >&2
 LC_ALL=C sudo -n sh -c "$2" tnctl-root "$1" "$L"
 exit $?`
 }
@@ -181,22 +208,36 @@ func rootFirstLine(password string) (line string, unusable, ok bool) {
 type sudoWord int
 
 const (
-	sudoSilent       sudoWord = iota // nothing of sudo's
-	sudoOther                        // a line of sudo's that tnctl does not know
-	sudoAsks                         // it needs a password
-	sudoAccount                      // the login is locked or expired
-	sudoNotAllowed                   // the sudoers do not let the login run this command
-	sudoNotInSudoers                 // the login is not in the sudoers at all
-	sudoNoTTY                        // requiretty
+	sudoSilent        sudoWord = iota // nothing of sudo's
+	sudoOther                         // a line of sudo's that tnctl does not know
+	sudoAsks                          // it needs a password
+	sudoAccount                       // the login is locked or expired
+	sudoNotAllowed                    // the sudoers do not let the login run this command
+	sudoNotInSudoers                  // the login is not in the sudoers at all
+	sudoNoTTY                         // requiretty
+	sudoOtherPassword                 // it asks for another user's password (targetpw, rootpw, runaspw)
 )
 
-// sudoSentences are sudo's own sentences, as sudo 1.8 to 1.9 and sudo-rs print them in English
-// (the wrapper sets LC_ALL=C).
+// sudoPrefixes start the lines sudo writes itself (sudo-rs 0.2.13 says "sudo: " too; "sudo-rs: "
+// is for a build that names itself). What a PAM module says through sudo has no such prefix.
+var sudoPrefixes = []string{"sudo: ", "sudo-rs: "}
+
+// sudoSorry starts sudo's other lines ("Sorry, try again.", "Sorry, user tn may not run sudo").
+const sudoSorry = "Sorry, "
+
+// sudoAskLines are the lines with which sudo says that it needs a password, after its prefix:
+// sudo 1.8 to 1.9, and sudo-rs. Only a line that is exactly one of them makes tnctl send the
+// password, so the whole line must be sudo's sentence, not a text that has it somewhere.
+var sudoAskLines = []string{"a password is required", "interactive authentication is required"}
+
+// sudoSentences are sudo's other sentences, as sudo 1.8 to 1.9 and sudo-rs print them in English
+// (the wrapper sets LC_ALL=C). Some have no prefix ("tn is not in the sudoers file."), and PAM's
+// own words about an account come through sudo as they are, so a part of the line is enough
+// here: sudoSaid is only given the lines that sudo wrote.
 var sudoSentences = []struct {
 	word  sudoWord
 	frags []string
 }{
-	{sudoAsks, []string{"a password is required", "interactive authentication is required"}},
 	{sudoNoTTY, []string{"you must have a tty to run sudo"}},
 	{sudoNotInSudoers, []string{"is not in the sudoers file", "may not run sudo on"}},
 	{sudoNotAllowed, []string{"is not allowed to execute", "is not allowed to run sudo on", "I'm afraid I can't do that"}},
@@ -206,13 +247,31 @@ var sudoSentences = []struct {
 // maxSudoLine bounds the line of sudo's that is shown when tnctl does not know it.
 const maxSudoLine = 200
 
-// sudoSaid reads the stderr of a wrapper whose script never started. The last sentence it knows
-// wins (sudo may warn about something else first: "unable to resolve host"); line is the first
-// line of sudo's that it does not know, for sudoOther.
-func sudoSaid(stderr string) (word sudoWord, line string) {
-	for _, l := range strings.Split(stderr, "\n") {
+// sudoSaid reads what sudo said about a command it did not run. said must be sudo's own lines
+// and nothing else: the lines after the wrapper's "ask" and "sudo" markers (rootStderr.sudo).
+// The rest of a failed run's stderr is ssh's, its proxy's or the login shell's, and a sentence
+// there ("Your tnctl login has expired") says nothing about sudo. The last sentence it knows
+// wins. line is the last line it does not know, for sudoOther: sudo warns first ("unable to
+// resolve host") and gives its reason last. A line that starts the way sudo's do is taken before
+// one that does not (what a PAM module printed through sudo).
+func sudoSaid(said string) (word sudoWord, line string) {
+	other := ""
+	for _, l := range strings.Split(said, "\n") {
 		l = strings.TrimSpace(l)
-		known := false
+		if l == "" {
+			continue
+		}
+		known, sudos := false, strings.HasPrefix(l, sudoSorry)
+		for _, prefix := range sudoPrefixes {
+			if rest, ok := strings.CutPrefix(l, prefix); ok {
+				sudos = true
+				for _, ask := range sudoAskLines {
+					if rest == ask {
+						word, known = sudoAsks, true
+					}
+				}
+			}
+		}
 		for _, s := range sudoSentences {
 			for _, frag := range s.frags {
 				if strings.Contains(l, frag) {
@@ -220,9 +279,16 @@ func sudoSaid(stderr string) (word sudoWord, line string) {
 				}
 			}
 		}
-		if !known && line == "" && (strings.HasPrefix(l, "sudo: ") || strings.HasPrefix(l, "sudo-rs: ") || strings.HasPrefix(l, "Sorry, ")) {
+		switch {
+		case known:
+		case sudos:
 			line = l
+		default:
+			other = l
 		}
+	}
+	if line == "" {
+		line = other
 	}
 	if word == sudoSilent && line != "" {
 		word = sudoOther
@@ -241,7 +307,12 @@ type rootError struct {
 	device string
 	// unusable: the platform has a password, but it cannot be sent as one line.
 	unusable bool
-	// said is sudo's reason and detail its own line, for rootRefused.
+	// bySudo, for rootRejected: sudo refused the password, and PAM's helper had not said whether
+	// it is the login's (no helper, a login that is not local, a helper that cannot tell). sudo
+	// refuses a locked login in the same words, so this is one of the two.
+	bySudo bool
+	// said is sudo's reason and detail its own line, for rootRefused. With sudoOtherPassword
+	// detail is the user whose password sudo asks for.
 	said   sudoWord
 	detail string
 }
@@ -254,6 +325,9 @@ func (e *rootError) Error() string {
 		}
 		return fmt.Sprintf("sudo on %s asks for a password, and the platform has none for the device login", e.device)
 	case rootRejected:
+		if e.bySudo {
+			return fmt.Sprintf("sudo on %s did not accept the platform's password for the device login: the password on the device is another one, or the login is locked after failed attempts (PAM's helper on the device did not say which); it is not tried again", e.device)
+		}
 		return fmt.Sprintf("sudo on %s did not accept the platform's password for the device login (the password on the device is another one); it is not tried again", e.device)
 	case rootLocked:
 		return fmt.Sprintf("sudo on %s refused the device login although the platform's password for it is right: the login may be locked after failed attempts, or expired", e.device)
@@ -271,6 +345,8 @@ func (e *rootError) Error() string {
 			return fmt.Sprintf("the sudoers on %s do not let the device login user run sh as root, which is how tnctl runs a command there", e.device)
 		case sudoAsks:
 			return fmt.Sprintf("sudo on %s accepted the device login and still asks for a password for the command: its sudoers do not let the device login user run sh as root", e.device)
+		case sudoOtherPassword:
+			return fmt.Sprintf("sudo on %s asks for the password of %s, not for the device login's (targetpw, rootpw or runaspw in its sudoers); the platform only has the login's, so tnctl cannot run commands as root there", e.device, e.detail)
 		}
 		return fmt.Sprintf("sudo on %s did not run the command: %s", e.device, e.detail)
 	}
@@ -288,19 +364,29 @@ type rootAttempt struct {
 	code int
 	// ran: the root shell said that the script started. Then code is the script's.
 	ran bool
-	// token is the wrapper's reason for giving up, pre the stderr from before the script started.
+	// token is the wrapper's reason for giving up, pre the stderr from before the script started:
+	// ssh's, its proxy's, the login shell's and sudo's, as it came. It is shown, never read.
 	token string
 	pre   string
+	// sudo is the part of pre that sudo wrote (after the wrapper's "ask" or "sudo" marker): the
+	// only text sudo's reason is read from.
+	sudo string
+	// gave: the wrapper gave the password to `sudo -v` (PAM's helper had not refused it).
+	gave bool
+	// other: sudo asked for the password of this user, who is not the login (its prompt said so).
+	other string
 }
 
 // rootVerdict reads an attempt whose script did not start. It returns the error when root is not
 // to be had, or asks when sudo only wants a password (mode rootTry). Neither means that the
-// failure is not sudo's: the exit status and stderr are passed on as they are.
+// failure is not sudo's: the exit status and stderr are passed on as they are. That is always so
+// when ssh itself failed (255: no connection, an expired tnctl login in the proxy, a connection
+// that broke): whatever was printed until then, sudo has not answered, and nothing is final.
 func rootVerdict(device string, a rootAttempt, mode string) (re *rootError, asks bool) {
-	if a.ran || a.code == 0 {
+	if a.ran || a.code == 0 || a.code == sshConnectFailed {
 		return nil, false
 	}
-	said, line := sudoSaid(a.pre)
+	said, line := sudoSaid(a.sudo)
 	refused := func() *rootError {
 		return &rootError{reason: rootRefused, device: device, said: said, detail: line}
 	}
@@ -308,6 +394,10 @@ func rootVerdict(device string, a rootAttempt, mode string) (re *rootError, asks
 	if want, ok := rootExitOf[reason]; ok && want == a.code {
 		if reason == rootRejected || reason == rootLocked {
 			// `sudo -v` refused, and said why: not every refusal is the password's.
+			if a.other != "" {
+				said, line = sudoOtherPassword, a.other
+				return refused(), false
+			}
 			switch said {
 			case sudoNoTTY, sudoNotInSudoers, sudoNotAllowed:
 				return refused(), false
@@ -315,7 +405,7 @@ func rootVerdict(device string, a rootAttempt, mode string) (re *rootError, asks
 				reason = rootLocked
 			}
 		}
-		return &rootError{reason: reason, device: device}, false
+		return &rootError{reason: reason, device: device, bySudo: reason == rootRejected && a.gave}, false
 	}
 	switch said {
 	case sudoSilent:
@@ -334,8 +424,9 @@ func rootVerdict(device string, a rootAttempt, mode string) (re *rootError, asks
 }
 
 // rootStderr is the stderr of a wrapper run. Until the root shell's "run" line everything is
-// held back as the wrapper's own (pre), and the wrapper's marker lines are taken out; from that
-// line on every byte is the script's and is passed on untouched, at once.
+// held back (pre), and the marker lines are taken out; from that line on every byte is the
+// script's and is passed on untouched, at once. Of what is held back, the lines after the
+// wrapper's "ask" and "sudo" markers are also kept as sudo's own (sudo).
 type rootStderr struct {
 	w io.Writer
 	// onRun is called once, when the script starts.
@@ -347,6 +438,11 @@ type rootStderr struct {
 	line  []byte
 	askAt int
 	asked bool
+	// sudo: see rootAttempt. inSudo: a sudo of the wrapper is running, its lines are sudo's.
+	sudo   []byte
+	inSudo bool
+	gave   bool
+	other  string
 }
 
 // maxRootPre bounds what is held back; more than this before the script starts is passed on.
@@ -378,13 +474,23 @@ func (f *rootStderr) Write(p []byte) (int, error) {
 				f.onRun()
 			}
 		case token == rootMarkAsk:
-			f.askAt, f.asked = len(f.pre), true
+			f.askAt, f.asked, f.gave = len(f.pre), true, true
+			f.sudo, f.inSudo, f.other = nil, true, ""
 		case token == rootMarkAuth:
 			if f.asked {
 				f.pre, f.asked = f.pre[:f.askAt], false
 			}
+			f.sudo, f.inSudo, f.other = nil, false, ""
+		case token == rootMarkSudo:
+			f.sudo, f.inSudo = nil, true
+		case strings.HasPrefix(token, rootMarkFor+" "):
+			// sudo's prompt: "for <login> <the user whose password it asks for>". A sudo that
+			// does not fill them in is not read.
+			if who := strings.Fields(token); f.inSudo && len(who) == 3 && !strings.Contains(token, "%") && who[1] != who[2] {
+				f.other = who[2]
+			}
 		default:
-			f.token = token
+			f.token, f.inSudo = token, false
 		}
 	}
 	if len(p) > 0 {
@@ -400,6 +506,12 @@ func (f *rootStderr) hold(b []byte) {
 		_ = f.passPre()
 	}
 	f.pre = append(f.pre, b...)
+	if f.inSudo {
+		if len(f.sudo)+len(b) > maxRootPre {
+			f.sudo = nil // sudo's reason is among its last lines
+		}
+		f.sudo = append(f.sudo, b...)
+	}
 }
 
 // passPre writes what was held back to the script's stderr: it was not a refusal.
@@ -413,17 +525,17 @@ func (f *rootStderr) passPre() error {
 	return err
 }
 
-// finish is called at the end of the stream; it returns what was held back when the script
-// never started.
-func (f *rootStderr) finish() string {
+// finish is called at the end of the stream; it returns the attempt as far as stderr tells it.
+// Nothing was held back when the script started.
+func (f *rootStderr) finish() rootAttempt {
 	if f.ran {
-		return ""
+		return rootAttempt{ran: true, token: f.token}
 	}
 	if len(f.line) > 0 {
 		f.hold(f.line)
 		f.line = nil
 	}
-	return string(f.pre)
+	return rootAttempt{token: f.token, pre: string(f.pre), sudo: string(f.sudo), gave: f.gave, other: f.other}
 }
 
 // feedStdin gives cmd its stdin: first (the password line, or nothing) at once, and the payload
@@ -538,6 +650,14 @@ func (w *wgExec) asRoot(attempt func(mode, first string, onRun func()) (rootAtte
 	return a, nil
 }
 
+// unreached is the error of a root command whose ssh ended with 255 before the script started:
+// ssh's own failure (no connection, a ProxyCommand that gave up: "Your tnctl login has expired"),
+// in the words ssh or its proxy said. The device was not reached, so this is not sudo's answer
+// (rootVerdict) and not final: nothing is kept for the session, and the next call may connect.
+func (w *wgExec) unreached(said string) error {
+	return fmt.Errorf("cannot reach %s over WireGuard: %s", w.sess.device, firstNonEmptyLine(said))
+}
+
 // RunRoot runs a sh script as root and captures its output.
 func (w *wgExec) RunRoot(ctx context.Context, script string) (execResult, error) {
 	var res execResult
@@ -550,7 +670,7 @@ func (w *wgExec) RunRoot(ctx context.Context, script string) (execResult, error)
 		filter := &rootStderr{w: &errb, onRun: onRun}
 		cmd.Stdout, cmd.Stderr = &out, filter
 		err := cmd.Run()
-		a := rootAttempt{pre: filter.finish(), ran: filter.ran, token: filter.token}
+		a := filter.finish()
 		res = execResult{Stdout: out.String(), Stderr: errb.String() + a.pre}
 		var ee *exec.ExitError
 		switch {
@@ -561,7 +681,7 @@ func (w *wgExec) RunRoot(ctx context.Context, script string) (execResult, error)
 		case errors.As(err, &ee):
 			a.code = ee.ExitCode()
 			if a.code == sshConnectFailed && !a.ran {
-				return a, fmt.Errorf("cannot reach %s over WireGuard: %s", w.sess.device, firstNonEmptyLine(res.Stderr))
+				return a, w.unreached(a.pre)
 			}
 			return a, nil
 		}
@@ -592,19 +712,26 @@ func (w *wgExec) StreamRoot(ctx context.Context, script string, stdin io.Reader,
 		}
 		err = runForwarding(cmd, started)
 		close(done)
-		a := rootAttempt{pre: filter.finish(), ran: filter.ran, token: filter.token}
+		a := filter.finish()
 		var ee *exec.ExitError
 		switch {
 		case err == nil:
 			return a, nil
 		case errors.As(err, &ee):
 			a.code = ee.ExitCode()
+			if a.code == sshConnectFailed && !a.ran {
+				// The first line ssh said is in the error; when it said more, all of it is shown.
+				if strings.Contains(strings.TrimSpace(a.pre), "\n") {
+					_, _ = io.WriteString(stderr, a.pre)
+				}
+				return a, w.unreached(a.pre)
+			}
 			return a, nil
 		}
 		return a, err
 	})
 	if err == nil && !a.ran && a.pre != "" {
-		// Not sudo's refusal (ssh could not connect, a broken shell): it is shown as it came.
+		// Not sudo's refusal and not ssh's failure (a broken shell): it is shown as it came.
 		_, _ = io.WriteString(stderr, a.pre)
 	}
 	return a.code, err

@@ -39,6 +39,8 @@ type deviceExec interface {
 	// getting root is a *rootError, and it is final: the session does not try again.
 	RunRoot(ctx context.Context, script string) (execResult, error)
 	// StreamRoot is Stream for a sh script that runs as root. stdin is what the script reads.
+	// Unlike Stream it knows whether the script started: an ssh that ends with 255 before that is
+	// an error ("cannot reach ..."), as for RunRoot, and never a *rootError.
 	StreamRoot(ctx context.Context, script string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 	Close()
 }
