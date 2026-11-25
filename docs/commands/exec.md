@@ -91,7 +91,7 @@ with sudo-rs), whose defaults lock the account at 3. One known limit: sudo 1.9.9
 a `sudo -n` that needs a password to PAM, so with `pam_faillock` there the first root command of every
 `tnctl` run counts as one failed login, which an accepted password clears again (and a wrong password on
 such a device without the helper is then 3: the login is locked for `pam_faillock`'s unlock time). Measured with
-`test/sudo-root` in the `cli` repository (Debian 13, Ubuntu 22.04, sudo-rs on Ubuntu 26.04).
+`test/sudo-root` in the `cli` repository (Debian 13, Ubuntu 20.04 and 22.04, sudo-rs on Ubuntu 26.04).
 
 ## Exit codes
 

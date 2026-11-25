@@ -21,7 +21,7 @@ real ones: a throwaway container with sshd and one login user per sudo state. No
 test/sudo-root/run.sh            # build the image, start the container, run the tests, remove it
 test/sudo-root/run.sh -v         # go test flags are passed on
 test/sudo-root/run.sh -run 'TestSudoRig(WrongPassword|NoTicket)'
-test/sudo-root/run.sh --matrix   # the three device systems below, one after the other
+test/sudo-root/run.sh --matrix   # the four device systems below, one after the other
 TN_SUDO_RIG_BASE=ubuntu:22.04 test/sudo-root/run.sh
 TN_SUDO_RIG_BASE=ubuntu:26.04 TN_SUDO_RIG_SUDO=sudo-rs test/sudo-root/run.sh
 ```
@@ -29,6 +29,7 @@ TN_SUDO_RIG_BASE=ubuntu:26.04 TN_SUDO_RIG_SUDO=sudo-rs test/sudo-root/run.sh
 | `TN_SUDO_RIG_BASE` | `TN_SUDO_RIG_SUDO` | Why |
 | --- | --- | --- |
 | `debian:trixie-slim` (default) | `sudo` | The base of Teknoir virtual devices: sudo 1.9.16, dash as `sh`, OpenSSH 10. |
+| `ubuntu:20.04` | `sudo` | sudo 1.8.31, the sudo of L4T (Jetson) images. |
 | `ubuntu:22.04` | `sudo` | sudo 1.9.9, which takes a `sudo -n` that needs a password to PAM: `pam_faillock` counts it. |
 | `ubuntu:26.04` | `sudo-rs` | The sudo of Ubuntu 25.10 and later: other messages, no `logfile`, `log_input`, `requiretty` or `timestamp_type` (those tests are skipped). |
 
@@ -95,7 +96,7 @@ error text or in sudo's logs.
 
 ## Why the wrapper looks the way it does
 
-Found with this rig (sudo 1.9.9 and 1.9.16p2, sudo-rs 0.2.13):
+Found with this rig (sudo 1.8.31, 1.9.9 and 1.9.16p2, sudo-rs 0.2.13):
 
 - **The payload must not share a stdin with `sudo -S`.** `printf 'pw\npayload' | sudo -S cmd` hands the
   password line to `cmd` whenever sudo does not need it (NOPASSWD, a valid ticket), and with a wrong

@@ -2,7 +2,7 @@
 # Real-sudo tests of tnctl's root wrapper (cmd/devexec_root.go): see README.md.
 #
 #   test/sudo-root/run.sh [go test flags]     for example: run.sh -v, run.sh -run 'TestSudoRig/pw'
-#   test/sudo-root/run.sh --matrix [flags]    the three device systems below, one after the other
+#   test/sudo-root/run.sh --matrix [flags]    the four device systems of the README, one after the other
 #
 # Builds a throwaway container with sshd and one login user per sudo state, runs the TestSudoRig
 # tests of ./cmd against it with the real ssh client, and removes the container. Needs docker, go
@@ -19,7 +19,7 @@ repo=$(cd "$here/../.." && pwd)
 if [ "${1:-}" = --matrix ]; then
   shift
   rc=0
-  for pair in debian:trixie-slim=sudo ubuntu:22.04=sudo ubuntu:26.04=sudo-rs; do
+  for pair in debian:trixie-slim=sudo ubuntu:20.04=sudo ubuntu:22.04=sudo ubuntu:26.04=sudo-rs; do
     echo "== ${pair%=*} with ${pair#*=}"
     TN_SUDO_RIG_BASE=${pair%=*} TN_SUDO_RIG_SUDO=${pair#*=} "$0" "$@" || rc=$?
   done
