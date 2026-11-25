@@ -449,10 +449,11 @@ wait times out. A `tnctl` that is interrupted (Ctrl-C, SIGTERM) while waiting cl
 removes the temporary device key before it exits with 1; the change itself stays written.
 
 The checks read the robot's k3s as root, through sudo, like `tnctl exec --root`: on a robot whose sudo asks
-for the login user's password `tnctl` answers with the one the platform holds (see
-[Running as root](exec.md#running-as-root)). If sudo does not let the login in (no password on the platform,
-or one the robot does not accept) the wait ends at once with exit 1 and the reason, before anything is written
-when that is seen in the first look at the robot; a rejected password is never sent again by the polling.
+for the login user's password `tnctl` answers with the one the platform holds, and a robot whose sudo asks
+for none is never sent it (see [Running as root](exec.md#running-as-root)). If sudo does not let the login in
+(no password on the platform, one the robot does not accept, a locked login, sudoers that do not allow it) the
+wait ends at once with exit 1 and sudo's reason, before anything is written when that is seen in the first
+look at the robot; after a refusal the polling does not ask sudo again.
 `--wait=published` does not look at the robot and needs none of this.
 
 For `try` and `untry` the resources to check are those of the new revision, read after it is published;

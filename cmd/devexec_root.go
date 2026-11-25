@@ -8,30 +8,49 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // This file is how tnctl runs a command as root on a device. The login user reaches root through
 // sudo, and on most devices sudo asks for the user's password (the bootstrap gives passwordless
 // sudo only to a login without a password). The platform holds that password next to the login
-// key, so tnctl hands it to sudo itself.
+// key, so tnctl hands it to sudo itself, and only when sudo asks for it:
 //
-// One wrapper runs as the login user and decides per call what sudo needs. tnctl always sends
-// exactly one first line on stdin (the password, or an empty line), and the wrapper always reads
-// exactly that line itself. So the payload on stdin never meets sudo's password reader, whatever
-// state sudo is in: passwordless, a ticket that is still valid, or a password that is wrong.
+//  1. The command first runs with `sudo -n` and nothing else (mode rootTry). A device whose sudo
+//     needs no password for it (a NOPASSWD rule, a login sudo still remembers) answers there, and
+//     the password never leaves tnctl.
+//  2. Only when sudo says that a password is required does the session send it (mode
+//     rootWithPassword): as the first stdin line, which the wrapper reads itself, checks with
+//     PAM's helper and gives to `sudo -v` once. The session remembers that sudo asks, so the next
+//     command goes straight here.
+//
+// The same wrapper serves both modes. Whether the script started is never guessed from its
+// output or exit status: the root shell says so itself with a marker line on stderr before it
+// runs the script (rootStub). Before that line everything on stderr is the wrapper's and sudo's,
+// after it everything is the script's. The payload on stdin is not sent before that line either
+// (feedStdin), so no sudo but the one that runs the script can read it, and a command that sudo
+// refused has taken nothing of it.
 
 // Exit statuses of the wrapper when sudo cannot be used. They are only read together with the
-// marker line the wrapper prints on stderr, so a command that happens to exit with one of them
-// keeps its own exit status.
+// marker line the wrapper prints on stderr, and only when the script never started, so a command
+// that happens to exit with one of them keeps its own exit status.
 const (
 	rootExitNoPassword = 91 // sudo needs a password and none was sent
-	rootExitRejected   = 92 // sudo did not accept the password
+	rootExitRejected   = 92 // the device did not accept the password (PAM's helper, or sudo)
 	rootExitNoTicket   = 93 // sudo accepted the password but asks again for the next command
 	rootExitNoSudo     = 94 // no sudo, or no way to hand it the password safely
+	rootExitLocked     = 95 // the password is right (PAM's helper) and sudo still refused the login
 )
 
-// rootMark starts the stderr line with which the wrapper says why it gave up.
+// rootMark starts the stderr lines with which the wrapper talks to tnctl.
 const rootMark = "@@tnctl-root:"
+
+// Markers that are not a reason to give up.
+const (
+	rootMarkRun  = "run"  // the root shell: the script starts now
+	rootMarkAsk  = "ask"  // the wrapper: what follows is `sudo -v` being given the password
+	rootMarkAuth = "auth" // the wrapper: `sudo -v` accepted it; what it printed is of no interest
+)
 
 type rootReason string
 
@@ -41,7 +60,8 @@ const (
 	rootNoTicket   rootReason = "no-ticket"
 	rootNoSudo     rootReason = "no-sudo"
 	rootNoPrintf   rootReason = "no-printf"
-	// rootRefused is sudo refusing the command itself, read from its own message (see rootProbe).
+	rootLocked     rootReason = "locked"
+	// rootRefused is sudo itself refusing to run the command; rootError.said is its reason.
 	rootRefused rootReason = "refused"
 )
 
@@ -51,59 +71,178 @@ var rootExitOf = map[rootReason]int{
 	rootNoTicket:   rootExitNoTicket,
 	rootNoSudo:     rootExitNoSudo,
 	rootNoPrintf:   rootExitNoSudo,
+	rootLocked:     rootExitLocked,
 }
 
-// rootWrapper is the script the login user's sh runs; $1 is the script to run as root.
+// The two ways the wrapper is run; its third argument.
+const (
+	rootTry          = "try"      // `sudo -n` alone: no password is sent
+	rootWithPassword = "password" // the first stdin line is the password
+)
+
+// Where the wrapper finds PAM's password helper and the local accounts. Variables for the unit
+// tests only, which must not ask the helper of the machine they run on.
+var (
+	rootPAMHelpers = []string{"/usr/sbin/unix_chkpwd", "/sbin/unix_chkpwd"}
+	rootPasswdFile = "/etc/passwd"
+)
+
+// rootWrapper is the script the login user's sh runs. $1 is the script to run as root, $2 the
+// root shell's own script (rootStub), $3 the mode.
 //
-//   - read takes the first line of stdin and nothing more (sh reads a pipe byte by byte).
-//   - `sudo -n true` is the question "does sudo work without a password right now?". It is not
-//     `sudo -n -v`: a login with a passwordless rule and the sudo group needs a password for -v.
-//   - The password goes to `sudo -S -v` on a pipe of its own, one line and then EOF: a wrong
-//     password is one failed attempt, and no line of the payload can be taken as a second guess.
-//     An empty line is never sent: sudo counts it as a failed attempt. printf must be the shell's
-//     builtin, or the password would be in a process's arguments.
+//   - With mode "try" it is `sudo -n` and nothing else. Nothing reads stdin before the script.
+//   - With mode "password", read takes the first line of stdin and nothing more (sh reads a pipe
+//     byte by byte). An empty line is never given to sudo: it counts as a failed attempt.
+//   - Before sudo sees the password, PAM's own helper checks it (`unix_chkpwd <user> nullok`, the
+//     password and a NUL on its stdin: what pam_unix runs for a process that is not root). It
+//     answers 7 for a wrong password of a local account, and then sudo is never asked. This is
+//     not a shortcut around sudo: a wrong password given to `sudo -S -v` is one line in sudo's
+//     log but 2 failed logins for pam_faillock (sudo asks PAM again when its input has ended),
+//     and 3 is where faillock's defaults lock the account. The helper counts nothing and writes
+//     its own line to the auth log. It is trusted only for an account in /etc/passwd; without a
+//     helper or a local account the decision is sudo's.
+//   - The password then goes to `sudo -S -v` on a pipe of its own, one line and then EOF: no line
+//     of the payload can be taken as a second guess. sudo reads it only if it needs a password.
+//     printf must be the shell's builtin, or the password would be in a process's arguments.
+//     What sudo says there is kept between the "ask" and "auth" markers: it is the reason when
+//     sudo refuses (not in the sudoers, a locked login), and noise when it accepts.
+//   - If sudo refuses a password the helper found right, the login is locked or expired, not
+//     wrong: an exit status of its own.
 //   - Without a terminal sudo keeps the ticket for the parent process. Every sudo here is a child
 //     of this one sh, so the ticket of -v is the one the last sudo finds. That is why the last
-//     sudo is not exec'ed and why `exit` follows it: bash and zsh exec the last command of a -c
-//     script, which makes the ticket unreachable ("sudo: a password is required").
-//   - Every sudo but the last reads /dev/null or the password pipe, never the payload.
-const rootWrapper = `IFS= read -r p || :
-command -v sudo >/dev/null 2>&1 || { echo "` + rootMark + `no-sudo" >&2; exit 94; }
-if ! sudo -n true </dev/null 2>/dev/null; then
-  [ -n "$p" ] || { echo "` + rootMark + `no-password" >&2; exit 91; }
-  [ "$(command -v printf)" = printf ] || { echo "` + rootMark + `no-printf" >&2; exit 94; }
-  printf "%s\n" "$p" | sudo -S -p "" -v 2>/dev/null || { echo "` + rootMark + `rejected" >&2; exit 92; }
-  sudo -n true </dev/null 2>/dev/null || { echo "` + rootMark + `no-ticket" >&2; exit 93; }
+//     sudo is not exec'ed and why `exit` follows it (bash and zsh exec the last command of a -c
+//     script, which makes the ticket unreachable: "sudo: a password is required"), and why
+//     `sudo -v` is not inside a `$(...)`: that is another parent too.
+//   - `sudo -n -v` then asks "is that ticket there for the next command?". It reads /dev/null and
+//     never goes to PAM while the ticket is there. It is not `sudo -n true`: that also asks
+//     whether `true` is allowed, which is not the question. Only when it fails is this a sudo
+//     that keeps no ticket (timestamp_timeout=0).
+//   - Every sudo runs under LC_ALL=C, so that what it says is what sudoSaid knows. The root shell
+//     puts the login's own LC_ALL back before the script runs.
+//   - No sudo but the last gets the wrapper's stdin: with `Defaults log_input` sudo copies its
+//     stdin for the log and would take the payload that waits there.
+func rootWrapperFor(helpers []string, passwd string) string {
+	mark := func(token string, code int) string {
+		return fmt.Sprintf(`{ echo "%s%s" >&2; exit %d; }`, rootMark, token, code)
+	}
+	return `L=${LC_ALL-}
+command -v sudo >/dev/null 2>&1 || ` + mark("no-sudo", rootExitNoSudo) + `
+if [ "$3" = ` + rootWithPassword + ` ]; then
+  IFS= read -r p || :
+  [ -n "$p" ] || ` + mark("no-password", rootExitNoPassword) + `
+  [ "$(command -v printf)" = printf ] || ` + mark("no-printf", rootExitNoSudo) + `
+  u=$(id -un); l=; k=
+  while IFS=: read -r n x; do [ "$n" != "$u" ] || l=1; done <` + passwd + `
+  for c in ` + strings.Join(helpers, " ") + `; do
+    [ -n "$l" ] && [ -x "$c" ] || continue
+    printf "%s\0" "$p" | "$c" "$u" nullok >/dev/null 2>&1; k=$?; break
+  done
+  [ "$k" != 7 ] || ` + mark("rejected", rootExitRejected) + `
+  echo "` + rootMark + rootMarkAsk + `" >&2
+  printf "%s\n" "$p" | LC_ALL=C sudo -S -p "" -v || {
+    [ "$k" != 0 ] || ` + mark("locked", rootExitLocked) + `
+    ` + mark("rejected", rootExitRejected) + `
+  }
+  unset p
+  echo "` + rootMark + rootMarkAuth + `" >&2
+  LC_ALL=C sudo -n -v </dev/null 2>/dev/null || ` + mark("no-ticket", rootExitNoTicket) + `
 fi
-unset p
-sudo -n sh -c "$1"
+LC_ALL=C sudo -n sh -c "$2" tnctl-root "$1" "$L"
 exit $?`
-
-// rootCommand is the remote command line that runs script as root. It holds no secret: the
-// password travels on stdin only.
-func rootCommand(script string) string {
-	return "sh -c " + shq(rootWrapper) + " tnctl-root " + shq(script)
 }
 
-// rootFirstLine is the line tnctl sends before the payload: the password, or an empty line when
-// there is none. A password with a line break or a NUL byte cannot travel as one line; it is not
-// sent (unusable), and sudo then gets no password at all.
-func rootFirstLine(password string) (line string, unusable bool) {
+var rootWrapper = rootWrapperFor(rootPAMHelpers, rootPasswdFile)
+
+// rootStub is what root's sh runs: $1 is the script, $2 the LC_ALL of the login. Its first line
+// tells tnctl that sudo let the command through. The exec here is root's own shell becoming the
+// script's shell; it is not the sudo of the wrapper, whose parent must stay.
+const rootStub = `echo "` + rootMark + rootMarkRun + `" >&2; [ "${LC_ALL-}" != C ] || { LC_ALL=$2; [ -n "$2" ] || unset LC_ALL; }; exec sh -c "$1"`
+
+// rootCommand is the remote command line that runs script as root. It holds no secret: the
+// password travels on stdin only, and only in mode rootWithPassword.
+func rootCommand(script, mode string) string {
+	return "sh -c " + shq(rootWrapper) + " tnctl-root " + shq(script) + " " + shq(rootStub) + " " + mode
+}
+
+// rootFirstLine is the line that carries the password to the wrapper. A password with a line
+// break or a NUL byte cannot travel as one line; it is not sent (unusable). ok is false when
+// there is nothing to send.
+func rootFirstLine(password string) (line string, unusable, ok bool) {
 	if strings.ContainsAny(password, "\n\x00") {
-		return "\n", true
+		return "", true, false
 	}
-	return password + "\n", false
+	if password == "" {
+		return "", false, false
+	}
+	return password + "\n", false, true
+}
+
+// sudoWord is what sudo itself said about a command it did not run.
+type sudoWord int
+
+const (
+	sudoSilent       sudoWord = iota // nothing of sudo's
+	sudoOther                        // a line of sudo's that tnctl does not know
+	sudoAsks                         // it needs a password
+	sudoAccount                      // the login is locked or expired
+	sudoNotAllowed                   // the sudoers do not let the login run this command
+	sudoNotInSudoers                 // the login is not in the sudoers at all
+	sudoNoTTY                        // requiretty
+)
+
+// sudoSentences are sudo's own sentences, as sudo 1.8 to 1.9 and sudo-rs print them in English
+// (the wrapper sets LC_ALL=C).
+var sudoSentences = []struct {
+	word  sudoWord
+	frags []string
+}{
+	{sudoAsks, []string{"a password is required", "interactive authentication is required"}},
+	{sudoNoTTY, []string{"you must have a tty to run sudo"}},
+	{sudoNotInSudoers, []string{"is not in the sudoers file", "may not run sudo on"}},
+	{sudoNotAllowed, []string{"is not allowed to execute", "is not allowed to run sudo on", "I'm afraid I can't do that"}},
+	{sudoAccount, []string{"account validation failure", "PAM account management error", "is expired", "has expired"}},
+}
+
+// maxSudoLine bounds the line of sudo's that is shown when tnctl does not know it.
+const maxSudoLine = 200
+
+// sudoSaid reads the stderr of a wrapper whose script never started. The last sentence it knows
+// wins (sudo may warn about something else first: "unable to resolve host"); line is the first
+// line of sudo's that it does not know, for sudoOther.
+func sudoSaid(stderr string) (word sudoWord, line string) {
+	for _, l := range strings.Split(stderr, "\n") {
+		l = strings.TrimSpace(l)
+		known := false
+		for _, s := range sudoSentences {
+			for _, frag := range s.frags {
+				if strings.Contains(l, frag) {
+					word, known = s.word, true
+				}
+			}
+		}
+		if !known && line == "" && (strings.HasPrefix(l, "sudo: ") || strings.HasPrefix(l, "sudo-rs: ") || strings.HasPrefix(l, "Sorry, ")) {
+			line = l
+		}
+	}
+	if word == sudoSilent && line != "" {
+		word = sudoOther
+	}
+	if len(line) > maxSudoLine {
+		line = line[:maxSudoLine] + "..."
+	}
+	return word, line
 }
 
 // rootError says that the login user cannot become root on the device. It is final for the
-// command: nothing is tried again (a rejected password must not be sent a second time, each
-// attempt counts against the login on the device).
+// session: nothing is tried again (a rejected password must not be sent a second time; each
+// attempt may count against the login on the device).
 type rootError struct {
 	reason rootReason
 	device string
 	// unusable: the platform has a password, but it cannot be sent as one line.
 	unusable bool
-	// detail is sudo's own message, for rootRefused.
+	// said is sudo's reason and detail its own line, for rootRefused.
+	said   sudoWord
 	detail string
 }
 
@@ -115,13 +254,25 @@ func (e *rootError) Error() string {
 		}
 		return fmt.Sprintf("sudo on %s asks for a password, and the platform has none for the device login", e.device)
 	case rootRejected:
-		return fmt.Sprintf("sudo on %s did not accept the platform's password for the device login (the password on the device is another one, or the login user may not use sudo); it is not tried again", e.device)
+		return fmt.Sprintf("sudo on %s did not accept the platform's password for the device login (the password on the device is another one); it is not tried again", e.device)
+	case rootLocked:
+		return fmt.Sprintf("sudo on %s refused the device login although the platform's password for it is right: the login may be locked after failed attempts, or expired", e.device)
 	case rootNoTicket:
 		return fmt.Sprintf("sudo on %s accepted the password but asks for it again for the next command (timestamp_timeout=0 in its sudoers?), so tnctl cannot run commands as root there", e.device)
 	case rootNoPrintf:
 		return fmt.Sprintf("the sh on %s has no built-in printf, so the password cannot be handed to sudo without showing it in the process list", e.device)
 	case rootRefused:
-		return fmt.Sprintf("sudo on %s refused to run the command: %s", e.device, e.detail)
+		switch e.said {
+		case sudoNoTTY:
+			return fmt.Sprintf("sudo on %s only works on a terminal (requiretty in its sudoers), and tnctl has none", e.device)
+		case sudoNotInSudoers:
+			return fmt.Sprintf("the device login user may not use sudo on %s (it is not in the sudoers there)", e.device)
+		case sudoNotAllowed:
+			return fmt.Sprintf("the sudoers on %s do not let the device login user run sh as root, which is how tnctl runs a command there", e.device)
+		case sudoAsks:
+			return fmt.Sprintf("sudo on %s accepted the device login and still asks for a password for the command: its sudoers do not let the device login user run sh as root", e.device)
+		}
+		return fmt.Sprintf("sudo on %s did not run the command: %s", e.device, e.detail)
 	}
 	return fmt.Sprintf("sudo is not installed on %s (or not on the login user's PATH)", e.device)
 }
@@ -132,101 +283,160 @@ func isRootError(err error) bool {
 	return errors.As(err, &re)
 }
 
-// rootFailureOf turns a wrapper exit status and its marker into the error; nil when the exit
-// status is the command's own.
-func rootFailureOf(device string, code int, token string, unusable bool) *rootError {
-	reason := rootReason(token)
-	if want, ok := rootExitOf[reason]; !ok || want != code {
-		return nil
-	}
-	return &rootError{reason: reason, device: device, unusable: unusable && reason == rootNoPassword}
-}
-
-// rootMarkFilter passes stderr through and takes the wrapper's marker line out of it. Only the
-// start of a line that may still become the marker is held back, so progress output without a
-// line end is not delayed.
-type rootMarkFilter struct {
-	w     io.Writer
-	state int
-	held  []byte
+// rootAttempt is one run of the wrapper.
+type rootAttempt struct {
+	code int
+	// ran: the root shell said that the script started. Then code is the script's.
+	ran bool
+	// token is the wrapper's reason for giving up, pre the stderr from before the script started.
 	token string
+	pre   string
 }
 
-const (
-	markLineStart = iota
-	markPassing
-	markToken
-)
-
-// maxRootToken bounds a marker's token; a longer line is not the wrapper's.
-const maxRootToken = 32
-
-func (f *rootMarkFilter) Write(p []byte) (int, error) {
-	out := make([]byte, 0, len(p))
-	for _, b := range p {
-		switch f.state {
-		case markLineStart:
-			f.held = append(f.held, b)
-			if string(f.held) != rootMark[:len(f.held)] {
-				out = append(out, f.held...)
-				f.held = f.held[:0]
-				if b != '\n' {
-					f.state = markPassing
-				}
-			} else if len(f.held) == len(rootMark) {
-				f.state = markToken
-			}
-		case markPassing:
-			out = append(out, b)
-			if b == '\n' {
-				f.state = markLineStart
-			}
-		case markToken:
-			switch {
-			case b == '\n':
-				f.token = string(f.held[len(rootMark):])
-				f.held = f.held[:0]
-				f.state = markLineStart
-			case len(f.held) >= len(rootMark)+maxRootToken:
-				out = append(append(out, f.held...), b)
-				f.held = f.held[:0]
-				f.state = markPassing
-			default:
-				f.held = append(f.held, b)
+// rootVerdict reads an attempt whose script did not start. It returns the error when root is not
+// to be had, or asks when sudo only wants a password (mode rootTry). Neither means that the
+// failure is not sudo's: the exit status and stderr are passed on as they are.
+func rootVerdict(device string, a rootAttempt, mode string) (re *rootError, asks bool) {
+	if a.ran || a.code == 0 {
+		return nil, false
+	}
+	said, line := sudoSaid(a.pre)
+	refused := func() *rootError {
+		return &rootError{reason: rootRefused, device: device, said: said, detail: line}
+	}
+	reason := rootReason(a.token)
+	if want, ok := rootExitOf[reason]; ok && want == a.code {
+		if reason == rootRejected || reason == rootLocked {
+			// `sudo -v` refused, and said why: not every refusal is the password's.
+			switch said {
+			case sudoNoTTY, sudoNotInSudoers, sudoNotAllowed:
+				return refused(), false
+			case sudoAccount:
+				reason = rootLocked
 			}
 		}
+		return &rootError{reason: reason, device: device}, false
 	}
-	if len(out) > 0 {
-		if _, err := f.w.Write(out); err != nil {
+	switch said {
+	case sudoSilent:
+		return nil, false
+	case sudoAsks:
+		if mode == rootTry {
+			return nil, true
+		}
+		// `sudo -v` was content and the ticket is there, and sudo still asks for this command:
+		// a login whose rules name single commands, none of them sh.
+		return refused(), false
+	case sudoAccount:
+		return &rootError{reason: rootLocked, device: device}, false
+	}
+	return refused(), false
+}
+
+// rootStderr is the stderr of a wrapper run. Until the root shell's "run" line everything is
+// held back as the wrapper's own (pre), and the wrapper's marker lines are taken out; from that
+// line on every byte is the script's and is passed on untouched, at once.
+type rootStderr struct {
+	w io.Writer
+	// onRun is called once, when the script starts.
+	onRun func()
+
+	ran   bool
+	token string
+	pre   []byte
+	line  []byte
+	askAt int
+	asked bool
+}
+
+// maxRootPre bounds what is held back; more than this before the script starts is passed on.
+const maxRootPre = 64 << 10
+
+func (f *rootStderr) Write(p []byte) (int, error) {
+	n := len(p)
+	for !f.ran && len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			f.line = append(f.line, p...)
+			p = nil
+			break
+		}
+		f.line = append(f.line, p[:i]...)
+		p = p[i+1:]
+		line := string(f.line)
+		f.line = f.line[:0]
+		token, isMark := strings.CutPrefix(line, rootMark)
+		switch {
+		case !isMark:
+			f.hold([]byte(line + "\n"))
+		case token == rootMarkRun:
+			f.ran = true
+			if err := f.passPre(); err != nil {
+				return 0, err
+			}
+			if f.onRun != nil {
+				f.onRun()
+			}
+		case token == rootMarkAsk:
+			f.askAt, f.asked = len(f.pre), true
+		case token == rootMarkAuth:
+			if f.asked {
+				f.pre, f.asked = f.pre[:f.askAt], false
+			}
+		default:
+			f.token = token
+		}
+	}
+	if len(p) > 0 {
+		if _, err := f.w.Write(p); err != nil {
 			return 0, err
 		}
 	}
-	return len(p), nil
+	return n, nil
 }
 
-// flush writes what is still held back at the end of the stream.
-func (f *rootMarkFilter) flush() {
-	if len(f.held) > 0 {
-		_, _ = f.w.Write(f.held)
-		f.held = f.held[:0]
+func (f *rootStderr) hold(b []byte) {
+	if len(f.pre)+len(b) > maxRootPre {
+		_ = f.passPre()
 	}
+	f.pre = append(f.pre, b...)
 }
 
-// cutRootMark returns stderr without the wrapper's marker line, and the marker's token.
-func cutRootMark(stderr string) (clean, token string) {
-	var b bytes.Buffer
-	f := &rootMarkFilter{w: &b}
-	_, _ = f.Write([]byte(stderr))
-	f.flush()
-	return b.String(), f.token
+// passPre writes what was held back to the script's stderr: it was not a refusal.
+func (f *rootStderr) passPre() error {
+	pre := f.pre
+	f.pre, f.asked = nil, false
+	if len(pre) == 0 {
+		return nil
+	}
+	_, err := f.w.Write(pre)
+	return err
 }
 
-// feedStdin gives cmd the first line and then stdin. It returns the function to call once cmd
-// has started. With a stdin of the caller the copy runs outside cmd: Wait must not wait for a
-// terminal that nobody types on after the remote command has ended.
-func feedStdin(cmd *exec.Cmd, first string, stdin io.Reader) (func(), error) {
+// finish is called at the end of the stream; it returns what was held back when the script
+// never started.
+func (f *rootStderr) finish() string {
+	if f.ran {
+		return ""
+	}
+	if len(f.line) > 0 {
+		f.hold(f.line)
+		f.line = nil
+	}
+	return string(f.pre)
+}
+
+// feedStdin gives cmd its stdin: first (the password line, or nothing) at once, and the payload
+// only when gate closes, which is when the script has started. It returns the function to call
+// once cmd has started. done ends the wait for an attempt whose script never started: stdin has
+// then not been read at all and is whole for the next attempt. With a stdin of the caller the
+// copy runs outside cmd: Wait must not wait for a terminal that nobody types on after the remote
+// command has ended.
+func feedStdin(cmd *exec.Cmd, first string, stdin io.Reader, gate, done <-chan struct{}) (func(), error) {
 	if stdin == nil {
-		cmd.Stdin = strings.NewReader(first)
+		if first != "" {
+			cmd.Stdin = strings.NewReader(first)
+		}
 		return nil, nil
 	}
 	pipe, err := cmd.StdinPipe()
@@ -238,6 +448,16 @@ func feedStdin(cmd *exec.Cmd, first string, stdin io.Reader) (func(), error) {
 			defer func() { _ = pipe.Close() }()
 			if _, err := io.WriteString(pipe, first); err != nil {
 				return
+			}
+			select {
+			case <-gate:
+			case <-done:
+				// The script may have started and ended in the same moment.
+				select {
+				case <-gate:
+				default:
+					return
+				}
 			}
 			_, _ = io.Copy(pipe, stdin)
 		}()
@@ -254,11 +474,9 @@ func (w *wgExec) rootFailed() error {
 	return nil
 }
 
-func (w *wgExec) rootFailure(code int, token string, unusable bool) error {
-	re := rootFailureOf(w.sess.device, code, token, unusable)
-	if re == nil {
-		return nil
-	}
+// rootFail keeps the session's first root failure and returns it: every rootError goes through
+// here, so that no later call asks sudo again.
+func (w *wgExec) rootFail(re *rootError) error {
 	w.rootMu.Lock()
 	defer w.rootMu.Unlock()
 	if w.rootErr == nil {
@@ -267,75 +485,143 @@ func (w *wgExec) rootFailure(code int, token string, unusable bool) error {
 	return w.rootErr
 }
 
+func (w *wgExec) sudoAsks() bool {
+	w.rootMu.Lock()
+	defer w.rootMu.Unlock()
+	return w.rootAsks
+}
+
+// asRoot runs one root command through attempt: with `sudo -n` alone first, and with the
+// password only when sudo asked for one, now or earlier in this session. attempt gets the mode,
+// the first stdin line and the function to call when the script starts.
+//
+// Attempts go one at a time until their script has started: a password the device does not
+// accept is then in one command, never in two that happen to run side by side.
+func (w *wgExec) asRoot(attempt func(mode, first string, onRun func()) (rootAttempt, error)) (rootAttempt, error) {
+	w.rootTurn.Lock()
+	release := sync.OnceFunc(w.rootTurn.Unlock)
+	defer release()
+	if err := w.rootFailed(); err != nil {
+		return rootAttempt{}, err
+	}
+	if !w.sudoAsks() {
+		a, err := attempt(rootTry, "", release)
+		if err != nil || a.ran {
+			return a, err
+		}
+		re, asks := rootVerdict(w.sess.device, a, rootTry)
+		if re != nil {
+			return a, w.rootFail(re)
+		}
+		if !asks {
+			return a, nil
+		}
+		w.rootMu.Lock()
+		w.rootAsks = true
+		w.rootMu.Unlock()
+	}
+	first, unusable, ok := rootFirstLine(w.sess.password)
+	if !ok {
+		// Nothing is sent: an empty line would be a failed attempt for sudo.
+		return rootAttempt{code: rootExitNoPassword}, w.rootFail(&rootError{reason: rootNoPassword, device: w.sess.device, unusable: unusable})
+	}
+	a, err := attempt(rootWithPassword, first, release)
+	if err != nil || a.ran {
+		return a, err
+	}
+	if re, _ := rootVerdict(w.sess.device, a, rootWithPassword); re != nil {
+		if code, ok := rootExitOf[re.reason]; ok {
+			a.code = code
+		}
+		return a, w.rootFail(re)
+	}
+	return a, nil
+}
+
 // RunRoot runs a sh script as root and captures its output.
 func (w *wgExec) RunRoot(ctx context.Context, script string) (execResult, error) {
-	if err := w.rootFailed(); err != nil {
-		return execResult{}, err
+	var res execResult
+	a, err := w.asRoot(func(mode, first string, onRun func()) (rootAttempt, error) {
+		cmd := w.command(ctx, rootCommand(script, mode), true)
+		if first != "" {
+			cmd.Stdin = strings.NewReader(first)
+		}
+		var out, errb bytes.Buffer
+		filter := &rootStderr{w: &errb, onRun: onRun}
+		cmd.Stdout, cmd.Stderr = &out, filter
+		err := cmd.Run()
+		a := rootAttempt{pre: filter.finish(), ran: filter.ran, token: filter.token}
+		res = execResult{Stdout: out.String(), Stderr: errb.String() + a.pre}
+		var ee *exec.ExitError
+		switch {
+		case err == nil:
+			return a, nil
+		case ctx.Err() != nil:
+			return a, ctx.Err()
+		case errors.As(err, &ee):
+			a.code = ee.ExitCode()
+			if a.code == sshConnectFailed && !a.ran {
+				return a, fmt.Errorf("cannot reach %s over WireGuard: %s", w.sess.device, firstNonEmptyLine(res.Stderr))
+			}
+			return a, nil
+		}
+		return a, err
+	})
+	if isRootError(err) {
+		// What sudo said is in the error; it is not the script's output.
+		res = execResult{}
 	}
-	first, unusable := rootFirstLine(w.sess.password)
-	cmd := w.command(ctx, rootCommand(script), true)
-	cmd.Stdin = strings.NewReader(first)
-	res, err := w.capture(ctx, cmd)
-	if err != nil {
-		return res, err
-	}
-	var token string
-	res.Stderr, token = cutRootMark(res.Stderr)
-	if rerr := w.rootFailure(res.Code, token, unusable); rerr != nil {
-		return res, rerr
-	}
-	return res, nil
+	res.Code = a.code
+	return res, err
 }
 
 // StreamRoot runs a sh script as root with the given streams; stdin (may be nil) is what the
 // script reads.
 func (w *wgExec) StreamRoot(ctx context.Context, script string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
-	if err := w.rootFailed(); err != nil {
-		return 0, err
-	}
-	first, unusable := rootFirstLine(w.sess.password)
-	cmd := w.command(ctx, rootCommand(script), false)
-	filter := &rootMarkFilter{w: stderr}
-	cmd.Stdout, cmd.Stderr = stdout, filter
-	started, err := feedStdin(cmd, first, stdin)
-	if err != nil {
-		return 0, err
-	}
-	err = runForwarding(cmd, started)
-	filter.flush()
-	var ee *exec.ExitError
-	switch {
-	case err == nil:
-		return 0, nil
-	case errors.As(err, &ee):
-		if rerr := w.rootFailure(ee.ExitCode(), filter.token, unusable); rerr != nil {
-			return ee.ExitCode(), rerr
+	a, err := w.asRoot(func(mode, first string, onRun func()) (rootAttempt, error) {
+		cmd := w.command(ctx, rootCommand(script, mode), false)
+		gate, done := make(chan struct{}), make(chan struct{})
+		filter := &rootStderr{w: stderr, onRun: func() {
+			close(gate)
+			onRun()
+		}}
+		cmd.Stdout, cmd.Stderr = stdout, filter
+		started, err := feedStdin(cmd, first, stdin, gate, done)
+		if err != nil {
+			return rootAttempt{}, err
 		}
-		return ee.ExitCode(), nil
+		err = runForwarding(cmd, started)
+		close(done)
+		a := rootAttempt{pre: filter.finish(), ran: filter.ran, token: filter.token}
+		var ee *exec.ExitError
+		switch {
+		case err == nil:
+			return a, nil
+		case errors.As(err, &ee):
+			a.code = ee.ExitCode()
+			return a, nil
+		}
+		return a, err
+	})
+	if err == nil && !a.ran && a.pre != "" {
+		// Not sudo's refusal (ssh could not connect, a broken shell): it is shown as it came.
+		_, _ = io.WriteString(stderr, a.pre)
 	}
-	return 0, err
+	return a.code, err
 }
 
 // rootProbe runs a probe script as root. The probe scripts end in `true` and print a section
 // marker before each answer, so any other exit status, or no marker at all, means that the
-// script did not run: that is an error, never an empty answer (which would read as "the object
-// is not on the robot"). sudo's own refusal is final.
-func rootProbe(ctx context.Context, ex deviceExec, device, script string) (execResult, error) {
+// script did not do its work: that is an error, never an empty answer (which would read as "the
+// object is not on the robot"). Whether sudo refused is not read from the output here: RunRoot
+// knows it (a *rootError, which is final), and a script that ran owns every line it printed.
+func rootProbe(ctx context.Context, ex deviceExec, script string) (execResult, error) {
 	res, err := ex.RunRoot(ctx, script)
 	if err != nil {
 		return res, err
 	}
-	line := ""
-	for _, l := range strings.Split(res.Stderr, "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			line = l
-			break
-		}
-	}
 	if res.Code != 0 {
-		if strings.HasPrefix(line, "sudo:") || strings.HasPrefix(line, "Sorry,") {
-			return res, &rootError{reason: rootRefused, device: device, detail: line}
-		}
+		line := firstNonEmptyLine(res.Stderr)
 		if line == "" {
 			line = "no error message"
 		}

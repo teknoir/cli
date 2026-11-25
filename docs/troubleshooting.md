@@ -111,21 +111,32 @@ including resolved URLs and the exact `ssh` invocation used.
 
 ??? failure "`sudo: a password is required` from `tnctl exec <device> -- sudo ...`"
     `exec` has no terminal, so sudo cannot ask, and on most devices sudo asks for the login user's password.
-    Use `--root`: `tnctl exec --root <device> -- k3s kubectl get pods -A`. `tnctl` then answers sudo with the
-    password the platform holds for the device login. See [`exec`](commands/exec.md#running-as-root).
+    Use `--root`: `tnctl exec --root <device> -- k3s kubectl get pods -A`. When sudo asks, `tnctl` then answers
+    with the password the platform holds for the device login. See [`exec`](commands/exec.md#running-as-root).
 
 ??? failure "`sudo on <device> did not accept the platform's password for the device login`"
     From `exec --root`, `logs` or `--wait=applied|ready`. The password on the device is not the one the
     platform has: it was changed on the device, or changed on the platform after the device was bootstrapped
-    (a virtual device is not re-bootstrapped when its password changes). `tnctl` sent it once and stopped,
-    because failed attempts count against the login on a device that locks accounts. Set the password on the
+    (a virtual device is not re-bootstrapped when its password changes). `tnctl` sent it in one command and
+    stopped. On a device with PAM's password helper (every Debian, Ubuntu and L4T) sudo never saw it, so it
+    does not count against the login where accounts are locked after failed attempts. Set the password on the
     platform to the device's, or bootstrap the device again; until then `tnctl ssh` and typing the password
     works, and `--wait=published` does not need the robot.
+
+??? failure "`sudo on <device> refused the device login although the platform's password for it is right`"
+    The password is the device's, and sudo still refused it: the login is locked after failed attempts
+    (`pam_faillock`; by default for 10 minutes after 3 failed logins within 15), or it has expired. Wait for
+    the lock to end, or clear it on the device (`faillock --user <login> --reset` as root).
 
 ??? failure "`sudo on <device> asks for a password, and the platform has none for the device login`"
     The login has neither passwordless sudo (the bootstrap sets that up for a login without a password) nor
     a password on the platform. Bootstrap the device again with the current scripts, or give the login a
     password on the platform and on the device.
+
+??? failure "`sudo on <device> only works on a terminal`, `the sudoers on <device> do not let the device login user run sh as root`"
+    The device's sudoers were changed by hand: `requiretty`, or rules that allow the login single commands
+    only. `tnctl` runs every root command as `sh -c` and has no terminal. Use `tnctl ssh`, or give the login
+    the bootstrap's sudo rule back. See [`exec`](commands/exec.md#running-as-root) for every message.
 
 ## Bootstrapping & k3s
 

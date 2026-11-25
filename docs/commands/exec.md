@@ -30,7 +30,7 @@ tnctl --device vision-station-01 exec -- hostname
 
 | Flag | Description |
 | --- | --- |
-| `--root` | Run the command as root (`sh -c` through sudo). See [Running as root](#running-as-root). |
+| `--root` | Run the command as root (`sh -c` through sudo, with the platform's password for the device login when sudo asks for one). See [Running as root](#running-as-root). |
 | `--timeout` | Stop the command after this long (exit code 4). Default: no limit. |
 
 ## Running as root
@@ -41,30 +41,57 @@ a robot and a virtual device all create one. So `tnctl exec <device> -- sudo ...
 password is required` (there is no terminal to ask on); it only works on a device with passwordless sudo.
 
 `--root` works on both. `tnctl` already has the login's password (it comes with the device login, from the
-same audited request) and hands it to sudo itself:
+same audited request) and gives it to sudo itself, but only when sudo asks for it:
 
-- A small wrapper runs as the login user and first asks `sudo -n true`. When that works (passwordless sudo,
-  or sudo still remembers the password) no password is used at all; such a device behaves as before.
-- Otherwise the wrapper gives the password to `sudo -v`, once, and then runs the command with `sudo -n`.
-- The password travels on stdin of the ssh session, as its first line, and nowhere else: not in a command
-  line, not in the environment, not in `--debug` output or a log. The wrapper always takes exactly that line,
-  so what you pipe into `tnctl exec --root` reaches the command whole, and never reaches sudo's password
-  prompt.
+1. The command first runs with `sudo -n`, which never asks, and nothing else. When that works (passwordless
+   sudo, or sudo still remembers the login) that is all: **the password is not sent to the device at all**,
+   and such a device behaves as before.
+2. Only when sudo answers `a password is required` does `tnctl` run the command again, this time with the
+   password. **The password is sent as the first line of the command's stdin, over the encrypted ssh
+   session**, and nowhere else: not in a command line, not in the environment, not in `--debug` output or a
+   log. A small wrapper on the device reads exactly that line. From then on every root command of the same
+   `tnctl` run carries the password; sudo is not asked without it a second time.
+3. The wrapper first lets PAM's own helper (`unix_chkpwd`, what the login itself is checked with) look at the
+   password. A password that is wrong is refused there, and sudo never sees it, so it is not counted as a
+   failed login by a device that locks accounts (`pam_faillock`). Without the helper, or for a login that is
+   not in the device's `/etc/passwd`, sudo decides.
+4. Then the wrapper gives the password to `sudo -v`, once, and runs the command with `sudo -n`.
 
-`--root` runs the command with `sh -c`, as root, with the environment sudo gives it. The same path is used by
-[`logs`](logs.md) and by `--wait=applied|ready` of [`config`](config.md#waiting-for-a-change).
+What you pipe into `tnctl exec --root` reaches the command whole: it is sent only after the command has
+started as root, so it never meets sudo's password prompt, and a sudo that logs input (`log_input`) logs it
+once, for the command.
 
-When root is not to be had, `tnctl` exits 1 and says which case it is; nothing is tried a second time:
+`--root` runs the command with `sh -c`, as root, with the environment sudo gives it. sudo itself runs with
+`LC_ALL=C` so that `tnctl` can read what it says; the command gets the login's own `LC_ALL` back. The same
+path is used by [`logs`](logs.md) and by `--wait=applied|ready` of [`config`](config.md#waiting-for-a-change).
+
+When root is not to be had, `tnctl` exits 1 and says which case it is. Whatever the case, nothing is tried a
+second time by the same `tnctl` run:
 
 | Message | Meaning |
 | --- | --- |
 | `sudo on <device> asks for a password, and the platform has none for the device login` | The login has no passwordless sudo and no password on the platform. Set the password in the portal to the device's, or re-bootstrap the device. |
 | `... the platform's password for the device login has a line break or a NUL byte in it ...` | Such a password cannot be sent as one line; it is not sent at all. Change it. |
-| `sudo on <device> did not accept the platform's password for the device login ...` | The password on the device is another one than the platform's (changed on the device, or the device was bootstrapped with an older one), or the login may not use sudo. It was sent once: every failed attempt counts against the login on a device that locks accounts. |
+| `sudo on <device> did not accept the platform's password for the device login ...` | The password on the device is another one than the platform's (changed on the device, or the device was bootstrapped with an older one). |
+| `sudo on <device> refused the device login although the platform's password for it is right ...` | The password is the device's, and sudo still said no: the login is locked after failed attempts (`pam_faillock`), or expired. Try again when the lock has ended. |
 | `sudo on <device> accepted the password but asks for it again for the next command ...` | sudo keeps no ticket there (`timestamp_timeout=0`). `tnctl` cannot run root commands on that device; use [`ssh`](ssh.md). |
+| `sudo on <device> only works on a terminal (requiretty in its sudoers) ...` | `tnctl exec` has no terminal. Use [`ssh`](ssh.md), or take `requiretty` out of the device's sudoers. The password was not sent. |
+| `the device login user may not use sudo on <device> ...` | The login is not in the device's sudoers. |
+| `the sudoers on <device> do not let the device login user run sh as root ...` | The login may run some commands through sudo, but not `sh`, and `--root` runs every command as `sh -c`. |
+| `sudo on <device> accepted the device login and still asks for a password for the command ...` | The same, for a login whose rules name single commands without a password. Run the allowed command yourself: `tnctl exec <device> -- sudo -n <command>`. |
+| `sudo on <device> did not run the command: <what sudo said>` | Another refusal of sudo's, in its own words. |
 | `sudo is not installed on <device> ...` | No sudo on the login user's PATH. |
 
 `tnctl` never changes the device for this: no sudoers file is written and no password is set.
+
+What a password that the device does not accept costs there: with PAM's helper (every Debian, Ubuntu and
+L4T has it) nothing that counts; the helper writes one line to the auth log. Without it the password goes to
+sudo once: one line in sudo's log, and 2 failed logins for `pam_faillock` where a device has that set up (1
+with sudo-rs), whose defaults lock the account at 3. One known limit: sudo 1.9.9 (Ubuntu 22.04) hands even
+a `sudo -n` that needs a password to PAM, so with `pam_faillock` there the first root command of every
+`tnctl` run counts as one failed login, which an accepted password clears again (and a wrong password on
+such a device without the helper is then 3: the login is locked for `pam_faillock`'s unlock time). Measured with
+`test/sudo-root` in the `cli` repository (Debian 13, Ubuntu 22.04, sudo-rs on Ubuntu 26.04).
 
 ## Exit codes
 

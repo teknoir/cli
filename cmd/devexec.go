@@ -35,8 +35,8 @@ type deviceExec interface {
 	// Stream runs a shell command line with the given streams and returns its exit status.
 	Stream(ctx context.Context, cmdline string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 	// RunRoot is Run for a sh script that runs as root: through sudo, with the platform's password
-	// for the login user when sudo asks for one (see devexec_root.go). The login user not getting
-	// root is a *rootError, and it is final: the session does not try again.
+	// for the login user only when sudo asks for one (see devexec_root.go). The login user not
+	// getting root is a *rootError, and it is final: the session does not try again.
 	RunRoot(ctx context.Context, script string) (execResult, error)
 	// StreamRoot is Stream for a sh script that runs as root. stdin is what the script reads.
 	StreamRoot(ctx context.Context, script string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
@@ -88,9 +88,13 @@ type wgExec struct {
 	sess        *wgSSHSession
 	controlPath string
 
-	// rootErr is the first failure to become root. It stays: see rootError.
-	rootMu  sync.Mutex
-	rootErr *rootError
+	// rootErr is the first failure to become root. It stays: see rootError. rootAsks: sudo on
+	// this device asked for a password, so root commands carry it from then on (asRoot).
+	rootMu   sync.Mutex
+	rootErr  *rootError
+	rootAsks bool
+	// rootTurn lets one root command at a time ask sudo, until its script has started.
+	rootTurn sync.Mutex
 }
 
 // newWGExec opens the WireGuard SSH channel to a device. It needs an active WireGuard

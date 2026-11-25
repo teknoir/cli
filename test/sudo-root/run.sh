@@ -2,16 +2,33 @@
 # Real-sudo tests of tnctl's root wrapper (cmd/devexec_root.go): see README.md.
 #
 #   test/sudo-root/run.sh [go test flags]     for example: run.sh -v, run.sh -run 'TestSudoRig/pw'
+#   test/sudo-root/run.sh --matrix [flags]    the three device systems below, one after the other
 #
-# Builds a throwaway Debian container with sshd and one login user per sudo state and login
-# shell, runs the TestSudoRig tests of ./cmd against it with the real ssh client, and removes
-# the container. Needs docker, go and ssh. The normal unit suite (scripts/test) does not need
-# any of this: without the TN_SUDO_RIG_* variables the TestSudoRig tests are skipped.
+# Builds a throwaway container with sshd and one login user per sudo state, runs the TestSudoRig
+# tests of ./cmd against it with the real ssh client, and removes the container. Needs docker, go
+# and ssh. The normal unit suite (scripts/test) does not need any of this: without the
+# TN_SUDO_RIG_* variables the TestSudoRig tests are skipped.
+#
+#   TN_SUDO_RIG_BASE  the device system (default debian:trixie-slim, sudo 1.9.16)
+#   TN_SUDO_RIG_SUDO  the package that provides sudo there (default sudo; sudo-rs with ubuntu:26.04)
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
-image=${TN_SUDO_RIG_IMAGE:-tnctl-sudo-root-test:local}
+
+if [ "${1:-}" = --matrix ]; then
+  shift
+  rc=0
+  for pair in debian:trixie-slim=sudo ubuntu:22.04=sudo ubuntu:26.04=sudo-rs; do
+    echo "== ${pair%=*} with ${pair#*=}"
+    TN_SUDO_RIG_BASE=${pair%=*} TN_SUDO_RIG_SUDO=${pair#*=} "$0" "$@" || rc=$?
+  done
+  exit "$rc"
+fi
+
+base=${TN_SUDO_RIG_BASE:-debian:trixie-slim}
+sudo=${TN_SUDO_RIG_SUDO:-sudo}
+image=${TN_SUDO_RIG_IMAGE:-tnctl-sudo-root-test:$(printf '%s' "$base-$sudo" | tr ':/' '--')}
 name=tnctl-sudo-root-$$
 
 for tool in docker go ssh ssh-keygen; do
@@ -25,7 +42,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker build -q -t "$image" "$here" >/dev/null
+docker build -q --build-arg BASE="$base" --build-arg SUDO="$sudo" -t "$image" "$here" >/dev/null
 
 ssh-keygen -q -t ed25519 -N '' -C tnctl-sudo-rig -f "$work/id"
 # Every character a shell, printf or sudo could trip over, and a random part so that the
@@ -37,7 +54,7 @@ docker run -d --name "$name" -p 127.0.0.1::22 \
 
 port=
 for _ in $(seq 1 100); do
-  port=$(docker port "$name" 22/tcp 2>/dev/null | sed -n 's/.*://p' | head -1)
+  port=$(docker port "$name" 22/tcp 2>/dev/null | sed -n 's/.*://p' | head -1) || port=
   # The host key is taken from the container itself, so ssh checks it strictly.
   if [ -n "$port" ] && key=$(docker exec "$name" cat /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null) &&
     docker exec "$name" sh -c 'kill -0 "$(cat /run/sshd.pid)"' 2>/dev/null; then

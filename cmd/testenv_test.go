@@ -148,7 +148,7 @@ type fakeExec struct {
 	closed bool
 	stream func(line string) int
 	// password is the platform's password for the device login, as the session of a real shell
-	// holds it. It decides the first stdin line of a root call (rootFirstLine), as in wgExec.
+	// holds it: what a root call would send as its first stdin line if sudo asks (rootFirstLine).
 	password string
 	// rootErr, when set, is what every root call answers: the login user does not get root.
 	rootErr error
@@ -199,7 +199,7 @@ func (f *fakeExec) answer(cmdline string, stdout, stderr io.Writer) (int, error)
 
 // root records a root call: what a device would get on stdin is the first line, then the payload.
 func (f *fakeExec) root(script string, stdin io.Reader, stream bool) error {
-	first, _ := rootFirstLine(f.password)
+	first, _, _ := rootFirstLine(f.password)
 	payload := ""
 	if stdin != nil {
 		b, _ := io.ReadAll(stdin)

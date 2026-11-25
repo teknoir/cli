@@ -474,7 +474,7 @@ func (w *waiter) waitGoneDevice(ctx context.Context, g *goneItem) error {
 	}
 	var tr transient
 	for {
-		res, err := rootProbe(ctx, ex, w.device, goneProbeScript(g))
+		res, err := rootProbe(ctx, ex, goneProbeScript(g))
 		if err == nil {
 			tr.ok()
 			r := evalGone(g, res.Stdout)

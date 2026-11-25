@@ -245,7 +245,7 @@ func (w *waiter) prepare(ctx context.Context, ids []string) error {
 		ex, err := w.shell(ctx)
 		if err == nil {
 			var res execResult
-			res, err = rootProbe(ctx, ex, w.device, helmProbeScript(ns, name, ns, false))
+			res, err = rootProbe(ctx, ex, helmProbeScript(ns, name, ns, false))
 			if err == nil {
 				w.baselines[id] = baselineFromSnapshot(parseHelmSnapshot(res.Stdout))
 			}
@@ -641,7 +641,7 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 	needReady := w.level == waitReady
 	now := w.e.clock()
 	if c.helm != nil {
-		res, err := rootProbe(ctx, ex, w.device, helmProbeScript(c.ns, c.name, c.helm.targetNS, needReady))
+		res, err := rootProbe(ctx, ex, helmProbeScript(c.ns, c.name, c.helm.targetNS, needReady))
 		if err != nil {
 			return checkResult{}, err
 		}
@@ -654,7 +654,7 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 			}
 		}
 		if r.state == checkDone && c.added {
-			rr, err := rootProbe(ctx, ex, w.device, releaseProbeScript(c.helm.targetNS, c.name))
+			rr, err := rootProbe(ctx, ex, releaseProbeScript(c.helm.targetNS, c.name))
 			if err != nil {
 				return checkResult{}, err
 			}
@@ -673,7 +673,7 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 		return w.readiness(&c.stab, now, evalPodsReady(wls, snap.pods, c.helm.wantImage)), nil
 	}
 
-	res, err := rootProbe(ctx, ex, w.device, workloadProbeScript(c.kind, c.ns, c.name))
+	res, err := rootProbe(ctx, ex, workloadProbeScript(c.kind, c.ns, c.name))
 	if err != nil {
 		return checkResult{}, err
 	}

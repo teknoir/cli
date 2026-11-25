@@ -163,7 +163,7 @@ func helmLogTarget(ctx context.Context, ex deviceExec, view *api.ConfigTargetVie
 			targetNS = r.Chart.TargetNamespace
 		}
 	}
-	res, err := rootProbe(ctx, ex, view.Target.Device, helmProbeScript(ns, name, targetNS, true))
+	res, err := rootProbe(ctx, ex, helmProbeScript(ns, name, targetNS, true))
 	if err != nil {
 		return logTarget{}, err
 	}
@@ -183,7 +183,7 @@ func helmLogTarget(ctx context.Context, ex deviceExec, view *api.ConfigTargetVie
 }
 
 func podLogTarget(ctx context.Context, ex deviceExec, device, name string) (logTarget, error) {
-	res, err := rootProbe(ctx, ex, device, kubectlOnDevice+" get pods -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name --no-headers 2>&1; true")
+	res, err := rootProbe(ctx, ex, kubectlOnDevice+" get pods -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name --no-headers 2>&1; true")
 	if err != nil {
 		return logTarget{}, err
 	}
