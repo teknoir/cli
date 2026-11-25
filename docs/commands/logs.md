@@ -33,7 +33,14 @@ exit 2; a disabled device is exit 5 (`-o json` code `device_disabled`). Needs th
 kubectl runs as root through sudo, the way `tnctl exec --root` does: only when sudo on the robot asks for the
 login user's password does `tnctl` send the one the platform holds, as the first stdin line of the encrypted
 ssh session. If root is not to be had the command exits 1 with the reason; see
-[Running as root](exec.md#running-as-root).
+[Running as root](exec.md#running-as-root). An ssh that fails before kubectl starts is `cannot reach <robot>
+over WireGuard: <what ssh said>` (exit 1), never a refusal of sudo's.
+
+Do not repeat a `logs` that sudo refused: on a robot with sudo 1.9.9 (Ubuntu 22.04) that locks accounts
+(`pam_faillock`) every `tnctl` run that sudo does not accept a password from is one failed login, and the
+third locks the login's password (not the robot's connection to the platform). Three `logs` started at the
+same moment do that even with the right password; start them one after the other. See
+[Failed logins and `pam_faillock`](exec.md#failed-logins-and-pam_faillock).
 
 ## See also
 

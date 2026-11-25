@@ -301,6 +301,10 @@ tnctl wg status <device>                             # is the tunnel up, and whe
 
 A bot has `tnctl inspect logs` instead of `tnctl logs`, and nothing instead of `ssh` and `exec`.
 
+When `exec --root`, `logs` or `--wait=applied|ready` says that sudo refused the device login or its
+password, do not run it again, and never start several of them at once on one robot: on a robot that
+locks accounts, each such run can count as a failed login, and the third locks the login's password.
+
 ## The triage script
 
 ```bash

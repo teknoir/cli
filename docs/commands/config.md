@@ -456,6 +456,12 @@ wait ends at once with exit 1 and sudo's reason, before anything is written when
 look at the robot; after a refusal the polling does not ask sudo again.
 `--wait=published` does not look at the robot and needs none of this.
 
+One wait asks sudo without the password once, however long it polls. On a robot with sudo 1.9.9 (Ubuntu
+22.04) that locks accounts (`pam_faillock`) that one question is a failed login, which only a password that
+sudo accepts clears: three waits (or `logs`, or `exec --root`) that sudo refuses lock the login's password,
+and so do three that start at the same moment with the right password. The lock does not touch the robot's
+connection to the platform. See [Failed logins and `pam_faillock`](exec.md#failed-logins-and-pam_faillock).
+
 For `try` and `untry` the resources to check are those of the new revision, read after it is published;
 a resource that is no longer part of the configuration is skipped.
 
