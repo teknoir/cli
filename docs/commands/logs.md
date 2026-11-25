@@ -1,6 +1,6 @@
 # `tnctl logs`
 
-Show the logs of a workload on a robot (`sudo k3s kubectl logs` over the WireGuard tunnel).
+Show the logs of a workload on a robot (`k3s kubectl logs` as root, over the WireGuard tunnel).
 
 ```bash
 tnctl logs <target> <resource|pod> [-c container] [-f] [--tail N] [--since 10m] [--previous] [--all-containers]
@@ -29,6 +29,10 @@ tnctl logs vision-station-01 notebook-77f875b6c-45s8v -c notebook --previous
 
 The exit status is kubectl's (ssh's 255, "cannot reach the robot", is exit 1). A name that is neither a resource nor a pod is exit 3; an ambiguous name is
 exit 2; a disabled device is exit 5 (`-o json` code `device_disabled`). Needs the robot's WireGuard tunnel, like [`exec`](exec.md).
+
+kubectl runs as root through sudo, the way `tnctl exec --root` does: when sudo on the robot asks for the login
+user's password, `tnctl` answers with the one the platform holds, once. If root is not to be had the command
+exits 1 with the reason; see [Running as root](exec.md#running-as-root).
 
 ## See also
 

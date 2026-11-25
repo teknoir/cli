@@ -194,20 +194,22 @@ func TestWaitAppliedUnsetVersionNeedsTheDeviceToDropIt(t *testing.T) {
 	}
 }
 
-// ---------- applied: sudo without a password ----------
+// ---------- applied: the login user does not get root ----------
 
 func TestWaitAppliedSudoWithoutPasswordFailsBeforeTheWrite(t *testing.T) {
 	p := appliedPlatform(t)
-	ex := &fakeExec{run: func(string) (execResult, error) {
-		return execResult{Stdout: "@@tnctl:chart\nsudo: a password is required\n@@tnctl:job\nsudo: a password is required\n"}, nil
-	}}
+	noRoot := &rootError{reason: rootNoPassword, device: "vision-station-01"}
+	ex := &fakeExec{rootErr: noRoot}
 	e, _ := testEnv(t, p, ex)
 	_, _, err := setWait(t, e, "--wait=applied")
-	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "passwordless sudo") {
+	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "cannot check the robot before the change: sudo on vision-station-01 asks for a password") || !strings.Contains(err.Error(), "--wait=published") {
 		t.Errorf("exit %d: %v", exitCodeOf(err), err)
 	}
 	if len(p.seen("PATCH", patchPath)) != 0 {
 		t.Error("nothing may be written")
+	}
+	if n := len(ex.rootList()); n != 1 {
+		t.Errorf("%d root calls, want 1", n)
 	}
 	// the same in a Deployment's probe, after the write (config wait has no prepare)
 	const wid = "Deployment/default/whoami"
@@ -220,13 +222,14 @@ func TestWaitAppliedSudoWithoutPasswordFailsBeforeTheWrite(t *testing.T) {
 	d := &api.ConfigResourceDetail{ID: wid, Resource: deployResource("whoami", "whoami", "traefik/whoami:v1.11.0"),
 		Rendered: map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "whoami", "image": "traefik/whoami:v1.11.0"}}}}}}}
 	p2.on("GET", "/config/vision-station-01/resource", 200, jsonOf(t, d))
-	ex2 := &fakeExec{run: func(string) (execResult, error) {
-		return execResult{Stdout: "@@tnctl:obj\nsudo: a password is required\n"}, nil
-	}}
+	ex2 := &fakeExec{rootErr: noRoot}
 	e2, _ := testEnv(t, p2, ex2)
 	_, _, err = runCLI(t, e2, "config", "wait", "vision-station-01", wid, "--for", "applied")
-	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "passwordless sudo") {
+	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "sudo on vision-station-01 asks for a password") || !strings.Contains(err.Error(), "--wait=published") {
 		t.Errorf("workload: exit %d: %v", exitCodeOf(err), err)
+	}
+	if n := len(ex2.rootList()); n != 1 {
+		t.Errorf("workload: %d root calls, want 1: a refusal is not retried", n)
 	}
 }
 

@@ -109,6 +109,24 @@ including resolved URLs and the exact `ssh` invocation used.
     - Re-run with `--debug` to see the full `ssh` command and any `ncat`/proxy errors.
     - Verify network access to `deadend-<namespace>.<domain>:2222`.
 
+??? failure "`sudo: a password is required` from `tnctl exec <device> -- sudo ...`"
+    `exec` has no terminal, so sudo cannot ask, and on most devices sudo asks for the login user's password.
+    Use `--root`: `tnctl exec --root <device> -- k3s kubectl get pods -A`. `tnctl` then answers sudo with the
+    password the platform holds for the device login. See [`exec`](commands/exec.md#running-as-root).
+
+??? failure "`sudo on <device> did not accept the platform's password for the device login`"
+    From `exec --root`, `logs` or `--wait=applied|ready`. The password on the device is not the one the
+    platform has: it was changed on the device, or changed on the platform after the device was bootstrapped
+    (a virtual device is not re-bootstrapped when its password changes). `tnctl` sent it once and stopped,
+    because failed attempts count against the login on a device that locks accounts. Set the password on the
+    platform to the device's, or bootstrap the device again; until then `tnctl ssh` and typing the password
+    works, and `--wait=published` does not need the robot.
+
+??? failure "`sudo on <device> asks for a password, and the platform has none for the device login`"
+    The login has neither passwordless sudo (the bootstrap sets that up for a login without a password) nor
+    a password on the platform. Bootstrap the device again with the current scripts, or give the login a
+    password on the platform and on the device.
+
 ## Bootstrapping & k3s
 
 ??? failure "k3s never becomes Ready: `Failed to validate connection to cluster ... CA cert validation failed ... x509: certificate signed by unknown authority`"

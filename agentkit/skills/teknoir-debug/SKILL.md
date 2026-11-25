@@ -294,7 +294,7 @@ Person-only tools, with the exact command. They all run over WireGuard and are r
 
 ```bash
 tnctl ssh <device>                                   # a shell on the robot
-tnctl exec <robot> -- sudo k3s kubectl get pods -A   # one command
+tnctl exec --root <robot> -- k3s kubectl get pods -A  # one command, as root (tnctl answers sudo's password prompt)
 tnctl logs <robot> <resource|pod> --tail 100         # live logs over the tunnel
 tnctl wg status <device>                             # is the tunnel up, and where it goes
 ```

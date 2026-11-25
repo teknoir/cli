@@ -413,9 +413,6 @@ func goneProbeScript(g *goneItem) string {
 func evalGone(g *goneItem, out string) checkResult {
 	secs := parseSections(out)
 	have := strings.TrimSpace(secs["obj"])
-	if sudoProblem(have) {
-		return checkResult{checkFatal, sudoMessage(have)}
-	}
 	present := have != "" && !strings.Contains(have, "NotFound") && !strings.Contains(have, "doesn't have a resource type")
 	if present && strings.HasPrefix(strings.ToLower(have), "error") {
 		return pending("cannot read %s on the device: %s", g.kind, firstNonEmptyLine(have))
@@ -435,9 +432,6 @@ func evalGone(g *goneItem, out string) checkResult {
 		return done("%s is gone from the robot", shownID(g.id))
 	}
 	rel := strings.TrimSpace(secs["release"])
-	if sudoProblem(rel) {
-		return checkResult{checkFatal, sudoMessage(rel)}
-	}
 	prefix := "sh.helm.release.v1." + release + "."
 	var found []string
 	for _, line := range strings.Split(rel, "\n") {
@@ -480,7 +474,7 @@ func (w *waiter) waitGoneDevice(ctx context.Context, g *goneItem) error {
 	}
 	var tr transient
 	for {
-		res, err := ex.Run(ctx, remoteShell(goneProbeScript(g)))
+		res, err := rootProbe(ctx, ex, w.device, goneProbeScript(g))
 		if err == nil {
 			tr.ok()
 			r := evalGone(g, res.Stdout)
@@ -490,7 +484,7 @@ func (w *waiter) waitGoneDevice(ctx context.Context, g *goneItem) error {
 				return nil
 			case checkUnhealthy:
 				// The uninstall Job failed: the robot's own log says why.
-				if lr, lerr := ex.Run(ctx, remoteShell(helmDeleteJobLogScript(g.ns, g.release()))); lerr == nil && strings.TrimSpace(lr.Stdout) != "" {
+				if lr, lerr := ex.RunRoot(ctx, helmDeleteJobLogScript(g.ns, g.release())); lerr == nil && strings.TrimSpace(lr.Stdout) != "" {
 					r.msg += "; last log lines:\n" + indent(strings.TrimSpace(lr.Stdout), "    ")
 				}
 				return newErr(codeUnhealthy, "%s: %s", shownID(g.id), r.msg)
@@ -503,7 +497,7 @@ func (w *waiter) waitGoneDevice(ctx context.Context, g *goneItem) error {
 				if errors.Is(ferr, context.DeadlineExceeded) {
 					return w.stillThere(g)
 				}
-				return newErr(codeError, "cannot check the robot: %v", ferr)
+				return newErr(codeError, "cannot check the robot: %v%s", ferr, rootWaitHint(ferr))
 			}
 			w.progress(g.id, "retrying after "+err.Error())
 		}
@@ -517,7 +511,7 @@ func (w *waiter) waitGoneDevice(ctx context.Context, g *goneItem) error {
 }
 
 func (w *waiter) stillThere(g *goneItem) error {
-	return &stillThereError{fmt.Sprintf("still on the robot after %s: the robot's agent did not delete it (%s); delete it on the robot with: tnctl exec %s -- sudo k3s kubectl -n %s delete %s %s",
+	return &stillThereError{fmt.Sprintf("still on the robot after %s: the robot's agent did not delete it (%s); delete it on the robot with: tnctl exec --root %s -- k3s kubectl -n %s delete %s %s",
 		w.limit, orDash(w.lastLine), w.target, g.ns, deleteResource(g.kind), g.name)}
 }
 

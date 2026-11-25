@@ -80,7 +80,7 @@ tnctl config set vision-station-01 notebook replicas=2 log.level=debug --wait=ap
 tnctl config diff vision-station-01            # what differs from git
 tnctl config try vision-station-01 apps/mock-vision feature-x        # another branch of an application
 tnctl config reset vision-station-01 --all      # back to git
-tnctl exec vision-station-01 -- sudo k3s kubectl get pods -A
+tnctl exec --root vision-station-01 -- k3s kubectl get pods -A   # as root; sudo's password comes from the platform
 tnctl logs vision-station-01 HelmChart/default/notebook -f
 tnctl robot add amr-02 --type amr --label site=karlstad   # create a robot and its device
 tnctl inspect logs vision-station-01 default/whoami-7d9f-x2k4p --tail 50   # a pod's log, no session

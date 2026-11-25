@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/teknoir/cli/pkg/api"
@@ -33,6 +34,12 @@ type deviceExec interface {
 	Run(ctx context.Context, cmdline string) (execResult, error)
 	// Stream runs a shell command line with the given streams and returns its exit status.
 	Stream(ctx context.Context, cmdline string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
+	// RunRoot is Run for a sh script that runs as root: through sudo, with the platform's password
+	// for the login user when sudo asks for one (see devexec_root.go). The login user not getting
+	// root is a *rootError, and it is final: the session does not try again.
+	RunRoot(ctx context.Context, script string) (execResult, error)
+	// StreamRoot is Stream for a sh script that runs as root. stdin is what the script reads.
+	StreamRoot(ctx context.Context, script string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 	Close()
 }
 
@@ -63,9 +70,6 @@ func shJoin(words []string) string {
 	return strings.Join(q, " ")
 }
 
-// remoteShell wraps a script so that sh runs it, whatever login shell the device user has.
-func remoteShell(script string) string { return "sh -c " + shq(script) }
-
 // buildSSHExecArgs turns the base ssh arguments (ending in user@device, see buildSSHArgs)
 // into those of a non-interactive command: no tty, never a password prompt and, when
 // controlPath is set, one multiplexed connection shared by all polls of a --wait.
@@ -83,6 +87,10 @@ func buildSSHExecArgs(base []string, controlPath, remote string) []string {
 type wgExec struct {
 	sess        *wgSSHSession
 	controlPath string
+
+	// rootErr is the first failure to become root. It stays: see rootError.
+	rootMu  sync.Mutex
+	rootErr *rootError
 }
 
 // newWGExec opens the WireGuard SSH channel to a device. It needs an active WireGuard
@@ -134,7 +142,11 @@ func (w *wgExec) command(ctx context.Context, cmdline string, multiplex bool) *e
 }
 
 func (w *wgExec) Run(ctx context.Context, cmdline string) (execResult, error) {
-	cmd := w.command(ctx, cmdline, true)
+	return w.capture(ctx, w.command(ctx, cmdline, true))
+}
+
+// capture runs cmd and collects its output and exit status.
+func (w *wgExec) capture(ctx context.Context, cmd *exec.Cmd) (execResult, error) {
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()

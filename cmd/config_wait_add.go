@@ -210,9 +210,6 @@ func releaseProbeScript(targetNS, name string) string {
 // evalReleaseInstalled judges the output of releaseProbeScript: a release secret must exist.
 func evalReleaseInstalled(name, targetNS, out string) checkResult {
 	rel := parseSections(out)["release"]
-	if sudoProblem(rel) {
-		return checkResult{checkFatal, sudoMessage(rel)}
-	}
 	prefix := "sh.helm.release.v1." + name + "."
 	for _, line := range strings.Split(rel, "\n") {
 		line = strings.TrimSpace(line)

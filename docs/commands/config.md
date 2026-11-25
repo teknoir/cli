@@ -309,7 +309,7 @@ config for <device> yet`. `--wait=applied` (a bare `--wait` is the same for `rem
 over WireGuard SSH, as for the other writes, and waits until `k3s kubectl get <kind> <name>` finds nothing;
 for a HelmChart also until no helm release secret (`owner=helm,name=<name>`, in the chart's target namespace)
 is left. The robot has to be reachable before anything is removed. If the item stays after `--timeout` the
-command exits 4 and prints how to delete it by hand: `tnctl exec <target> -- sudo k3s kubectl -n <ns> delete
+command exits 4 and prints how to delete it by hand: `tnctl exec --root <target> -- k3s kubectl -n <ns> delete
 <kind> <name>`.
 
 When a git copy takes over, `--wait=applied` never probes the robot for the object to be gone (the object stays,
@@ -447,6 +447,13 @@ connection. If the robot cannot be reached, the command stops before it writes a
 `--wait=published`. `--timeout` (default 5m) bounds the wait; the change itself is written even if the
 wait times out. A `tnctl` that is interrupted (Ctrl-C, SIGTERM) while waiting closes its connection and
 removes the temporary device key before it exits with 1; the change itself stays written.
+
+The checks read the robot's k3s as root, through sudo, like `tnctl exec --root`: on a robot whose sudo asks
+for the login user's password `tnctl` answers with the one the platform holds (see
+[Running as root](exec.md#running-as-root)). If sudo does not let the login in (no password on the platform,
+or one the robot does not accept) the wait ends at once with exit 1 and the reason, before anything is written
+when that is seen in the first look at the robot; a rejected password is never sent again by the polling.
+`--wait=published` does not look at the robot and needs none of this.
 
 For `try` and `untry` the resources to check are those of the new revision, read after it is published;
 a resource that is no longer part of the configuration is skipped.

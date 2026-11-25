@@ -10,9 +10,10 @@ import (
 
 func newExecCmd(e *cliEnv) *cobra.Command {
 	var timeout time.Duration
+	var asRoot bool
 	c := &cobra.Command{
 		SilenceUsage: true,
-		Use:          "exec <device> -- <command...>",
+		Use:          "exec [--root] <device> -- <command...>",
 		Short:        "Run a command on a device over its WireGuard tunnel and pass its exit code through",
 		Long: `Run one command on a device (the robot's server computer) over its WireGuard tunnel and print
 its output. Not interactive: no terminal, ssh BatchMode, so it never waits for a password. The exit
@@ -22,13 +23,20 @@ own, not tnctl's). tnctl exits 1 when the device cannot be reached, also when ss
 
 The command goes after -- . Several words are passed as separate arguments (quoted for you);
 one word is a shell command line, so pipes and && work:
-  tnctl exec vision-station-01 -- sudo k3s kubectl get pods -A
+  tnctl exec vision-station-01 -- uname -a
   tnctl exec vision-station-01 -- 'df -h / | tail -1'
 
-The login user has passwordless sudo. The robot's k3s is 'sudo k3s kubectl'.`,
+The command runs as the device's login user. --root runs it as root (with sh, through sudo); the
+robot's k3s needs that: 'tnctl exec --root <device> -- k3s kubectl ...'. On most devices sudo asks
+for the login user's password. With --root tnctl answers with the password the platform holds for
+the login, on stdin of the ssh session only (never in a command line, the environment or a log),
+and sends it once: a password that sudo does not accept ends the command. A device whose login has
+passwordless sudo is not sent a password to check. Without --root there is no terminal for sudo to
+ask on, so 'tnctl exec <device> -- sudo ...' only works where sudo needs no password.`,
 		Example: `  tnctl exec vision-station-01 -- uname -a
-  tnctl exec vision-station-01 -- sudo k3s kubectl -n kube-system get helmcharts
-  tnctl exec vision-station-01 -- 'journalctl -u k3s -n 20 --no-pager'
+  tnctl exec --root vision-station-01 -- k3s kubectl -n kube-system get helmcharts
+  tnctl exec --root vision-station-01 -- 'journalctl -u k3s -n 20 --no-pager'
+  tnctl exec --root vision-station-01 -- k3s kubectl apply -f - < manifest.yaml
   tnctl --device vision-station-01 exec -- hostname`,
 		DisableFlagsInUseLine: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -83,7 +91,11 @@ The login user has passwordless sudo. The robot's k3s is 'sudo k3s kubectl'.`,
 				return classify(err)
 			}
 			defer ex.Close()
-			code, err := ex.Stream(ctx, line, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			run := ex.Stream
+			if asRoot {
+				run = ex.StreamRoot
+			}
+			code, err := run(ctx, line, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if err != nil {
 				if ctx.Err() == context.DeadlineExceeded {
 					return newErr(codeTimeout, "the command did not finish within %s", timeout)
@@ -100,6 +112,7 @@ The login user has passwordless sudo. The robot's k3s is 'sudo k3s kubectl'.`,
 		},
 	}
 	c.Flags().DurationVar(&timeout, "timeout", 0, "stop the command after this long (exit code 4); 0 means no limit")
+	c.Flags().BoolVar(&asRoot, "root", false, "run the command as root (sudo, with the platform's password for the device login when sudo asks for one)")
 	return c
 }
 
