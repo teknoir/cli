@@ -147,6 +147,22 @@ type fakeExec struct {
 	calls  []string
 	closed bool
 	stream func(line string) int
+	// password is the platform's password for the device login, as the session of a real shell
+	// holds it: what a root call would send as its first stdin line if sudo asks (rootFirstLine).
+	password string
+	// rootErr, when set, is what every root call answers: the login user does not get root.
+	rootErr error
+	// roots are the root calls, in order.
+	roots []rootCall
+}
+
+// rootCall is one RunRoot or StreamRoot: the script, the first stdin line (without its line
+// end), and the stdin that follows it.
+type rootCall struct {
+	script    string
+	firstLine string
+	payload   string
+	stream    bool
 }
 
 func (f *fakeExec) Run(_ context.Context, cmdline string) (execResult, error) {
@@ -163,6 +179,10 @@ func (f *fakeExec) Stream(_ context.Context, cmdline string, _ io.Reader, stdout
 	f.mu.Lock()
 	f.calls = append(f.calls, cmdline)
 	f.mu.Unlock()
+	return f.answer(cmdline, stdout, stderr)
+}
+
+func (f *fakeExec) answer(cmdline string, stdout, stderr io.Writer) (int, error) {
 	if f.run != nil {
 		r, err := f.run(cmdline)
 		if err != nil {
@@ -175,6 +195,44 @@ func (f *fakeExec) Stream(_ context.Context, cmdline string, _ io.Reader, stdout
 		return f.stream(cmdline), nil
 	}
 	return 0, nil
+}
+
+// root records a root call: what a device would get on stdin is the first line, then the payload.
+func (f *fakeExec) root(script string, stdin io.Reader, stream bool) error {
+	first, _, _ := rootFirstLine(f.password)
+	payload := ""
+	if stdin != nil {
+		b, _ := io.ReadAll(stdin)
+		payload = string(b)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, script)
+	f.roots = append(f.roots, rootCall{script: script, firstLine: strings.TrimSuffix(first, "\n"), payload: payload, stream: stream})
+	return f.rootErr
+}
+
+func (f *fakeExec) RunRoot(_ context.Context, script string) (execResult, error) {
+	if err := f.root(script, nil, false); err != nil {
+		return execResult{}, err
+	}
+	if f.run == nil {
+		return execResult{}, nil
+	}
+	return f.run(script)
+}
+
+func (f *fakeExec) StreamRoot(_ context.Context, script string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	if err := f.root(script, stdin, true); err != nil {
+		return 0, err
+	}
+	return f.answer(script, stdout, stderr)
+}
+
+func (f *fakeExec) rootList() []rootCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]rootCall{}, f.roots...)
 }
 
 func (f *fakeExec) Close() { f.closed = true }

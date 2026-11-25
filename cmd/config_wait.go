@@ -245,18 +245,17 @@ func (w *waiter) prepare(ctx context.Context, ids []string) error {
 		ex, err := w.shell(ctx)
 		if err == nil {
 			var res execResult
-			res, err = ex.Run(ctx, remoteShell(helmProbeScript(ns, name, ns, false)))
+			res, err = rootProbe(ctx, ex, helmProbeScript(ns, name, ns, false))
 			if err == nil {
-				snap := parseHelmSnapshot(res.Stdout)
-				if sudoProblem(snap.chartErr) {
-					return newErr(codeError, "cannot check the robot before the change: %s", sudoMessage(snap.chartErr))
-				}
-				w.baselines[id] = baselineFromSnapshot(snap)
+				w.baselines[id] = baselineFromSnapshot(parseHelmSnapshot(res.Stdout))
 			}
 		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
+			}
+			if isRootError(err) {
+				return newErr(codeError, "cannot check the robot before the change: %v%s", err, rootWaitHint(err))
 			}
 			return newErr(codeError, "cannot check the robot before the change (%v); --wait=%s needs WireGuard SSH to %s. Use --wait=published, or see: tnctl wg status %s", err, w.level, orDash(w.device), orDash(w.device))
 		}
@@ -353,6 +352,15 @@ func (w *waiter) pause(ctx context.Context) error {
 	return w.e.sleepFor(ctx, w.e.interval())
 }
 
+// rootWaitHint is what to do when --wait cannot become root on the robot: the change itself
+// does not need it.
+func rootWaitHint(err error) string {
+	if isRootError(err) {
+		return "; use --wait=published, which does not look at the robot itself"
+	}
+	return ""
+}
+
 // transient tolerates a few failed polls (network, 5xx) before giving up.
 type transient struct{ n int }
 
@@ -367,6 +375,11 @@ func (t *transient) fail(err error) error {
 		return err
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return err
+	}
+	// The login user does not get root on the device: waiting does not change that, and a
+	// rejected password must not be sent again.
+	if isRootError(err) {
 		return err
 	}
 	if t.n++; t.n > 5 {
@@ -506,7 +519,7 @@ func (w *waiter) waitDevice(ctx context.Context, info writeInfo) error {
 			res, err := w.checkOnce(ctx, ex, c)
 			if err != nil {
 				if ferr := tr.fail(err); ferr != nil {
-					return newErr(codeError, "cannot check the robot: %v", ferr)
+					return newErr(codeError, "cannot check the robot: %v%s", ferr, rootWaitHint(ferr))
 				}
 				w.progress(c.id, "retrying after "+err.Error())
 				remaining++
@@ -628,7 +641,7 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 	needReady := w.level == waitReady
 	now := w.e.clock()
 	if c.helm != nil {
-		res, err := ex.Run(ctx, remoteShell(helmProbeScript(c.ns, c.name, c.helm.targetNS, needReady)))
+		res, err := rootProbe(ctx, ex, helmProbeScript(c.ns, c.name, c.helm.targetNS, needReady))
 		if err != nil {
 			return checkResult{}, err
 		}
@@ -636,12 +649,12 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 		job := "helm-install-" + c.name
 		r := evalHelmApplied(*c.helm, w.baselines[c.id], snap, job)
 		if r.state == checkUnhealthy {
-			if lr, err := ex.Run(ctx, remoteShell(helmJobLogScript(c.ns, c.name))); err == nil && strings.TrimSpace(lr.Stdout) != "" {
+			if lr, err := ex.RunRoot(ctx, helmJobLogScript(c.ns, c.name)); err == nil && strings.TrimSpace(lr.Stdout) != "" {
 				r.msg += "; last log lines:\n" + indent(strings.TrimSpace(lr.Stdout), "    ")
 			}
 		}
 		if r.state == checkDone && c.added {
-			rr, err := ex.Run(ctx, remoteShell(releaseProbeScript(c.helm.targetNS, c.name)))
+			rr, err := rootProbe(ctx, ex, releaseProbeScript(c.helm.targetNS, c.name))
 			if err != nil {
 				return checkResult{}, err
 			}
@@ -660,15 +673,12 @@ func (w *waiter) checkOnce(ctx context.Context, ex deviceExec, c *devCheck) (che
 		return w.readiness(&c.stab, now, evalPodsReady(wls, snap.pods, c.helm.wantImage)), nil
 	}
 
-	res, err := ex.Run(ctx, remoteShell(workloadProbeScript(c.kind, c.ns, c.name)))
+	res, err := rootProbe(ctx, ex, workloadProbeScript(c.kind, c.ns, c.name))
 	if err != nil {
 		return checkResult{}, err
 	}
 	secs := parseSections(res.Stdout)
 	o, errText := parseObj(secs["obj"])
-	if o == nil && sudoProblem(errText) {
-		return checkResult{checkFatal, sudoMessage(errText)}, nil
-	}
 	if o == nil && errText != "" {
 		return pending("cannot read %s on the device: %s", c.kind, errText), nil
 	}

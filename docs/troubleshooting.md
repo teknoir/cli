@@ -109,6 +109,72 @@ including resolved URLs and the exact `ssh` invocation used.
     - Re-run with `--debug` to see the full `ssh` command and any `ncat`/proxy errors.
     - Verify network access to `deadend-<namespace>.<domain>:2222`.
 
+??? failure "`sudo: a password is required` from `tnctl exec <device> -- sudo ...`"
+    `exec` has no terminal, so sudo cannot ask, and on most devices sudo asks for the login user's password.
+    Use `--root`: `tnctl exec --root <device> -- k3s kubectl get pods -A`. When sudo asks, `tnctl` then answers
+    with the password the platform holds for the device login. See [`exec`](commands/exec.md#running-as-root).
+
+??? failure "`sudo on <device> did not accept the platform's password for the device login`"
+    From `exec --root`, `logs` or `--wait=applied|ready`. The password on the device is not the one the
+    platform has: it was changed on the device, or changed on the platform after the device was bootstrapped
+    (a virtual device is not re-bootstrapped when its password changes). `tnctl` sent it in one command and
+    stopped. Set the password on the platform to the device's, or bootstrap the device again; until then
+    `tnctl ssh` and typing the password works, and `--wait=published` does not need the robot.
+
+    When the message says `or the login is locked after failed attempts`, sudo refused the password and
+    PAM's password helper had not said whether it is right (the device has no helper, or it could not
+    tell), so the password may also be right and the login locked (next entry).
+
+    **Do not run the command again and again.** On a device with PAM's helper (Debian, Ubuntu) the wrong
+    password itself is never given to sudo. But on a device with sudo 1.9.9 (Ubuntu 22.04) that locks
+    accounts (`pam_faillock`), every `tnctl` run that sudo does not accept a password from is one failed
+    login, and the third locks the login: then the right password is refused as well, yours in `tnctl ssh`
+    included, until the lock ends. Without the helper one run with a wrong password is 2 failed logins (3
+    with sudo 1.9.9: locked at once). See
+    [Failed logins and `pam_faillock`](commands/exec.md#failed-logins-and-pam_faillock) for the numbers.
+
+??? failure "`sudo on <device> refused the device login although the platform's password for it is right`"
+    The password is the device's, and sudo still refused it: the login is locked after failed attempts
+    (`pam_faillock`; by default for 10 minutes after 3 failed logins within 15), or it has expired. Wait for
+    the lock to end, or clear it on the device (`faillock --user <login> --reset` as root). Running `tnctl`
+    during the lock adds nothing to it.
+
+    The lock stops the login's password only: sudo with it, from `tnctl` and typed by hand. The ssh key
+    still gets in (`tnctl ssh`, `tnctl exec` without `--root`), and the device stays connected to the
+    platform (MQTT, the TOE and WireGuard do not use the login).
+
+    If nobody mistyped the password: a device with sudo 1.9.9 (Ubuntu 22.04) and `pam_faillock` counts
+    every `tnctl` run that sudo does not accept a password from as a failed login. Three runs while the
+    platform had a wrong password or none lock the login, and so do three runs with the right password
+    that start at the same moment (run them one after the other). See
+    [Failed logins and `pam_faillock`](commands/exec.md#failed-logins-and-pam_faillock).
+
+??? failure "`sudo on <device> asks for the password of root, not for the device login's`"
+    The device's sudoers were changed by hand to `targetpw`, `rootpw` or `runaspw`: sudo wants root's
+    password, and the platform only has the login's. `tnctl` cannot run root commands there. Use `tnctl ssh`
+    and type root's password, or take the option out of the device's sudoers. `tnctl` offered the login's
+    password to sudo once before sudo's prompt said whose it wants; where the device counts failed logins
+    that is 2 against root (3 with sudo 1.9.9, 1 with sudo-rs), none against the login.
+
+??? failure "`cannot reach <device> over WireGuard: ...` from `exec --root`, `logs` or `--wait`"
+    ssh ended before the command started on the device: no connection, or the proxy that carries it gave
+    up. What follows the colon is what ssh or the proxy said, for example `Your tnctl login has expired.
+    Run: tnctl login`. This is not sudo's answer, and `tnctl` remembers nothing of it; fix what the line
+    says and run the command again.
+
+??? failure "`sudo on <device> asks for a password, and the platform has none for the device login`"
+    The login has neither passwordless sudo (the bootstrap sets that up for a login without a password) nor
+    a password on the platform. Bootstrap the device again with the current scripts, or give the login a
+    password on the platform and on the device. Nothing is sent to sudo, but do not repeat the command on
+    a device with sudo 1.9.9 (Ubuntu 22.04) that locks accounts: there every such run is one failed login,
+    and the third locks the login
+    ([Failed logins and `pam_faillock`](commands/exec.md#failed-logins-and-pam_faillock)).
+
+??? failure "`sudo on <device> only works on a terminal`, `the sudoers on <device> do not let the device login user run sh as root`"
+    The device's sudoers were changed by hand: `requiretty`, or rules that allow the login single commands
+    only. `tnctl` runs every root command as `sh -c` and has no terminal. Use `tnctl ssh`, or give the login
+    the bootstrap's sudo rule back. See [`exec`](commands/exec.md#running-as-root) for every message.
+
 ## Bootstrapping & k3s
 
 ??? failure "k3s never becomes Ready: `Failed to validate connection to cluster ... CA cert validation failed ... x509: certificate signed by unknown authority`"

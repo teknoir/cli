@@ -26,14 +26,15 @@ func newLogsCmd(e *cliEnv) *cobra.Command {
 	c := &cobra.Command{
 		SilenceUsage: true,
 		Use:          "logs <target> <resource|pod> [-c container] [-f] [--tail N]",
-		Short:        "Show the logs of a workload on a robot (sudo k3s kubectl logs over WireGuard)",
+		Short:        "Show the logs of a workload on a robot (k3s kubectl logs as root, over WireGuard)",
 		Long: `Show the logs of a workload on a robot. <resource> is a Deployment, StatefulSet, DaemonSet, Job
 or Pod of the robot's configuration (Kind/namespace/name, Kind/name or a unique name), or a HelmChart:
 then the logs of the release's workload. Anything that is not in the configuration is taken as the
 name of a pod on the robot.
 
 The last 200 lines are shown (--tail -1 for all). -f follows until you stop it. Needs the robot's
-WireGuard tunnel; the exit status is kubectl's.`,
+WireGuard tunnel; the exit status is kubectl's. kubectl runs as root through sudo; when sudo asks
+for the login user's password, tnctl answers with the one the platform holds (see: tnctl exec --help).`,
 		Example: `  tnctl logs vision-station-01 HelmChart/default/notebook --tail 50
   tnctl logs vision-station-01 Deployment/default/whoami -f
   tnctl logs vision-station-01 notebook-77f875b6c-45s8v -c notebook --previous`,
@@ -83,6 +84,9 @@ func (e *cliEnv) runLogs(cmd *cobra.Command, target, arg string, f *logsFlags) e
 
 	lt, err := resolveLogTarget(sctx, ex, view, arg)
 	if err != nil {
+		if isRootError(err) {
+			return classify(fmt.Errorf("cannot read the logs on %s: %w", view.Target.Device, err))
+		}
 		return err
 	}
 	line := kubectlOnDevice + " -n " + shq(lt.ns) + " logs " + shq(lt.ref)
@@ -102,7 +106,7 @@ func (e *cliEnv) runLogs(cmd *cobra.Command, target, arg string, f *logsFlags) e
 		line += " --since=" + shq(f.since)
 	}
 	line += " --tail=" + strconv.Itoa(f.tail)
-	code, err := ex.Stream(ctx, line, nil, cmd.OutOrStdout(), cmd.ErrOrStderr())
+	code, err := ex.StreamRoot(ctx, line, nil, cmd.OutOrStdout(), cmd.ErrOrStderr())
 	if err != nil {
 		return classify(fmt.Errorf("cannot read the logs on %s: %w", view.Target.Device, err))
 	}
@@ -149,7 +153,7 @@ func resolveLogTarget(ctx context.Context, ex deviceExec, view *api.ConfigTarget
 		}
 		return logTarget{}, newErr(codeNotFound, "no resource %q on this target", arg)
 	}
-	return podLogTarget(ctx, ex, arg)
+	return podLogTarget(ctx, ex, view.Target.Device, arg)
 }
 
 func helmLogTarget(ctx context.Context, ex deviceExec, view *api.ConfigTargetView, ns, name string) (logTarget, error) {
@@ -159,7 +163,7 @@ func helmLogTarget(ctx context.Context, ex deviceExec, view *api.ConfigTargetVie
 			targetNS = r.Chart.TargetNamespace
 		}
 	}
-	res, err := ex.Run(ctx, remoteShell(helmProbeScript(ns, name, targetNS, true)))
+	res, err := rootProbe(ctx, ex, helmProbeScript(ns, name, targetNS, true))
 	if err != nil {
 		return logTarget{}, err
 	}
@@ -178,8 +182,8 @@ func helmLogTarget(ctx context.Context, ex deviceExec, view *api.ConfigTargetVie
 	return logTarget{}, usageErr("the release %s has several workloads (%s): name one of them", name, strings.Join(names, ", "))
 }
 
-func podLogTarget(ctx context.Context, ex deviceExec, name string) (logTarget, error) {
-	res, err := ex.Run(ctx, remoteShell(kubectlOnDevice+" get pods -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name --no-headers 2>&1; true"))
+func podLogTarget(ctx context.Context, ex deviceExec, device, name string) (logTarget, error) {
+	res, err := rootProbe(ctx, ex, kubectlOnDevice+" get pods -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name --no-headers 2>&1; true")
 	if err != nil {
 		return logTarget{}, err
 	}

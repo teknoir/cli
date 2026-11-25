@@ -123,7 +123,7 @@ func TestParseSections(t *testing.T) {
 func TestProbeScriptsAreSafe(t *testing.T) {
 	s := helmProbeScript("kube-system", "notebook", "default", true)
 	for _, frag := range []string{
-		"sudo -n k3s kubectl -n kube-system get helmcharts.helm.cattle.io notebook -o json --ignore-not-found",
+		"; k3s kubectl -n kube-system get helmcharts.helm.cattle.io notebook -o json --ignore-not-found",
 		"get job helm-install-notebook",
 		"-n default get deployments,statefulsets,daemonsets -o json",
 		"-n default get pods -o json",
@@ -138,8 +138,14 @@ func TestProbeScriptsAreSafe(t *testing.T) {
 	if got := workloadProbeScript("Deployment", "default", "whoami"); !strings.Contains(got, "get deployment whoami -o json") {
 		t.Errorf("got %s", got)
 	}
-	if got := remoteShell("echo 'hi'"); got != `sh -c 'echo '\''hi'\'''` {
-		t.Errorf("remoteShell = %s", got)
+	// The probes run as root through deviceExec.RunRoot: no script calls sudo itself, so no sudo
+	// message can end up in a section, where it would be read as kubectl's answer.
+	for _, script := range []string{s, workloadProbeScript("Deployment", "default", "whoami"), helmJobLogScript("default", "n"),
+		releaseProbeScript("default", "n"), helmDeleteJobLogScript("default", "n"),
+		goneProbeScript(&goneItem{kind: "HelmChart", ns: "default", name: "n", targetNS: "default"})} {
+		if strings.Contains(script, "sudo") {
+			t.Errorf("a probe script must not call sudo:\n%s", script)
+		}
 	}
 }
 
@@ -170,7 +176,6 @@ func TestEvalHelmApplied(t *testing.T) {
 		{"new job failed twice: still retrying", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 0, 2)), checkPending, "failed 2 time"},
 		{"new job failed again and again", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 0, 3)), checkUnhealthy, "failed 3 time"},
 		{"job backoff limit used up", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobWithJSON("u2", 0, 1, true)), checkUnhealthy, "failed (1 attempt"},
-		{"sudo asks for a password", helmBaseline{}, snap("sudo: a password is required", ""), checkFatal, "passwordless sudo"},
 		{"retry then success", helmBaseline{present: true, sig: "old", jobUID: "u1"}, snap(chartJSON(want, "0.0.6"), jobJSON("u2", 1, 1)), checkDone, "succeeded"},
 		{"nothing changed on the device: the existing job counts", helmBaseline{present: true, sig: helmSig(parseHelmSnapshot(probeOutput(map[string]string{"chart": chartJSON(want, "0.0.6")})).chart), jobUID: "u1"},
 			snap(chartJSON(want, "0.0.6"), jobJSON("u1", 1, 0)), checkDone, "succeeded"},

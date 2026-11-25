@@ -195,12 +195,18 @@ func runSSHWireGuard(domain, ns, deviceName string, login *api.FleetDeviceCreden
 // runWithSignalForwarding runs cmd, forwarding SIGINT/SIGTERM/SIGHUP to it and
 // waiting for it, so the caller's deferred cleanup (the private key directory)
 // still runs when tnctl is terminated or its terminal closes.
-func runWithSignalForwarding(cmd *exec.Cmd) error {
+func runWithSignalForwarding(cmd *exec.Cmd) error { return runForwarding(cmd, nil) }
+
+// runForwarding is runWithSignalForwarding; started, when set, is called once cmd runs.
+func runForwarding(cmd *exec.Cmd, started func()) error {
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigs)
 	if err := cmd.Start(); err != nil {
 		return err
+	}
+	if started != nil {
+		started()
 	}
 	done := make(chan struct{})
 	go func() {

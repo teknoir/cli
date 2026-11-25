@@ -327,7 +327,7 @@ func TestConfigRemoveWaitAppliedStillThere(t *testing.T) {
 	if exitCodeOf(err) != codeTimeout {
 		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
 	}
-	for _, frag := range []string{"still on the robot after 20s", "the robot's agent did not delete it", "tnctl exec vision-station-01 -- sudo k3s kubectl -n default delete helmcharts.helm.cattle.io local-llm"} {
+	for _, frag := range []string{"still on the robot after 20s", "the robot's agent did not delete it", "tnctl exec --root vision-station-01 -- k3s kubectl -n default delete helmcharts.helm.cattle.io local-llm"} {
 		if !strings.Contains(err.Error(), frag) {
 			t.Errorf("error lacks %q: %v", frag, err)
 		}
@@ -365,13 +365,19 @@ func TestConfigRemoveWaitAppliedNeedsTheDeviceBeforeDeleting(t *testing.T) {
 	}
 }
 
+// sudo on the robot does not let the login user in: the wait ends at the first probe, with what to
+// do, and nothing is probed a second time.
 func TestConfigRemoveWaitAppliedSudo(t *testing.T) {
 	p := removeAppliedPlatform(t)
-	dev := &goneDevice{step: func(int) (string, string) { return "sudo: a password is required", "" }}
-	e, _ := testEnv(t, p, &fakeExec{run: dev.run})
+	dev := &goneDevice{step: func(int) (string, string) { return "", "" }}
+	ex := &fakeExec{run: dev.run, rootErr: &rootError{reason: rootNoPassword, device: "vision-station-01"}}
+	e, _ := testEnv(t, p, ex)
 	_, _, err := runCLI(t, e, "config", "remove", "vision-station-01", llmID, "--wait=applied")
-	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "passwordless sudo") {
+	if exitCodeOf(err) != codeError || !strings.Contains(err.Error(), "sudo on vision-station-01 asks for a password") || !strings.Contains(err.Error(), "--wait=published") {
 		t.Errorf("exit %d: %v", exitCodeOf(err), err)
+	}
+	if n := len(ex.rootList()); n != 1 {
+		t.Errorf("%d root calls, want 1: a refusal is final", n)
 	}
 }
 
@@ -392,7 +398,6 @@ func TestEvalGone(t *testing.T) {
 		{probe("", "secret/sh.helm.release.v1.local-llm.v3"), checkPending},
 		{probe("", "secret/sh.helm.release.v1.local-llm-2.v1"), checkDone},
 		{probe("", "error: Forbidden"), checkPending},
-		{probe("sudo: a password is required", ""), checkFatal},
 	} {
 		if r := evalGone(g, c.out); r.state != c.want {
 			t.Errorf("%q: state %d (%s), want %d", c.out, r.state, r.msg, c.want)

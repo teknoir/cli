@@ -294,12 +294,16 @@ Person-only tools, with the exact command. They all run over WireGuard and are r
 
 ```bash
 tnctl ssh <device>                                   # a shell on the robot
-tnctl exec <robot> -- sudo k3s kubectl get pods -A   # one command
+tnctl exec --root <robot> -- k3s kubectl get pods -A  # one command, as root (tnctl answers sudo's password prompt)
 tnctl logs <robot> <resource|pod> --tail 100         # live logs over the tunnel
 tnctl wg status <device>                             # is the tunnel up, and where it goes
 ```
 
 A bot has `tnctl inspect logs` instead of `tnctl logs`, and nothing instead of `ssh` and `exec`.
+
+When `exec --root`, `logs` or `--wait=applied|ready` says that sudo refused the device login or its
+password, do not run it again, and never start several of them at once on one robot: on a robot that
+locks accounts, each such run can count as a failed login, and the third locks the login's password.
 
 ## The triage script
 

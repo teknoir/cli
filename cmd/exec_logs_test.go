@@ -150,13 +150,17 @@ func TestLogsOfWorkloads(t *testing.T) {
 	if err != nil || out != "line1\nline2\n" {
 		t.Fatalf("%v %q", err, out)
 	}
-	if got := lastCall(ex); got != "sudo -n k3s kubectl -n default logs deployment/whoami --tail=200" {
+	if got := lastCall(ex); got != "k3s kubectl -n default logs deployment/whoami --tail=200" {
 		t.Errorf("got %s", got)
+	}
+	// as root, with the stream of the command: -f follows through the same path
+	if r := ex.rootList(); len(r) != 1 || !r[0].stream || r[0].script != lastCall(ex) || r[0].payload != "" {
+		t.Errorf("root calls %+v", r)
 	}
 	if _, _, err := runCLI(t, e, "logs", "vision-station-01", "whoami", "-c", "whoami", "-f", "--tail", "50", "--since", "10m", "--previous", "--all-containers"); err != nil {
 		t.Fatal(err)
 	}
-	if got := lastCall(ex); got != "sudo -n k3s kubectl -n default logs deployment/whoami -c whoami --all-containers -f --previous --since=10m --tail=50" {
+	if got := lastCall(ex); got != "k3s kubectl -n default logs deployment/whoami -c whoami --all-containers -f --previous --since=10m --tail=50" {
 		t.Errorf("flags: %s", got)
 	}
 	for _, args := range [][]string{
@@ -209,7 +213,7 @@ func TestLogsOfPods(t *testing.T) {
 	if _, _, err := runCLI(t, e, "logs", "vision-station-01", "notebook-77f875b6c-45s8v"); err != nil {
 		t.Fatal(err)
 	}
-	if got := lastCall(ex); !strings.HasPrefix(got, "sudo -n k3s kubectl -n default logs pod/notebook-77f875b6c-45s8v") {
+	if got := lastCall(ex); !strings.HasPrefix(got, "k3s kubectl -n default logs pod/notebook-77f875b6c-45s8v") {
 		t.Errorf("got %s", got)
 	}
 	// a unique prefix is enough

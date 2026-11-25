@@ -15,9 +15,10 @@ import (
 // over WireGuard SSH, and the functions that judge their output. The wait loop (config_wait.go)
 // runs them with a deviceExec; tests feed them canned output.
 
-// kubectlOnDevice is how the robot's k3s is reached: the login user has NOPASSWD sudo and the
-// kubeconfig is root-only. -n makes sudo fail instead of waiting for a password.
-const kubectlOnDevice = "sudo -n k3s kubectl"
+// kubectlOnDevice is how the robot's k3s is reached, as root: the kubeconfig is root-only. The
+// scripts that use it run through deviceExec.RunRoot or StreamRoot, which is where sudo (and the
+// login user's password, when sudo asks for it) comes in: see devexec_root.go.
+const kubectlOnDevice = "k3s kubectl"
 
 // readyStableFor is how long pods must stay Ready, with unchanged restart counts, for ready.
 const readyStableFor = 20 * time.Second
@@ -274,9 +275,6 @@ func normalizeYAML(v any) any {
 // evalHelmApplied judges whether helm-controller applied the expected HelmChart.
 func evalHelmApplied(exp expectedHelm, base helmBaseline, s helmSnapshot, jobName string) checkResult {
 	if s.chart == nil {
-		if sudoProblem(s.chartErr) {
-			return checkResult{checkFatal, sudoMessage(s.chartErr)}
-		}
 		if strings.Contains(s.chartErr, "doesn't have a resource type") || strings.Contains(s.chartErr, "the server could not find the requested resource") {
 			return checkResult{checkFatal, "the device has no HelmChart support (is this a k3s robot?)"}
 		}
@@ -338,16 +336,6 @@ func jobFailedCondition(job obj) bool {
 		}
 	}
 	return false
-}
-
-// sudoProblem reports whether kubectl output is sudo refusing to run: the device login has no
-// passwordless sudo, which no amount of waiting fixes.
-func sudoProblem(out string) bool {
-	return strings.HasPrefix(strings.TrimSpace(out), "sudo:")
-}
-
-func sudoMessage(out string) string {
-	return fmt.Sprintf("cannot read the robot's k3s: %s (the device login needs passwordless sudo; use --wait=published)", firstNonEmptyLine(out))
 }
 
 // ---------- secrets ----------
